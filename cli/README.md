@@ -15,8 +15,11 @@
 | `keyref list` | 名称、描述、`ref`、掩码。没有明文 |
 | `keyref get <ref>` | 单条的同样视图 |
 | `keyref exec -- ...` | 把秘密注入子进程，脱敏 stdout/stderr |
+| `keyref server` | 查看或设置同步服务器的 URL |
 
 没有 `reveal`、`export` 或 `--print`。`get` 的 JSON 里不设 `value` 字段。
+
+默认服务器是官方托管。`keyref server set https://keys.example.com` 或环境变量 `KEYREF_SERVER` 指向自托管。配对二维码里带上这个 origin，手机在改服务器前会请人确认。两端的加密不因为服务器是谁在运行而不同。
 
 - 语言用 Rust，方便 `zeroize`、直接 `posix_spawn`，以及打出单个静态二进制。
 - 私钥进操作系统密钥环（macOS Keychain、Linux Secret Service）。解开后的条目密钥只放内存。

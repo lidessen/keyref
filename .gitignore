@@ -27,11 +27,9 @@ xcuserdata/
 cli/target/
 target/
 
-# Node / Cloudflare Workers
-node_modules/
-.wrangler/
-dist/
-*.tsbuildinfo
+# Go server
+server/keyref-server
+*.exe
 
 # Python
 __pycache__/

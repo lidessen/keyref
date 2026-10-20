@@ -20,7 +20,7 @@ Agent 写下的是稳定引用 `openai-prod`，不是密钥本身。`keyref` 在
 | [docs/design.md](docs/design.md) | 完整设计（中文） |
 | [ios/](ios/) | iOS 管理端，Swift / SwiftUI，尚未实现 |
 | [cli/](cli/) | Agent 用的 `keyref` CLI，Rust，尚未实现 |
-| [server/](server/) | 密文同步服务，Cloudflare Workers + D1，尚未实现 |
+| [server/](server/) | 密文同步服务，Go + SQLite，官方托管和自托管同一二进制，尚未实现 |
 
 本地现在没有可运行的服务。下一步是按 [docs/design.md](docs/design.md) 里的路线图做 Phase 0（手机上的本地保险库）。
 
@@ -29,6 +29,6 @@ Agent 写下的是稳定引用 `openai-prod`，不是密钥本身。`keyref` 在
 - 服务器只存密文。名称、描述、`ref` 和秘密值都在密文里。
 - 主密钥留在 iOS 的 Secure Enclave 保护之下。CLI 只拿到被授权条目的条目密钥，拿不到主密钥。
 - 占位符写成 `{{keyref:openai-prod}}`。更稳妥的注入方式是 `--env`、stdin 或额外的文件描述符，而不是把秘密放进进程参数。
-- 同步层用 Cloudflare Workers + D1。个人使用和早期内测大多在免费额度内；当作正式服务，按每月 5 美元的 Workers Paid 底价规划。
+- 同步层是一份 Go 服务器加嵌入式 SQLite。什么都不配置时，iOS 和 CLI 连官方托管；把服务器 URL 改成自己的地址就是自托管。托管按固定月租加硬配额来收费，避免免费用量把账单撑开。自托管免费。
 
 设计里的取舍、威胁模型和还没拍板的问题都写在 [docs/design.md](docs/design.md)。
