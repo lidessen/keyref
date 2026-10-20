@@ -1,0 +1,49 @@
+# macOS / editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# secrets and local env — never commit key material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.dev.vars
+
+# Swift / Xcode
+.build/
+DerivedData/
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Rust
+cli/target/
+target/
+
+# Node / Cloudflare Workers
+node_modules/
+.wrangler/
+dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# local vault or dev cache
+.cache/
+*.sqlite
+*.sqlite-journal
+
+# logs and crash dumps may contain redaction bugs
+*.log
+core
+core.*
