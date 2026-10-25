@@ -88,6 +88,8 @@ public final class ApprovalsStore {
     public var toast: String?
 
     private var pollTask: Task<Void, Never>?
+    /// 推送触发的进行中刷新（triggerRefresh 的互斥防抖句柄，§13）。
+    private var immediateRefreshTask: Task<Void, Never>?
 
     public init(backend: any AppBackend, haptics: any Haptics) {
         self.backend = backend
@@ -110,10 +112,38 @@ public final class ApprovalsStore {
         }
     }
 
-    private func pollLoop() async {
+    private func pollLoop(initialDelay: Duration = .zero) async {
+        if initialDelay > .zero {
+            try? await Task.sleep(for: initialDelay)
+            if Task.isCancelled { return }
+        }
         while !Task.isCancelled {
             await refresh()
             try? await Task.sleep(for: Self.pollInterval)
+        }
+    }
+
+    // MARK: push-triggered immediate refresh (Phase 2, §13)
+
+    /// APNs 审批推送到达时的立即刷新，与既有 3 秒轮询互斥防抖：
+    /// - 并发触发合并为一次（进行中的刷新不叠加，后来者等它完成）；
+    /// - 刷新期间挂起轮询周期，刷新完成后把节拍重置为本次刷新（下一个
+    ///   3 秒周期从这里起算）——不会出现「推送刷新 + 轮询刷新」背靠背。
+    /// 未激活（轮询没开）时也照常立即刷新；不改变 setActive 的语义。
+    public func triggerRefresh() async {
+        if let inFlight = immediateRefreshTask {
+            await inFlight.value   // 防抖：进行中的刷新不叠加
+            return
+        }
+        pollTask?.cancel()         // 与轮询互斥：挂起既有周期
+        let task = Task { [weak self] in _ = await self?.refresh() }
+        immediateRefreshTask = task
+        _ = await task.value
+        immediateRefreshTask = nil
+        if active {
+            pollTask = Task { [weak self] in
+                await self?.pollLoop(initialDelay: Self.pollInterval)
+            }
         }
     }
 

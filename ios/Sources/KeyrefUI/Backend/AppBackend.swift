@@ -145,6 +145,13 @@ public protocol AppBackend: AnyObject {
     /// 新手机：parses the handoff, unwraps the VMK (AEAD tag = verdict),
     /// persists local state, starts a session and bootstraps from cursor 0.
     func adoptSecondDevice(handoffPayload: String) async throws
+
+    // MARK: push (Phase 2, §13)
+
+    /// 上传本机 APNs token（PUT /v1/devices/push-token）。true = 服务器已
+    /// 确认（204）；false = 当前无有效会话或上传失败——注册状态机在下次
+    /// 解锁后重试，前台轮询兜底不受影响（失败静默，§13）。
+    func putPushToken(token: String, env: String) async -> Bool
 }
 
 /// A freshly created vault, before upload. The recovery code is displayed

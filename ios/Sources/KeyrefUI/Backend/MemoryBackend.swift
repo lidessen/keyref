@@ -55,6 +55,12 @@ public final class MemoryBackend: AppBackend {
     public var nextHandoffPayload: String?
     /// 新手机端回执的 vault 覆盖（测试里模拟「旧手机给的 vault」）。
     public var adoptOverridesVaultID: String?
+    // APNs 响应测试接缝（Phase 2, §13）：token 上传记录与结果、待审批
+    // 加载的人工延迟与计数（triggerRefresh 互斥防抖断言用）。
+    public var pushTokenUploads: [(token: String, env: String)] = []
+    public var putPushTokenResult = true
+    public var approvalsLoadDelay: Duration?
+    public private(set) var approvalLoadCount = 0
 
     public init(origin: URL = URL(string: "https://sync.keyref.app")!) {
         self.origin = origin
@@ -348,13 +354,24 @@ public final class MemoryBackend: AppBackend {
     // MARK: approvals (§8.3)
 
     public func loadPendingApprovals() async -> [ApprovalInboxEntry] {
-        approvalEntries
+        approvalLoadCount += 1
+        if let approvalsLoadDelay {
+            try? await Task.sleep(for: approvalsLoadDelay)
+        }
+        return approvalEntries
     }
 
     public func decideApproval(approvalID: String, approve: Bool) async throws {
         if let decideApprovalError { throw decideApprovalError }
         approvalDecisions.append((approvalID, approve))
         approvalEntries.removeAll { $0.approvalID == approvalID }
+    }
+
+    // MARK: push (Phase 2, §13)
+
+    public func putPushToken(token: String, env: String) async -> Bool {
+        pushTokenUploads.append((token, env))
+        return putPushTokenResult
     }
 
     // MARK: second iPhone (§9.4 path 2)

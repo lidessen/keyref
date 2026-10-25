@@ -1220,4 +1220,18 @@ public final class LiveBackend: AppBackend {
         let engine = SyncEngine(api: api)
         _ = try? await engine.run(store: stateStore)
     }
+
+    // MARK: - push (Phase 2, §13)
+
+    public func putPushToken(token: String, env: String) async -> Bool {
+        // 仅会话有效时上传；否则静默跳过——注册状态机在下次解锁后重试。
+        guard sessionBox.get() != nil else { return false }
+        do {
+            try await api.putPushToken(token: token, env: env)
+            return true
+        } catch {
+            // 静默失败（会话过期 / 网络 / 限流）：轮询兜底照常，下次注册重试。
+            return false
+        }
+    }
 }

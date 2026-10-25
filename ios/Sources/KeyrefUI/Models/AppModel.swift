@@ -49,12 +49,18 @@ public final class AppModel {
     public let settings: SettingsStore
     /// 审批收件箱（Phase 2, §8.3）：前台轮询 + 待审批角标。
     public let approvals: ApprovalsStore
+    /// APNs 注册状态机（Phase 2, §13）：解锁且已配对后注册；推送响应经
+    /// AppDelegate 汇聚到 handleApprovalPush。App 注入真机驱动；测试/预览
+    /// 注入 fake 或 nil（不注册，轮询兜底）。
+    public let push: PushRegistrationStore
 
     public init(backend: any AppBackend,
                 authenticator: any BiometricAuthenticator,
                 haptics: any Haptics = NoHaptics(),
                 clipboard: any Clipboard = NoClipboard(),
                 systemOpener: any SystemOpener = NoSystemOpener(),
+                pushDriver: (any PushRegistrationDriver)? = nil,
+                pushEnv: String = "sandbox",
                 autoLock: AutoLockInterval = .oneMinute) {
         self.backend = backend
         self.authenticator = authenticator
@@ -66,6 +72,7 @@ public final class AppModel {
         self.audit = AuditStore(backend: backend, haptics: haptics)
         self.settings = SettingsStore(backend: backend, haptics: haptics, autoLock: autoLock)
         self.approvals = ApprovalsStore(backend: backend, haptics: haptics)
+        self.push = PushRegistrationStore(backend: backend, driver: pushDriver, env: pushEnv)
     }
 
     /// Boots the app: reads local state and picks the entry face.
@@ -113,6 +120,11 @@ public final class AppModel {
                 await items.syncNow()
                 // 解锁后开始前台审批轮询（§8.3；只在 App 活跃时进行）。
                 approvals.setActive(true)
+                // APNs：解锁且已配对后注册（§13）；未配对不注册，失败静默，
+                // 前台轮询兜底不受影响。
+                await push.unlockDidComplete(paired: backend.hasVault)
+                // 冷启动 tap 的挂起推送：解锁后立即消费（刷新待审批）。
+                await consumePendingPushRefresh()
             } catch LockError.wrapInvalid {
                 lockDisplay = .wrapInvalid
             } catch {
@@ -187,9 +199,37 @@ public final class AppModel {
             await refreshAfterUnlock()
             await items.syncNow()
             approvals.setActive(true)
+            // APNs：配对完成后的首次解锁（创建 / 恢复 / 加入完成的当下，
+            // 不在欢迎页弹权限，§13）。
+            await push.unlockDidComplete(paired: backend.hasVault)
+            await consumePendingPushRefresh()
         } else {
             phase = .locked
             lockDisplay = .waiting
         }
+    }
+
+    // MARK: APNs 推送响应（Phase 2, §13）
+
+    /// 推送 tap 冷/热启动时暂存的 approval_id（解锁后立即消费）。
+    public private(set) var pendingPushApprovalID: String?
+
+    /// 审批推送到达的汇聚点（前台 willPresent 与后台 tap 的 AppDelegate
+    /// 回调都走这里；契约 payload = {"aps":{...},"approval_id":"<id>"}）。
+    /// 已解锁：立即触发待审批刷新（与 3 秒轮询互斥防抖）；未解锁：先暂存
+    /// approval_id，解锁后立即刷新——轮询兜底路径不受影响。
+    public func handleApprovalPush(approvalID: String?) async {
+        if let approvalID, !approvalID.isEmpty {
+            pendingPushApprovalID = approvalID
+        }
+        guard phase == .unlocked else { return }
+        await consumePendingPushRefresh()
+    }
+
+    /// 消费挂起的推送刷新：清掉暂存并立即刷新待审批。
+    private func consumePendingPushRefresh() async {
+        guard pendingPushApprovalID != nil else { return }
+        pendingPushApprovalID = nil
+        await approvals.triggerRefresh()
     }
 }
