@@ -1,0 +1,28 @@
+# Self-hosted keyref-server for local testing (design §10.4). This is the
+# same image the hosted deployment runs; without KEYREF_ENFORCE_QUOTAS it
+# runs unlimited, as a self-hosted server should.
+#
+#   docker compose -f docker-compose.yml up -d --build
+#   docker compose -f docker-compose.yml down   # data survives in the volume
+#
+# CLI against it:  KEYREF_SERVER=http://127.0.0.1:8080 keyref pair
+services:
+  keyref-server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: keyref-server:dev
+    ports:
+      - "8080:8080"
+    environment:
+      # The default listen address is loopback-only, which a port mapping
+      # cannot reach; bind all interfaces inside the container.
+      KEYREF_LISTEN: 0.0.0.0:8080
+      # For a public deployment instead: set KEYREF_DOMAIN and
+      # KEYREF_ACME_EMAIL, map 80/443, and point clients at your origin.
+    volumes:
+      - keyref-data:/data
+    restart: unless-stopped
+
+volumes:
+  keyref-data:
