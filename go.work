@@ -1,0 +1,8 @@
+go 1.26.0
+
+use (
+	./cli
+	./proto
+	./server
+	./tools/vectordump
+)

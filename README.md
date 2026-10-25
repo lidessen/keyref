@@ -13,16 +13,31 @@ Agent 写下的是稳定引用 `openai-prod`，不是密钥本身。`keyref` 在
 
 ## 仓库里有什么
 
-这是设计阶段。三个组件都还没有代码，只有目录和说明。
-
 | 路径 | 内容 |
 | --- | --- |
 | [docs/design.md](docs/design.md) | 完整设计（中文） |
+| [docs/protocol.md](docs/protocol.md) | 线协议契约：端点、请求/响应示例、签名誊本字节格式 |
+| [server/](server/) | 密文同步服务，Go + SQLite，官方托管和自托管同一二进制 |
+| [cli/](cli/) | Agent 用的 `keyref` CLI，Go（v0.4 起与服务器同语言） |
 | [ios/](ios/) | iOS 管理端，Swift / SwiftUI，尚未实现 |
-| [cli/](cli/) | Agent 用的 `keyref` CLI，Rust，尚未实现 |
-| [server/](server/) | 密文同步服务，Go + SQLite，官方托管和自托管同一二进制，尚未实现 |
+| [scripts/](scripts/) | 本地开发脚本：安装 CLI、起开发服务器、docker compose |
 
-本地现在没有可运行的服务。下一步是按 [docs/design.md](docs/design.md) 里的路线图做 Phase 0（手机上的本地保险库）。
+非 iOS 部分已实现并通过两侧 `go test`（CLI 含端到端测试，对着真实拉起的服务器走通建库、配对、同步、exec）。
+
+## 本地开发
+
+```bash
+# 1. 起服务器（开发模式：plain HTTP、无配额），默认 127.0.0.1:8080
+scripts/run-server.sh
+
+# 2. 安装 CLI 到 PATH（默认 /usr/local/bin，可用 KEYREF_BIN_DIR 覆盖）
+scripts/install-cli.sh
+
+# 3. 或者用 docker compose 跑同一个服务器镜像
+scripts/docker-up.sh      # 构建镜像并启动；scripts/docker-down.sh 停止
+```
+
+CLI 指向本地服务器：`KEYREF_SERVER=http://127.0.0.1:8080 keyref pair`。
 
 ## 已经定下的几件事
 
