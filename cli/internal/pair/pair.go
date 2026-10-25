@@ -34,6 +34,9 @@ const (
 	KVLastSync        = "last_sync_at"
 )
 
+// syncCursorKV is the sync cursor key stored by the syncing package.
+const syncCursorKV = "cursor"
+
 // Options controls one pairing run.
 type Options struct {
 	Name         string        // proposed device label (≤32 bytes)
@@ -177,6 +180,26 @@ func complete(st *store.Store, cl *client.Client, id *device.Identity, opts Opti
 	}
 
 	// Persist: ids, pinned owner key, directory, initial grants.
+	// A pairing can be into a NEW vault (e.g. re-pairing after a
+	// recovery takeover, design §8.5): the previous vault's session
+	// token, cached grants and sync cursor must not leak into it
+	// (§6.5 local cleanup) — a stale token would authenticate this CLI
+	// against the old vault and poison every later check.
+	if err := st.DeleteKV(session.KVToken); err != nil {
+		return err
+	}
+	if err := st.DeleteKV(session.KVExpiresAt); err != nil {
+		return err
+	}
+	if err := st.DeleteKV(syncCursorKV); err != nil {
+		return err
+	}
+	if err := st.ClearGrants(); err != nil {
+		return err
+	}
+	if err := st.ClearItems(); err != nil {
+		return err
+	}
 	kvs := []struct {
 		k string
 		v []byte

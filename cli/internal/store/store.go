@@ -217,6 +217,26 @@ func (s *Store) DeleteGrant(itemID, kind string) error {
 	return nil
 }
 
+// ClearGrants removes every cached grant row — the local effect of a
+// fresh pairing that may point at a new vault (design.md §8.5
+// re-pairing; §6.5 local cleanup).
+func (s *Store) ClearGrants() error {
+	if _, err := s.db.Exec(`DELETE FROM grants`); err != nil {
+		return fmt.Errorf("store: clear grants: %w", err)
+	}
+	return nil
+}
+
+// ClearItems removes every cached item row — same re-pairing rationale
+// as ClearGrants: rows of a previous vault must never survive into the
+// new one (equal revisions would shadow the new ciphertext).
+func (s *Store) ClearItems() error {
+	if _, err := s.db.Exec(`DELETE FROM items`); err != nil {
+		return fmt.Errorf("store: clear items: %w", err)
+	}
+	return nil
+}
+
 // Grants returns all cached grant rows.
 func (s *Store) Grants() ([]wire.GrantData, error) {
 	rows, err := s.db.Query(
@@ -259,6 +279,16 @@ func (s *Store) GetKV(key string) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("store: get kv: %w", err)
 	}
 	return v, true, nil
+}
+
+// DeleteKV removes a kv row. Clearing state (session token, cursor)
+// must go through this — SetKV with a nil value violates the NOT NULL
+// constraint of the v column.
+func (s *Store) DeleteKV(key string) error {
+	if _, err := s.db.Exec(`DELETE FROM kv WHERE k = ?`, key); err != nil {
+		return fmt.Errorf("store: delete kv: %w", err)
+	}
+	return nil
 }
 
 func boolToInt(b bool) int {

@@ -1088,9 +1088,11 @@ func (s *Store) CompletePairing(ctx context.Context, device *Device, grants []Gr
 // storage accounting (design §10.5: item, audit and pending-approval
 // ciphertext bytes)
 
-// VaultStorageBytes sums the metered ciphertext bytes of a vault.
+// VaultStorageBytes sums the metered ciphertext bytes of a vault: item
+// ciphertexts, audit ciphertexts and PENDING approval request
+// ciphertexts (design §10.5: all three count against the quota).
 func (s *Store) VaultStorageBytes(ctx context.Context, vaultID string) (int64, error) {
-	var itemBytes, auditBytes int64
+	itemBytes, auditBytes, approvalBytes := int64(0), int64(0), int64(0)
 	if err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(length(meta_ciphertext) + length(secret_ciphertext) +
 length(vault_wrapped_meta_key) + length(vault_wrapped_item_key)), 0)
@@ -1102,7 +1104,11 @@ FROM items WHERE vault_id = ?`, vaultID).Scan(&itemBytes); err != nil {
 		vaultID).Scan(&auditBytes); err != nil {
 		return 0, fmt.Errorf("store: audit bytes: %w", err)
 	}
-	return itemBytes + auditBytes, nil
+	approvalBytes, err := s.PendingApprovalBytes(ctx, vaultID)
+	if err != nil {
+		return 0, err
+	}
+	return itemBytes + auditBytes + approvalBytes, nil
 }
 
 // HealthzWriteProbe verifies the database accepts writes by rewriting the

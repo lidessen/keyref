@@ -158,6 +158,8 @@ func (s *Server) handleSyncBootstrap(w http.ResponseWriter, r *http.Request, ac 
 	// Items. Tombstone rows are always fetched: non-owner devices
 	// receive the tombstones of items they held grants for (design
 	// §10.6), which live in tombstone rows.
+	// Note: for CLI devices the secret ciphertext follows ANY grant
+	// (itemWireData) — the approval flow needs it with a view grant.
 	items, err := s.st.ListItemsByVault(r.Context(), ac.vault.ID, true)
 	if err != nil {
 		writeError(w, "internal")
@@ -180,6 +182,19 @@ func (s *Server) handleSyncBootstrap(w http.ResponseWriter, r *http.Request, ac 
 		visible := activeGrantItem[it.ItemID] || (it.Tombstone && anyGrantItem[it.ItemID])
 		if visible {
 			addChange(wire.EntityItem, "item:"+it.ItemID, s.cliItemData(r, ac, it))
+		}
+	}
+
+	// Approvals (§8.1 bootstrap: "相关审批状态"): the owner sees the
+	// vault's queue, a CLI sees the approvals it initiated.
+	approvals, err := s.st.ListApprovals(r.Context(), ac.vault.ID, "")
+	if err == nil {
+		for i := range approvals {
+			a := &approvals[i]
+			if !isOwner && a.CLIDeviceID != ac.device.ID {
+				continue
+			}
+			addChange(wire.EntityApproval, "approval:"+a.ID, approvalWireData(a))
 		}
 	}
 
@@ -316,8 +331,25 @@ func (s *Server) renderChange(r *http.Request, ac *authCtx, row store.ChangeRow)
 			CreatedAt: dev.CreatedAt, RevokedAt: revokedAt,
 		}), true
 
+	case wire.EntityApproval:
+		if len(parts) != 1 {
+			return wire.SyncChange{}, false
+		}
+		a, err := s.st.GetApproval(r.Context(), ac.vault.ID, parts[0])
+		if errors.Is(err, store.ErrNotFound) {
+			return wire.SyncChange{}, false
+		} else if err != nil {
+			return wire.SyncChange{}, false
+		}
+		// Approval state is visible to the owner and to the CLI that
+		// initiated the request (design §10.6: "与自己相关的审批").
+		if !isOwner && a.CLIDeviceID != ac.device.ID {
+			return wire.SyncChange{}, false
+		}
+		return s.change(row, approvalWireData(a)), true
+
 	default:
-		// Approvals are Phase 2; nothing else exists in the log.
+		// Nothing else exists in the log.
 		return wire.SyncChange{}, false
 	}
 }

@@ -200,3 +200,24 @@ func (c *Client) PostAudit(ciphertext []byte) error {
 	var out wire.AuditResponse
 	return c.do(http.MethodPost, "/v1/audit", nil, &body, &out)
 }
+
+// ApprovalCreate submits one encrypted approval request (§6.19).
+func (c *Client) ApprovalCreate(req *wire.ApprovalCreateRequest) (*wire.ApprovalCreateResponse, error) {
+	var out wire.ApprovalCreateResponse
+	if err := c.do(http.MethodPost, "/v1/approvals", nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ApprovalPoll polls one approval (§6.22). Callers must keep an interval
+// of at least 2 seconds between polls (the server rejects faster polls
+// with 429 rate_limited and does not count polls against the daily
+// quota, design §8.3).
+func (c *Client) ApprovalPoll(approvalID string) (*wire.ApprovalPollResponse, error) {
+	var out wire.ApprovalPollResponse
+	if err := c.do(http.MethodGet, "/v1/approvals/"+approvalID, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

@@ -38,9 +38,8 @@ import (
 const fxSecret = "sk-E2E-PLAINTEXT-FIXTURE-do-not-leak-0123456789"
 
 const (
-	ownerDeviceID = "99998888777766665555444433332222"
-	itemOpenAI    = "deadbeefdeadbeefdeadbeefdeadbeef"
-	cliLabel      = "build-agent-1"
+	itemOpenAI = "deadbeefdeadbeefdeadbeefdeadbeef"
+	cliLabel   = "build-agent-1"
 )
 
 var (
@@ -149,6 +148,7 @@ func waitHealthy(origin string, timeout time.Duration) error {
 
 type owner struct {
 	vaultID     string
+	deviceID    string // this vault's owner device id (devices PK is global)
 	signPriv    *ecdsa.PrivateKey
 	signPub     []byte
 	hpkePriv    []byte
@@ -157,13 +157,19 @@ type owner struct {
 	itemKeys    map[string][]byte
 	metaKeys    map[string][]byte
 	cliDeviceID string // assigned at pair completion
-	hc          *http.Client
+	cliHPKE     []byte // CLI HPKE public key, from the QR payload
+	cliSign     []byte // CLI Ed25519 public key, from the QR payload
+	// lastApprovalID is set by the approval responder for follow-up
+	// assertions (consumed status, polling floor).
+	lastApprovalID string
+	hc             *http.Client
 }
 
 func newOwner(t *testing.T, vaultID string) *owner {
 	t.Helper()
 	o := &owner{
 		vaultID:  vaultID,
+		deviceID: newID(t),
 		itemKeys: map[string][]byte{},
 		metaKeys: map[string][]byte{},
 		hc:       &http.Client{Timeout: 10 * time.Second},
@@ -216,6 +222,8 @@ func (o *owner) do(t *testing.T, method, path string, body any, out any) *http.R
 	}
 	raw, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	// Re-arm the body so callers can include it in failure messages.
+	resp.Body = io.NopCloser(bytes.NewReader(raw))
 	if out != nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, out); err != nil {
 			t.Fatalf("%s %s: decode %s: %v", method, path, raw, err)
@@ -252,7 +260,7 @@ func (o *owner) createVault(t *testing.T) {
 	dir, err := wire.BuildDirectoryTranscript(wire.DirectoryTranscript{
 		VaultID: o.vaultID, DirectoryRevision: 1,
 		Devices: []wire.DirectoryDevice{{
-			DeviceID: ownerDeviceID, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
+			DeviceID: o.deviceID, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
 			HPKEKEM: wire.KEMP256, HPKEPublicKey: o.hpkePub,
 			SignAlg: wire.SignAlgECDSAP256, SignPublicKey: o.signPub,
 			GrantsDigest: wire.EmptyGrantsDigest(),
@@ -264,7 +272,7 @@ func (o *owner) createVault(t *testing.T) {
 	req := wire.CreateVaultRequest{
 		VaultID: o.vaultID,
 		Device: wire.DeviceInput{
-			DeviceID: ownerDeviceID, Kind: wire.DeviceKindIOS,
+			DeviceID: o.deviceID, Kind: wire.DeviceKindIOS,
 			HPKEKEM: wire.KEMP256, HPKEPublicKey: o.hpkePub,
 			SignAlg: wire.SignAlgECDSAP256, SignPublicKey: o.signPub,
 			Label: "iPhone",
@@ -278,7 +286,8 @@ func (o *owner) createVault(t *testing.T) {
 	}
 	var out wire.CreateVaultResponse
 	if resp := o.do(t, "POST", "/v1/vaults", req, &out); resp.StatusCode != 201 {
-		t.Fatalf("create vault: %d", resp.StatusCode)
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create vault: %d %s", resp.StatusCode, raw)
 	}
 }
 
@@ -286,10 +295,10 @@ func (o *owner) createVault(t *testing.T) {
 func (o *owner) session(t *testing.T) {
 	t.Helper()
 	var ch wire.SessionChallengeResponse
-	if resp := o.do(t, "POST", "/v1/session", wire.SessionRequest{DeviceID: ownerDeviceID}, &ch); resp.StatusCode != 200 {
+	if resp := o.do(t, "POST", "/v1/session", wire.SessionRequest{DeviceID: o.deviceID}, &ch); resp.StatusCode != 200 {
 		t.Fatalf("session step 1: %d", resp.StatusCode)
 	}
-	tb, err := wire.BuildSessionTranscript(ownerDeviceID, ch.Challenge)
+	tb, err := wire.BuildSessionTranscript(o.deviceID, ch.Challenge)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +309,7 @@ func (o *owner) session(t *testing.T) {
 	chB, sigB := wire.Blob(ch.Challenge), wire.Blob(sig)
 	var out wire.SessionResponse
 	resp := o.do(t, "POST", "/v1/session", wire.SessionRequest{
-		DeviceID: ownerDeviceID, Challenge: &chB, Signature: &sigB,
+		DeviceID: o.deviceID, Challenge: &chB, Signature: &sigB,
 	}, &out)
 	if resp.StatusCode != 200 || out.Token == "" {
 		t.Fatalf("session step 2: %d", resp.StatusCode)
@@ -355,7 +364,7 @@ func (o *owner) putItem(t *testing.T, itemID, ref, masked, secretValue string) {
 		VaultID: o.vaultID, ItemID: itemID, Revision: 1,
 		MetaCiphertext: metaCT, SecretCiphertext: secretCT,
 		VaultWrappedMetaKey: vwm, VaultWrappedItemKey: vwi,
-		WriterDeviceID: ownerDeviceID,
+		WriterDeviceID: o.deviceID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +372,7 @@ func (o *owner) putItem(t *testing.T, itemID, ref, masked, secretValue string) {
 	req := wire.PutItemRequest{
 		Revision: 1, MetaCiphertext: metaCT, SecretCiphertext: secretCT,
 		VaultWrappedMetaKey: vwm, VaultWrappedItemKey: vwi,
-		WriterDeviceID: ownerDeviceID, Signature: o.sign(tb),
+		WriterDeviceID: o.deviceID, Signature: o.sign(tb),
 	}
 	var out wire.PutItemResponse
 	if resp := o.do(t, "PUT", "/v1/items/"+itemID, req, &out); resp.StatusCode != 200 {
@@ -371,6 +380,95 @@ func (o *owner) putItem(t *testing.T, itemID, ref, masked, secretValue string) {
 	}
 	o.metaKeys[itemID] = metaKey
 	o.itemKeys[itemID] = itemKey
+}
+
+// putItemPolicy seals and uploads one item with a custom policy block
+// (§6.10) — the approval and --reply fixtures need sensitivity,
+// allowCommands and allowedHosts beyond the defaults.
+func (o *owner) putItemPolicy(t *testing.T, itemID, ref, masked, secretValue string, policy map[string]any) {
+	t.Helper()
+	metaKey, itemKey := make([]byte, 32), make([]byte, 32)
+	if _, err := rand.Read(metaKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rand.Read(itemKey); err != nil {
+		t.Fatal(err)
+	}
+	meta := map[string]any{
+		"v": 1, "ref": ref, "name": ref + " name", "description": "e2e fixture",
+		"type": "api_key", "masked": masked, "injectable": true,
+		"policy": policy,
+	}
+	metaJSON, _ := json.Marshal(meta)
+	secretJSON, _ := json.Marshal(map[string]any{
+		"v": 1, "value": secretValue, "username": "", "notes": "", "fields": map[string]any{},
+	})
+	metaAAD, _ := crypto.MetaAAD(o.vaultID, itemID)
+	secretAAD, _ := crypto.SecretAAD(o.vaultID, itemID)
+	metaCT, err := crypto.SealBlob(metaKey, metaAAD, metaJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretCT, err := crypto.SealBlob(itemKey, secretAAD, secretJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vwmAAD, _ := crypto.VaultWrappedMetaKeyAAD(o.vaultID, itemID)
+	vwiAAD, _ := crypto.VaultWrappedItemKeyAAD(o.vaultID, itemID)
+	vmk := make([]byte, 32)
+	vwm, err := crypto.SealBlob(vmk, vwmAAD, metaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vwi, err := crypto.SealBlob(vmk, vwiAAD, itemKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb, err := wire.BuildItemTranscript(wire.ItemTranscript{
+		VaultID: o.vaultID, ItemID: itemID, Revision: 1,
+		MetaCiphertext: metaCT, SecretCiphertext: secretCT,
+		VaultWrappedMetaKey: vwm, VaultWrappedItemKey: vwi,
+		WriterDeviceID: o.deviceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := wire.PutItemRequest{
+		Revision: 1, MetaCiphertext: metaCT, SecretCiphertext: secretCT,
+		VaultWrappedMetaKey: vwm, VaultWrappedItemKey: vwi,
+		WriterDeviceID: o.deviceID, Signature: o.sign(tb),
+	}
+	var out wire.PutItemResponse
+	if resp := o.do(t, "PUT", "/v1/items/"+itemID, req, &out); resp.StatusCode != 200 {
+		t.Fatalf("put item %s: %d", ref, resp.StatusCode)
+	}
+	o.metaKeys[itemID] = metaKey
+	o.itemKeys[itemID] = itemKey
+}
+
+// grantLater wraps and uploads one grant AFTER pairing (§6.12): the
+// server appends the synthetic item change the CLI's next sync picks
+// up.
+func (o *owner) grantLater(t *testing.T, itemID, kind string) {
+	t.Helper()
+	g := o.wrapGrant(t, o.cliHPKE, o.cliDeviceID, itemID, kind, o.keyFor(t, itemID, kind))
+	var out wire.PutGrantsResponse
+	if resp := o.do(t, "PUT", "/v1/grants", wire.PutGrantsRequest{Grants: []wire.GrantData{g}}, &out); resp.StatusCode != 200 {
+		t.Fatalf("grant later %s %s: %d", itemID, kind, resp.StatusCode)
+	}
+}
+
+func (o *owner) keyFor(t *testing.T, itemID, kind string) []byte {
+	t.Helper()
+	if kind == wire.GrantKindView {
+		if k, ok := o.metaKeys[itemID]; ok {
+			return k
+		}
+	} else if k, ok := o.itemKeys[itemID]; ok {
+		return k
+	}
+	t.Fatalf("no %s key for item %s", kind, itemID)
+	return nil
 }
 
 // wrapGrant builds a signed §3.2 grant row for the CLI device.
@@ -417,6 +515,7 @@ func (o *owner) completePairing(t *testing.T, nonceHex, payloadLine string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	o.cliHPKE, o.cliSign = cliHPKE, cliSign
 	cliDeviceID := newID(t)
 	o.cliDeviceID = cliDeviceID
 
@@ -714,7 +813,7 @@ func decryptAuditEnvelope(t *testing.T, o *owner, env []byte) map[string]any {
 	wrapped := env[3+encLen : 3+encLen+48]
 	blob := env[3+encLen+48:]
 
-	info, err := crypto.Info(crypto.PurposeAuditEventKey, o.vaultID, ownerDeviceID)
+	info, err := crypto.Info(crypto.PurposeAuditEventKey, o.vaultID, o.deviceID)
 	if err != nil {
 		t.Fatal(err)
 	}

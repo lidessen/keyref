@@ -225,6 +225,81 @@ type PairStatusResponse struct {
 	Grants             []GrantData `json:"grants,omitempty"`
 }
 
+// Approval status values carried by the approvals table and the polling
+// response (design §6.3, §8.3).
+const (
+	ApprovalStatusPending  = "pending"
+	ApprovalStatusApproved = "approved"
+	ApprovalStatusDenied   = "denied"
+	ApprovalStatusExpired  = "expired"
+	ApprovalStatusConsumed = "consumed"
+)
+
+// ApprovalCreateRequest is the body of POST /v1/approvals (protocol
+// §6.19). request_ciphertext = HPKE enc ‖ ct (encapsulated to an owner
+// device, info purpose=approval-request); request_signature is the CLI
+// device's Ed25519 over the raw request_ciphertext bytes.
+type ApprovalCreateRequest struct {
+	ItemID            string `json:"item_id"`
+	RequestCiphertext Blob   `json:"request_ciphertext"`
+	RequestSignature  Blob   `json:"request_signature"`
+	ExpiresAt         int64  `json:"expires_at"`
+}
+
+// ApprovalCreateResponse is the 201 body of POST /v1/approvals.
+type ApprovalCreateResponse struct {
+	ApprovalID string `json:"approval_id"`
+	ExpiresAt  int64  `json:"expires_at"`
+}
+
+// ApprovalRow is one entry of GET /v1/approvals (protocol §6.20). The
+// owner verifies the CLI signature over request_ciphertext BEFORE
+// decrypting and displaying the request (design §8.3).
+type ApprovalRow struct {
+	ApprovalID        string `json:"approval_id"`
+	CLIDeviceID       string `json:"cli_device_id"`
+	ItemID            string `json:"item_id"`
+	RequestCiphertext Blob   `json:"request_ciphertext"`
+	RequestSignature  Blob   `json:"request_signature"`
+	CreatedAt         int64  `json:"created_at"`
+	ExpiresAt         int64  `json:"expires_at"`
+}
+
+// ApprovalListResponse is the body of GET /v1/approvals (protocol §6.20).
+type ApprovalListResponse struct {
+	Approvals []ApprovalRow `json:"approvals"`
+}
+
+// ApprovalDecisionRequest is the body of POST /v1/approvals/:id/decision
+// (protocol §6.21). An approved decision carries the one-time HPKE wrap
+// of the item key to the request's ephemeral public key (info purpose
+// one-time-item-key, binding item, approval and request digest); a
+// denied decision carries neither blob.
+type ApprovalDecisionRequest struct {
+	Decision          string `json:"decision"`
+	OneTimeEnc        Blob   `json:"one_time_enc,omitempty"`
+	OneTimeWrappedKey Blob   `json:"one_time_wrapped_key,omitempty"`
+}
+
+// ApprovalPollResponse is the body of GET /v1/approvals/:approval_id
+// (protocol §6.22). The first poll that observes status approved
+// atomically returns the one-time wrap and flips the row to consumed.
+type ApprovalPollResponse struct {
+	ApprovalID        string `json:"approval_id"`
+	Status            string `json:"status"`
+	OneTimeEnc        Blob   `json:"one_time_enc,omitempty"`
+	OneTimeWrappedKey Blob   `json:"one_time_wrapped_key,omitempty"`
+	ExpiresAt         int64  `json:"expires_at,omitempty"`
+}
+
+// ApprovalStatusData is the sync "approval" entity data (protocol §8.2,
+// D8): a status summary for devices related to the approval, without any
+// ciphertext.
+type ApprovalStatusData struct {
+	ApprovalID string `json:"approval_id"`
+	Status     string `json:"status"`
+}
+
 // AuditRequest is the body of POST /v1/audit (protocol §6.23).
 type AuditRequest struct {
 	Ciphertext Blob `json:"ciphertext"`

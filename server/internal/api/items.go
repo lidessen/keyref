@@ -11,8 +11,16 @@ import (
 
 // handleGetItem implements GET /v1/items/:item_id (protocol §6.9): the
 // current revision on demand, filtered by the caller's grants — CLI
-// devices see meta with a view grant, the secret with a use grant, and
-// never the vault_wrapped_* columns (§8.3).
+// devices see meta with a view grant, and never the vault_wrapped_*
+// columns (§8.3).
+//
+// Secret-ciphertext visibility: the contract text says CLI devices
+// receive secret_ciphertext with a use grant; the approval flow
+// (design §8.3, protocol §7.1) additionally requires a CLI holding ONLY
+// a view grant to carry the secret ciphertext, which its one-time item
+// key then decrypts. The server therefore delivers secret_ciphertext on
+// a view grant as well: the ciphertext is inert without the item key,
+// which approval items never receive long-term (design §15).
 func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
 	ac, ok := s.authorize(w, r, false)
 	if !ok {
@@ -57,7 +65,9 @@ func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // itemWireData renders an item row per §8.3. CLI devices never receive
-// vault_wrapped_*; the meta/secret ciphertexts follow the grants.
+// vault_wrapped_*; meta follows the view grant and the secret
+// ciphertext follows any grant — see handleGetItem for why view alone
+// carries the secret ciphertext (the approval flow).
 func itemWireData(it *store.Item, forOwner, hasView, hasUse bool) wire.ItemData {
 	d := wire.ItemData{
 		VaultID:        it.VaultID,
@@ -71,7 +81,7 @@ func itemWireData(it *store.Item, forOwner, hasView, hasUse bool) wire.ItemData 
 	if forOwner || hasView {
 		d.MetaCiphertext = it.MetaCiphertext
 	}
-	if forOwner || hasUse {
+	if forOwner || hasView || hasUse {
 		d.SecretCiphertext = it.SecretCiphertext
 	}
 	if forOwner {

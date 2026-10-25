@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/approval"
 	"github.com/lidessen/keyref/cli/internal/audit"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/config"
@@ -98,6 +100,8 @@ func dispatch(cmd string, args []string) int {
 		return cmdUnlock()
 	case "exec":
 		return cmdExec(args)
+	case "mcp":
+		return cmdMCP(args)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -121,6 +125,7 @@ commands:
   status                    pairing, session and grant expiry status
   lock | unlock             block or restore key unwrapping
   exec [flags] -- <argv>    run a command with injected secrets
+  mcp                       serve list/get/exec over stdio as MCP JSON-RPC
 
 exec flags:
   --env NAME=REF            inject the secret as an environment variable
@@ -130,6 +135,12 @@ exec flags:
                             write the (rendered) secret to fd N
   --allow-argv              allow {{keyref:REF}} placeholders in argv;
                             injected args are visible to ps / Activity Monitor
+  --pty                     run the child on a pty owned by keyref
+  --reply REGEX=REF         type REF into the pty input when REGEX matches
+                            the pre-redaction output (needs --pty; the item
+                            must be sensitivity=approval and its allowCommands
+                            must contain this argv0)
+  --timeout SECONDS         approval wait timeout (default 120, max 120)
 `)
 }
 
@@ -464,6 +475,10 @@ func cmdExec(args []string) int {
 	fdTemplate := fs.String("fd-template", "", "template with one {{keyref}} token (RFC 7230 header-value charset)")
 	fdRaw := fs.Bool("fd-raw", false, "write the fd payload raw, without a template")
 	allowArgv := fs.Bool("allow-argv", false, "allow {{keyref:REF}} placeholders in argv (needs item policy; args visible to ps / Activity Monitor)")
+	pty := fs.Bool("pty", false, "run the child on a pty owned by keyref (output still redacted)")
+	replies := multiFlag{}
+	fs.Var(&replies, "reply", "REGEX=REF type REF into the pty input when REGEX matches the pre-redaction output (needs --pty, approval item, allowCommands)")
+	timeoutSecs := fs.Int64("timeout", 120, "approval wait timeout in seconds (approval items)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -474,7 +489,50 @@ func cmdExec(args []string) int {
 	if len(argv) == 0 {
 		return fatalf(2, "usage: keyref exec [flags] -- <argv>")
 	}
+	var parsedReplies []exec.Reply
+	for _, spec := range replies {
+		rp, err := exec.ParseReply(spec)
+		if err != nil {
+			return fatalf(exitcode.PolicyRejection, "%v", err)
+		}
+		parsedReplies = append(parsedReplies, rp)
+	}
+	return runExecCore(execOptions{
+		EnvRefs: envs, PassNames: passes, StdinRef: *stdinRef,
+		FdRefs: fds, FdTemplate: *fdTemplate, FdRaw: *fdRaw,
+		AllowArgv: *allowArgv, Pty: *pty, Replies: parsedReplies,
+		Timeout: time.Duration(*timeoutSecs) * time.Second,
+		Argv:    argv,
+		Stdout:  os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin,
+	})
+}
 
+// execOptions is one exec invocation, shared by the CLI command and the
+// MCP exec tool (design.md §7.8: `keyref mcp` is semantically identical
+// to the CLI and reuses the same implementation layer — one policy, one
+// spawn path, one redactor).
+type execOptions struct {
+	EnvRefs    []string
+	PassNames  []string
+	StdinRef   string
+	FdRefs     []string
+	FdTemplate string
+	FdRaw      bool
+	AllowArgv  bool
+	Pty        bool
+	Replies    []exec.Reply
+	Timeout    time.Duration
+	Argv       []string
+	Stdout     io.Writer
+	Stderr     io.Writer
+	Stdin      io.Reader
+}
+
+// runExecCore executes one exec end to end: audit wiring, meta
+// resolution, policy checks (inside exec.Run), lazy secret resolution —
+// standard grants or, for approval items, the per-exec approval flow —
+// and the redacted run.
+func runExecCore(opts execOptions) int {
 	st := mustStore()
 	id := mustIdentity()
 
@@ -506,7 +564,8 @@ func cmdExec(args []string) int {
 			paired = true
 		}
 	}
-	injection := injectionModes(envs, fds, *stdinRef, argv)
+	injection := injectionModes(opts)
+	approvalUsed := false
 	auditAttempt := func(code int, state string, refs []string) int {
 		if paired && len(auditRecips) > 0 {
 			o := &exec.Outcome{
@@ -514,8 +573,8 @@ func cmdExec(args []string) int {
 				PolicyState: "deny:" + state,
 				Refs:        refs,
 				Injection:   injection,
-				Argv:        argv,
-				AllowArgv:   *allowArgv,
+				Argv:        opts.Argv,
+				AllowArgv:   opts.AllowArgv,
 			}
 			if envelope := buildAuditEnvelope(o, vaultID, string(reporterRaw), auditRecips); envelope != nil {
 				audit.UploadBestEffort(cl, envelope)
@@ -528,7 +587,7 @@ func cmdExec(args []string) int {
 		return fatalf(1, "not paired; run keyref pair first")
 	}
 	if locked(st) {
-		fmt.Fprintln(os.Stderr, "keyref: session is locked; run keyref unlock")
+		fmt.Fprintln(opts.Stderr, "keyref: session is locked; run keyref unlock")
 		return auditAttempt(exitcode.SessionLocked, "locked", nil)
 	}
 
@@ -541,22 +600,25 @@ func cmdExec(args []string) int {
 			wanted = append(wanted, ref)
 		}
 	}
-	for _, spec := range envs {
+	for _, spec := range opts.EnvRefs {
 		_, ref, err := splitSpec(spec)
 		if err != nil {
 			return auditAttempt(fatalf(10, "--env expects NAME=REF"), "env-spec", nil)
 		}
 		addRef(ref)
 	}
-	for _, spec := range fds {
+	for _, spec := range opts.FdRefs {
 		_, ref, err := splitSpec(spec)
 		if err != nil {
 			return auditAttempt(fatalf(10, "--fd expects N=REF"), "fd-spec", nil)
 		}
 		addRef(ref)
 	}
-	addRef(*stdinRef)
-	for _, ref := range placeholdersInArgv(argv) {
+	addRef(opts.StdinRef)
+	for _, rp := range opts.Replies {
+		addRef(rp.Ref)
+	}
+	for _, ref := range placeholdersInArgv(opts.Argv) {
 		addRef(ref)
 	}
 
@@ -570,7 +632,7 @@ func cmdExec(args []string) int {
 		itemID, m, err := metaByRef(st, id, vaultID, ownerPub, ref)
 		if err != nil {
 			if errors.Is(err, meta.ErrUnknownRef) || errors.Is(err, meta.ErrNoViewGrant) {
-				fmt.Fprintf(os.Stderr, "keyref: unknown ref %q\n", ref)
+				fmt.Fprintf(opts.Stderr, "keyref: unknown ref %q\n", ref)
 				return auditAttempt(exitcode.UnknownRef, "unknown-ref", []string{ref})
 			}
 			return auditAttempt(unwrapOrGeneric(err), "unwrap-meta", []string{ref})
@@ -580,29 +642,39 @@ func cmdExec(args []string) int {
 	}
 
 	// Stage 2 — lazy value resolution used by exec.Run after policy.
+	// Approval items (sensitivity = approval, CLI holds only the meta
+	// key) resolve through the per-exec approval flow of design §8.3.
+	deviceID, _, _ := st.GetKV(session.KVDeviceID)
 	resolveValue := func(ref string) (*secret.Plaintext, int, string) {
-		pt, code, state := resolveValueFor(st, id, vaultID, ownerPub, ref, itemIDs[ref])
-		return pt, code, state
+		m := refs[ref].Meta
+		if m.Policy.Sensitivity == "approval" {
+			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, opts, refs[ref], itemIDs[ref], &approvalUsed)
+		}
+		return resolveValueFor(st, id, vaultID, ownerPub, ref, itemIDs[ref])
 	}
 
 	req := &exec.Request{
-		EnvRefs:      envs,
-		PassNames:    passes,
-		StdinRef:     *stdinRef,
-		FdRefs:       fds,
-		FdTemplate:   *fdTemplate,
-		FdRaw:        *fdRaw,
-		AllowArgv:    *allowArgv,
-		Argv:         argv,
+		EnvRefs:      opts.EnvRefs,
+		PassNames:    opts.PassNames,
+		StdinRef:     opts.StdinRef,
+		FdRefs:       opts.FdRefs,
+		FdTemplate:   opts.FdTemplate,
+		FdRaw:        opts.FdRaw,
+		AllowArgv:    opts.AllowArgv,
+		Pty:          opts.Pty,
+		Stdin:        opts.Stdin,
+		Replies:      opts.Replies,
+		Argv:         opts.Argv,
 		Refs:         refs,
 		ResolveValue: resolveValue,
 		ParentEnv:    os.Environ(),
-		Stdout:       os.Stdout,
-		Stderr:       os.Stderr,
+		Stdout:       opts.Stdout,
+		Stderr:       opts.Stderr,
 		OnOutcome: func(o *exec.Outcome) {
 			if !paired || len(auditRecips) == 0 {
 				return
 			}
+			o.ApprovalResult = approvalResultOf(o.PolicyState, approvalUsed)
 			if envelope := buildAuditEnvelope(o, vaultID, string(reporterRaw), auditRecips); envelope != nil {
 				audit.UploadBestEffort(cl, envelope)
 			}
@@ -611,20 +683,115 @@ func cmdExec(args []string) int {
 	return exec.Run(req)
 }
 
-// injectionModes lists the injection modes requested by the flags
-// (audit plaintext field, design.md §7.7).
-func injectionModes(envs, fds []string, stdinRef string, argv []string) []string {
+// approvalResultOf maps the outcome into the audit event's approval
+// field (design.md §7.7): "approved" for allowed runs that went through
+// the flow, the deny reason otherwise.
+func approvalResultOf(policyState string, approvalUsed bool) string {
+	switch {
+	case strings.HasPrefix(policyState, "deny:approval-"):
+		return strings.TrimPrefix(policyState, "deny:approval-")
+	case policyState == "allow" && approvalUsed:
+		return "approved"
+	default:
+		return ""
+	}
+}
+
+// resolveViaApproval runs the §8.3 approval round for one ref and
+// decrypts its secret with the one-time item key. The key is destroyed
+// immediately after use — it never reaches the keyring or the cache
+// (design.md §15).
+func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
+	auditRecips []audit.OwnerRecipient, opts execOptions, rr *exec.ResolvedRef, itemID string, approvalUsed *bool) (*secret.Plaintext, int, string) {
+	*approvalUsed = true
+	var replySpecs []string
+	for _, rp := range opts.Replies {
+		replySpecs = append(replySpecs, rp.Pattern+"="+rp.Ref)
+	}
+	key, code, state := approval.RequestItemKey(&approval.Options{
+		VaultID:   vaultID,
+		DeviceID:  deviceID,
+		Identity:  id,
+		Owners:    auditRecips,
+		ItemID:    itemID,
+		Ref:       rr.Ref,
+		Argv:      opts.Argv,
+		Refs:      refsOf(opts),
+		Injection: injectionModes(opts),
+		Hosts:     rr.Meta.Policy.AllowedHosts,
+		Reply:     replySpecs,
+		Timeout:   opts.Timeout,
+		Client:    cl,
+		Stderr:    opts.Stderr,
+	})
+	if key == nil {
+		return nil, code, state
+	}
+	defer key.Destroy()
+	it, ok, err := st.GetItem(itemID)
+	if err != nil || !ok {
+		fmt.Fprintln(opts.Stderr, "keyref: item missing from cache; run keyref sync")
+		return nil, 1, "internal"
+	}
+	value, err := itemcrypt.DecryptSecretValue(key, it.SecretCiphertext, vaultID, itemID)
+	if err != nil {
+		fmt.Fprintf(opts.Stderr, "keyref: cannot decrypt secret for %s\n", rr.Ref)
+		return nil, exitcode.UnwrapFailed, "unwrap-failed"
+	}
+	return value, 0, ""
+}
+
+// refsOf lists every ref of an exec for the approval request transcript.
+func refsOf(opts execOptions) []string {
+	var out []string
+	see := map[string]bool{}
+	add := func(ref string) {
+		if ref != "" && !see[ref] {
+			see[ref] = true
+			out = append(out, ref)
+		}
+	}
+	for _, spec := range opts.EnvRefs {
+		if _, ref, err := splitSpec(spec); err == nil {
+			add(ref)
+		}
+	}
+	for _, spec := range opts.FdRefs {
+		if _, ref, err := splitSpec(spec); err == nil {
+			add(ref)
+		}
+	}
+	add(opts.StdinRef)
+	for _, rp := range opts.Replies {
+		add(rp.Ref)
+	}
+	for _, ref := range placeholdersInArgv(opts.Argv) {
+		add(ref)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// injectionModes lists the injection modes requested by the options
+// (audit plaintext field and approval transcript field, design.md §7.7).
+func injectionModes(opts execOptions) []string {
 	modes := map[string]bool{}
-	if len(envs) > 0 {
+	if len(opts.EnvRefs) > 0 {
 		modes["env"] = true
 	}
-	if len(fds) > 0 {
+	if len(opts.FdRefs) > 0 {
 		modes["fd"] = true
 	}
-	if stdinRef != "" {
+	if opts.StdinRef != "" {
 		modes["stdin"] = true
 	}
-	if exec.HasArgvPlaceholder(argv) {
+	if opts.Pty {
+		modes["pty"] = true
+	}
+	if len(opts.Replies) > 0 {
+		modes["reply"] = true
+	}
+	if exec.HasArgvPlaceholder(opts.Argv) {
 		modes["argv"] = true
 	}
 	out := make([]string, 0, len(modes))
@@ -743,15 +910,16 @@ func buildAuditEnvelope(o *exec.Outcome, vaultID, reporterDeviceID string, recip
 		return nil
 	}
 	evt := audit.Event{
-		Time:         time.Now().UnixMilli(),
-		DeviceID:     reporterDeviceID,
-		Refs:         o.Refs,
-		Injection:    o.Injection,
-		Argv:         o.Argv,
-		AllowArgv:    o.AllowArgv,
-		PolicyResult: o.PolicyState,
-		ChildExit:    o.ChildExit,
-		Redactions:   o.Redactions,
+		Time:           time.Now().UnixMilli(),
+		DeviceID:       reporterDeviceID,
+		Refs:           o.Refs,
+		Injection:      o.Injection,
+		Argv:           o.Argv,
+		AllowArgv:      o.AllowArgv,
+		PolicyResult:   o.PolicyState,
+		ApprovalResult: o.ApprovalResult,
+		ChildExit:      o.ChildExit,
+		Redactions:     o.Redactions,
 	}
 	evtJSON, err := json.Marshal(evt)
 	if err != nil {

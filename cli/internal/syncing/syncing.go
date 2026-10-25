@@ -190,7 +190,8 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 // (design.md §8.2: after discovering revocation, delete local wraps
 // and the cache).
 func cleanupRevoked(st *store.Store) {
-	_ = st.SetKV(session.KVToken, nil)
+	_ = st.DeleteKV(session.KVToken)
+	_ = st.DeleteKV(session.KVExpiresAt)
 	grants, err := st.Grants()
 	if err != nil {
 		return

@@ -74,8 +74,8 @@ func TestFullFlowSelfHosted(t *testing.T) {
 		t.Fatalf("bootstrap: item1 changes = %d, want 1", len(itemChanges))
 	}
 	d1 := decodeItemData(t, itemChanges[0])
-	if len(d1.MetaCiphertext) == 0 || len(d1.SecretCiphertext) != 0 {
-		t.Fatalf("view grant must expose meta only: %+v", d1)
+	if len(d1.MetaCiphertext) == 0 || len(d1.SecretCiphertext) == 0 {
+		t.Fatalf("view grant must expose meta and the (inert) secret ciphertext: %+v", d1)
 	}
 	if len(d1.VaultWrappedMetaKey) != 0 || len(d1.VaultWrappedItemKey) != 0 {
 		t.Fatal("vault_wrapped_* leaked to CLI")

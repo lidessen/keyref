@@ -35,8 +35,9 @@ const (
 	MaxDefaultBody    = 1 << 20   // 1 MiB ceiling for every other endpoint
 )
 
-// Approval polling floor (protocol §1.3, §6.22); also applied to the
-// Phase-1 approval endpoint stubs.
+// Approval polling floor (protocol §1.3, §6.22): approval polls are the
+// one request class that is neither daily-quota-counted nor
+// per-minute-windowed — the floor is their only rate limit.
 const ApprovalPollMinInterval = 2 * time.Second
 
 // Session and challenge lifetimes (protocol §6.5, §6.7).
@@ -149,13 +150,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/audit", s.handleGetAudit)
 	mux.HandleFunc("GET /v1/account", s.handleAccount)
 
-	// Approval flow and App Store billing are out of the Phase-1 scope
-	// (design §13); the routes exist so the error shape stays JSON and
-	// the approval polling floor is honored.
-	mux.HandleFunc("POST /v1/approvals", notImplemented)
-	mux.HandleFunc("GET /v1/approvals/{approval_id}", s.approvalPollingFloor(notImplemented))
-	mux.HandleFunc("POST /v1/approvals/{approval_id}/decision", notImplemented)
-	mux.HandleFunc("GET /v1/approvals", notImplemented)
+	// Approval flow (design §8.3, protocol §6.19–§6.22): the polling
+	// floor guards GET /v1/approvals/:id, whose handler performs its own
+	// authorization because approval polling must not count against the
+	// daily request budget.
+	mux.HandleFunc("POST /v1/approvals", s.handleApprovalCreate)
+	mux.HandleFunc("GET /v1/approvals/{approval_id}", s.approvalPollingFloor(s.handleApprovalPoll))
+	mux.HandleFunc("POST /v1/approvals/{approval_id}/decision", s.handleApprovalDecision)
+	mux.HandleFunc("GET /v1/approvals", s.handleApprovalList)
 	mux.HandleFunc("POST /v1/billing/apple", notImplemented)
 
 	mux.HandleFunc("/v1/", notImplemented)

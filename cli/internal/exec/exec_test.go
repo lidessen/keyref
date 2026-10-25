@@ -44,6 +44,38 @@ func helperMain(args []string) {
 		fmt.Printf("ARGV=%s\n", strings.Join(args[1:], ","))
 	case len(args) > 0 && args[0] == "exit42":
 		os.Exit(42)
+	case len(args) > 0 && args[0] == "prompt":
+		// pty fixture: print a prompt, read ONE line (a pty never EOFs,
+		// so read-by-line, not read-to-EOF), echo it back.
+		fmt.Print("Password: ")
+		line := readOneLine(os.Stdin)
+		fmt.Printf("\ngot:%s\n", strings.TrimRight(line, "\r\n"))
+	case len(args) > 0 && args[0] == "read-line":
+		fmt.Print("> ")
+		line := readOneLine(os.Stdin)
+		fmt.Printf("LINE=%s\n", strings.TrimRight(line, "\r\n"))
+	case len(args) > 0 && args[0] == "banner":
+		// pty fixture that produces output and exits without reading
+		// stdin (session teardown tests).
+		fmt.Print("hello-from-pty\nbye\n")
+	}
+}
+
+// readOneLine reads one input line without waiting for EOF.
+func readOneLine(f *os.File) string {
+	var b []byte
+	one := make([]byte, 1)
+	for {
+		n, err := f.Read(one)
+		if n > 0 {
+			b = append(b, one[0])
+			if one[0] == '\n' {
+				return string(b)
+			}
+		}
+		if err != nil {
+			return string(b)
+		}
 	}
 }
 

@@ -154,9 +154,9 @@ func ReplaceArgvPlaceholders(argv []string, resolve func(ref string) ([]byte, er
 	out := make([]string, len(argv))
 	for i, a := range argv {
 		var replaceErr error
-	res := argvPlaceholderRe.ReplaceAllStringFunc(a, func(m string) string {
-		ref := strings.TrimSuffix(strings.TrimPrefix(m, "{{keyref:"), "}}")
-		secret, err := resolve(ref)
+		res := argvPlaceholderRe.ReplaceAllStringFunc(a, func(m string) string {
+			ref := strings.TrimSuffix(strings.TrimPrefix(m, "{{keyref:"), "}}")
+			secret, err := resolve(ref)
 			if err != nil {
 				replaceErr = err
 				return m

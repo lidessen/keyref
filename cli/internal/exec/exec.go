@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,15 +33,18 @@ type ResolvedRef struct {
 // Outcome reports what happened during one exec; the command layer
 // turns it into the encrypted audit event. PolicyState is "allow" or
 // "deny:<reason>" — every attempted exec, including rejections,
-// produces exactly one outcome (design.md §7.7).
+// produces exactly one outcome (design.md §7.7). ApprovalResult carries
+// the §7.7 approval outcome ("approved" or the deny reason) when the
+// run went through the approval flow.
 type Outcome struct {
-	ChildExit   int
-	Redactions  int
-	Injection   []string
-	Refs        []string
-	Argv        []string
-	AllowArgv   bool
-	PolicyState string
+	ChildExit      int
+	Redactions     int
+	Injection      []string
+	Refs           []string
+	Argv           []string
+	AllowArgv      bool
+	PolicyState    string
+	ApprovalResult string
 }
 
 // childNotStarted marks outcomes whose child never ran.
@@ -60,6 +64,15 @@ type Request struct {
 	FdRaw      bool
 	AllowArgv  bool
 	Argv       []string
+
+	// Pty runs the child on a pseudo-terminal owned by keyref (design.md
+	// §7.1); Stdin, when set, is forwarded into the pty input. Replies
+	// are the --reply REGEX=REF specs: their patterns match the child's
+	// raw output and type the referenced secret into the pty input. Both
+	// are gated by the double gate of §7.1 before anything runs.
+	Pty     bool
+	Stdin   io.Reader
+	Replies []Reply
 
 	// Refs carries the metas (and optionally the values). ResolveValue,
 	// when set, is called after the policy checks pass to decrypt only
@@ -113,6 +126,15 @@ func baseOutcome(req *Request) *Outcome {
 	if req.StdinRef != "" {
 		usedRefs[req.StdinRef] = true
 		injection["stdin"] = true
+	}
+	if req.Pty {
+		injection["pty"] = true
+	}
+	if len(req.Replies) > 0 {
+		injection["reply"] = true
+		for _, rp := range req.Replies {
+			usedRefs[rp.Ref] = true
+		}
 	}
 	if HasArgvPlaceholder(req.Argv) {
 		injection["argv"] = true
@@ -175,6 +197,34 @@ func run(req *Request) (int, *Outcome) {
 				fmt.Fprintf(req.Stderr, "keyref: item %s does not allow argv injection (policy.allowArgv)\n", ref)
 				return deny(10, "allow-argv-policy")
 			}
+		}
+	}
+
+	// --reply gates (design.md §7.1): BOTH that the item's allowCommands
+	// explicitly contains this argv0 AND sensitivity = approval — the
+	// approval screen shows the full pattern and a person is the
+	// gatekeeper. Missing either gate is exit 10 before anything runs.
+	if len(req.Replies) > 0 && !req.Pty {
+		fmt.Fprintln(req.Stderr, "keyref: --reply requires --pty")
+		return deny(10, "reply-needs-pty")
+	}
+	for _, rp := range req.Replies {
+		if err := ValidateReplyPattern(rp.Pattern); err != nil {
+			fmt.Fprintln(req.Stderr, "keyref:", err)
+			return deny(10, "reply-pattern")
+		}
+		rr, ok := req.Refs[rp.Ref]
+		if !ok {
+			fmt.Fprintf(req.Stderr, "keyref: unknown ref %q\n", rp.Ref)
+			return deny(11, "unknown-ref")
+		}
+		if rr.Meta.Policy.Sensitivity != "approval" {
+			fmt.Fprintf(req.Stderr, "keyref: --reply requires item %s to have sensitivity=approval\n", rp.Ref)
+			return deny(10, "reply-sensitivity")
+		}
+		if len(req.Argv) > 0 && !allowCommandsContainArgv0(rr.Meta.Policy.AllowCommands, req.Argv[0]) {
+			fmt.Fprintf(req.Stderr, "keyref: --reply requires item %s allowCommands to contain argv0 explicitly\n", rp.Ref)
+			return deny(10, "reply-allowcommands")
 		}
 	}
 
@@ -355,7 +405,9 @@ func run(req *Request) (int, *Outcome) {
 		entry = ""
 	}
 
-	// Redaction matchers over every secret in use (design.md §7.4).
+	// Redaction matchers over every secret in use (design.md §7.4). The
+	// pty path redacts the single merged pty stream (stdoutRed); the
+	// plain path redacts stdout and stderr separately.
 	secrets := map[string][]byte{}
 	for _, ref := range outcome.Refs {
 		if rr, ok := req.Refs[ref]; ok && rr.Value != nil {
@@ -363,11 +415,8 @@ func run(req *Request) (int, *Outcome) {
 		}
 	}
 	stdoutRed := NewRedactor(secrets)
-	stdoutRed.Attach(req.Stdout)
-	stderrRed := NewRedactor(secrets)
-	stderrRed.Attach(req.Stderr)
 	defer stdoutRed.Destroy()
-	defer stderrRed.Destroy()
+	stdoutRed.Attach(req.Stdout)
 
 	// fd staging: guarded bytes written to an unlinked file or a
 	// Linux memfd (design.md §7.1: unlink immediately after write,
@@ -422,6 +471,21 @@ func run(req *Request) (int, *Outcome) {
 
 	cmd := osexec.Command(argv[0], argv[1:]...)
 	cmd.Env = childEnv
+	// Core dumps are disabled process-wide before the spawn and
+	// inherited by the child (design.md §7.2, §7.5).
+	DisableCoreDumps()
+
+	if req.Pty {
+		// The pty path owns its whole tail: the child gets the slave as
+		// stdio inside a fresh session, raw output is matched by the
+		// --reply patterns and redacted, and both directions are
+		// brokered until the session ends (design.md §7.1).
+		return runPtyChild(req, cmd, stdoutRed, secrets, extra, outcome, deny)
+	}
+
+	stderrRed := NewRedactor(secrets)
+	defer stderrRed.Destroy()
+	stderrRed.Attach(req.Stderr)
 	cmd.ExtraFiles = extra
 	cmd.Stdout = stdoutRed
 	cmd.Stderr = stderrRed
@@ -441,12 +505,9 @@ func run(req *Request) (int, *Outcome) {
 			_ = stdinPipe.Close()
 		}(req.StdinRef)
 	}
-	// Core dumps are disabled process-wide before the spawn and
-	// inherited by the child (design.md §7.2, §7.5); the child gets its
 	// own process group so a redaction failure kills the whole tree
 	// (design.md §7.4). Linux PR_SET_DUMPABLE=0 needs child-side
 	// support and is not claimed here (design.md §7.2).
-	DisableCoreDumps()
 	cmd.SysProcAttr = childSysProcAttr()
 
 	if serr := cmd.Start(); serr != nil {
@@ -541,6 +602,19 @@ func guardedEnvEntry(name string, value []byte) string {
 func isPolicyErr(err error) bool {
 	var pe *PolicyError
 	return errors.As(err, &pe)
+}
+
+// allowCommandsContainArgv0 implements the explicit argv0 half of the
+// --reply double gate (design.md §7.1): the item's allowCommands must
+// name the command — by the literal argv0 or its basename.
+func allowCommandsContainArgv0(allowCommands []string, argv0 string) bool {
+	base := filepath.Base(argv0)
+	for _, w := range allowCommands {
+		if strings.EqualFold(w, argv0) || strings.EqualFold(w, base) {
+			return true
+		}
+	}
+	return false
 }
 
 // isStartErr reports a safe-to-start failure (exit 18 class).
