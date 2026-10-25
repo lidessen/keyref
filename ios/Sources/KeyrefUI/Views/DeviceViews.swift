@@ -10,6 +10,7 @@ struct DeviceListView: View {
     let app: AppModel
     @Bindable var devices: DevicesStore
     @State private var showPairing = false
+    @State private var showSecondDevice = false
 
     init(app: AppModel) {
         self.app = app
@@ -22,13 +23,15 @@ struct DeviceListView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
+            List {
+                approvalsSection
                 if devices.activeCLI.isEmpty && devices.revoked.isEmpty {
-                    emptyState
+                    emptySection
                 } else {
-                    deviceList
+                    deviceSections
                 }
             }
+            .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
             .navigationTitle("设备")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -60,28 +63,69 @@ struct DeviceListView: View {
             .fullScreenCover(isPresented: $showPairing) {
                 PairingFlowView(app: app)
             }
+            .fullScreenCover(isPresented: $showSecondDevice) {
+                NavigationStack {
+                    SecondDeviceFlowView(app: app, role: .oldPhone)
+                }
+            }
             .task { await devices.refresh() }
         }
     }
 
-    var emptyState: some View {
-        ContentUnavailableView {
-            Label("还没有 agent 设备", systemImage: "laptopcomputer.and.iphone")
-        } description: {
-            Text("在 agent 的机器上运行 keyref pair，然后用这台手机扫终端上的二维码。")
-        } actions: {
-            Button("扫码配对") { showPairing = true }
-                .buttonStyle(.glassProminent)
+    /// 待审批（Phase 2, §8.3）：设备 Tab 下的固定入口 + 角标。轮询由
+    /// ApprovalsStore 只在 App 活跃时进行；这里只是入口。
+    var approvalsSection: some View {
+        Section {
+            NavigationLink {
+                ApprovalInboxView(app: app)
+            } label: {
+                HStack {
+                    Label("待审批", systemImage: "checkmark.shield")
+                    Spacer()
+                    if app.approvals.badgeCount > 0 {
+                        Text("\(app.approvals.badgeCount)")
+                            .font(.caption.weight(.bold))
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Color.orange.opacity(0.2), in: Capsule())
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("\(app.approvals.badgeCount) 条待审批请求")
+                    }
+                }
+            }
+        } footer: {
+            Text("agent 发起的 approval 请求出现在这里，2 分钟内有效。批准需要 Face ID。")
         }
     }
 
-    var deviceList: some View {
-        List {
+    var emptySection: some View {
+        Section {
+            VStack(spacing: 10) {
+                Image(systemName: "laptopcomputer.and.iphone")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.secondary)
+                Text("还没有 agent 设备")
+                    .font(.body.weight(.medium))
+                Text("在 agent 的机器上运行 keyref pair，然后用这台手机扫终端上的二维码。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("扫码配对") { showPairing = true }
+                    .buttonStyle(.glassProminent)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+        }
+    }
+
+    var deviceSections: some View {
+        Group {
             if let localDevice {
-                NavigationLink {
-                    LocalDeviceDetailView(app: app, device: localDevice)
-                } label: {
-                    deviceRow(localDevice, subtitle: localDevice.isActive ? "正常" : "包裹已失效")
+                Section {
+                    NavigationLink {
+                        LocalDeviceDetailView(app: app, device: localDevice)
+                    } label: {
+                        deviceRow(localDevice, subtitle: localDevice.isActive ? "正常" : "包裹已失效")
+                    }
                 }
             }
             Section {
@@ -91,6 +135,14 @@ struct DeviceListView: View {
                     } label: {
                         deviceRow(device, subtitle: device.isPending ? "等待确认" : device.fingerprint)
                     }
+                }
+            }
+            // Phase 2（§9.4 path 2）：旧手机在线添加第二台 iPhone。
+            Section {
+                Button {
+                    showSecondDevice = true
+                } label: {
+                    Label("添加另一台 iPhone", systemImage: "iphone.badge.plus")
                 }
             }
             if !devices.revoked.isEmpty {
@@ -112,7 +164,6 @@ struct DeviceListView: View {
                 }
             }
         }
-        .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 
     func deviceRow(_ device: DeviceRow, subtitle: String) -> some View {

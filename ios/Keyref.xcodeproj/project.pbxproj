@@ -27,6 +27,11 @@
 		D51100000000000000000012 /* RecoveryAndValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000012 /* RecoveryAndValidationTests.swift */; };
 		D51100000000000000000013 /* StoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000013 /* StoreTests.swift */; };
 		D51100000000000000000014 /* BundleModuleShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000011 /* BundleModuleShim.swift */; };
+		D51100000000000000000021 /* ApprovalFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000021 /* ApprovalFlowTests.swift */; };
+		D51100000000000000000022 /* OwnerPairingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000022 /* OwnerPairingTests.swift */; };
+		D51100000000000000000023 /* ApprovalAndPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000023 /* ApprovalAndPolicyTests.swift */; };
+		D51100000000000000000024 /* FakeKeyrefServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000024 /* FakeKeyrefServer.swift */; };
+		D51100000000000000000025 /* SecondDeviceFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000025 /* SecondDeviceFlowTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -65,6 +70,11 @@
 		D51200000000000000000011 /* BundleModuleShim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleModuleShim.swift; sourceTree = "<group>"; };
 		D51200000000000000000012 /* RecoveryAndValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryAndValidationTests.swift; sourceTree = "<group>"; };
 		D51200000000000000000013 /* StoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000021 /* ApprovalFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalFlowTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000022 /* OwnerPairingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnerPairingTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000023 /* ApprovalAndPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalAndPolicyTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000024 /* FakeKeyrefServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeKeyrefServer.swift; sourceTree = "<group>"; };
+		D51200000000000000000025 /* SecondDeviceFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecondDeviceFlowTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -129,9 +139,11 @@
 			isa = PBXGroup;
 			children = (
 				D51200000000000000000001 /* APIClientTests.swift */,
+				D51200000000000000000021 /* ApprovalFlowTests.swift */,
 				D51200000000000000000002 /* CryptoTests.swift */,
 				D51200000000000000000003 /* KeyStoreTests.swift */,
 				D51200000000000000000004 /* MockURLProtocol.swift */,
+				D51200000000000000000022 /* OwnerPairingTests.swift */,
 				D51200000000000000000005 /* RecoveryCodeTests.swift */,
 				D51200000000000000000006 /* SyncEngineTests.swift */,
 				D51200000000000000000007 /* TranscriptTests.swift */,
@@ -145,7 +157,10 @@
 		D50500000000000000000004 /* KeyrefUITests */ = {
 			isa = PBXGroup;
 			children = (
+				D51200000000000000000023 /* ApprovalAndPolicyTests.swift */,
+				D51200000000000000000024 /* FakeKeyrefServer.swift */,
 				D51200000000000000000012 /* RecoveryAndValidationTests.swift */,
+				D51200000000000000000025 /* SecondDeviceFlowTests.swift */,
 				D51200000000000000000013 /* StoreTests.swift */,
 			);
 			path = KeyrefUITests;
@@ -315,9 +330,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				D51100000000000000000001 /* APIClientTests.swift in Sources */,
+				D51100000000000000000021 /* ApprovalFlowTests.swift in Sources */,
 				D51100000000000000000002 /* CryptoTests.swift in Sources */,
 				D51100000000000000000003 /* KeyStoreTests.swift in Sources */,
 				D51100000000000000000004 /* MockURLProtocol.swift in Sources */,
+				D51100000000000000000022 /* OwnerPairingTests.swift in Sources */,
 				D51100000000000000000005 /* RecoveryCodeTests.swift in Sources */,
 				D51100000000000000000006 /* SyncEngineTests.swift in Sources */,
 				D51100000000000000000007 /* TranscriptTests.swift in Sources */,
@@ -331,7 +348,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D51100000000000000000023 /* ApprovalAndPolicyTests.swift in Sources */,
+				D51100000000000000000024 /* FakeKeyrefServer.swift in Sources */,
 				D51100000000000000000012 /* RecoveryAndValidationTests.swift in Sources */,
+				D51100000000000000000025 /* SecondDeviceFlowTests.swift in Sources */,
 				D51100000000000000000013 /* StoreTests.swift in Sources */,
 				D51100000000000000000014 /* BundleModuleShim.swift in Sources */,
 			);

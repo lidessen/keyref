@@ -4,7 +4,7 @@
 
 设计见 [docs/design.md](../docs/design.md) 的「iOS 应用」和「密码学」两节。
 
-- Swift + SwiftUI。最低系统按 iOS 17 规划（CryptoKit 的 HPKE 与 Swift 并发模型都比较完整）。
+- Swift + SwiftUI。最低系统 **iOS 26**（design v0.5 起随 Liquid Glass 提升；CryptoKit 原生 RFC 9180 HPKE，隔区私钥原生接入）。
 - 解锁用 Face ID / Touch ID（`LocalAuthentication`）。包裹 VMK 的协定密钥放在 Secure Enclave，曲线只能是 P-256。
 - 另有一把 Secure Enclave 的 P-256 签名密钥，用来给条目密文和配对记录签名。
 - 条目的创建、修改、删除、轮换只发生在这台（或以后的另一台）owner 设备上。CLI 不能改保险库。
@@ -16,14 +16,14 @@
 
 ```
 ios/
-├── Package.swift            # KeyrefCore（密码学/协议/同步）+ KeyrefUI（全部界面）
-├── Sources/KeyrefCore/      # UI-free 核心：加密、APIClient、SyncEngine、VaultFlows
-├── Sources/KeyrefUI/        # SwiftUI 界面层（docs/ios-ui.md 的 17 屏）
+├── Package.swift            # KeyrefCore（密码学/协议/同步/审批/双机配对）+ KeyrefUI（全部界面）
+├── Sources/KeyrefCore/      # UI-free 核心：加密、APIClient、SyncEngine、VaultFlows、ApprovalFlows、OwnerPairing
+├── Sources/KeyrefUI/        # SwiftUI 界面层（docs/ios-ui.md 的 17 屏，iOS 26 Liquid Glass）
 ├── Tests/                   # KeyrefCoreTests + KeyrefUITests（两套都跑模拟器与 macOS）
-├── Keyref.xcodeproj         # App 壳（target "Keyref"，iOS 17+）
+├── Keyref.xcodeproj         # App 壳（target "Keyref"，iOS 26+）
 └── Keyref/                  # @main 入口与 Info.plist
 ```
 
 构建：`xcodebuild -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`。
 
-界面规格见 [docs/ios-ui.md](../docs/ios-ui.md)（Phase 1 范围：四 Tab、创建/恢复/配对/撤销/审计/设置；审批收件箱与 Plus 内购在 Phase 2）。
+界面规格见 [docs/ios-ui.md](../docs/ios-ui.md)。已实现：四 Tab、创建/恢复/接管/配对/撤销/审计/设置、审批收件箱（前台轮询 + Face ID 批准）、allowCommands/allowedHosts 精细编辑、第二台 iPhone 在线配对。推送（APNs）与 Plus 内购需要 Apple 开发者凭据，另行接入。

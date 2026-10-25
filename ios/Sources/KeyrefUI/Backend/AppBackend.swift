@@ -120,6 +120,31 @@ public protocol AppBackend: AnyObject {
     /// rebuild only refreshes this device's row (§8.5, §9.5).
     func commitRecovery(_ prep: RecoveryPreparation,
                         progress: @Sendable @escaping (RecoveryStep) async -> Void) async throws -> TakeoverSummary
+
+    // MARK: approvals (Phase 2, §8.3)
+
+    /// `GET /v1/approvals?status=pending`, then opens and signature-verifies
+    /// each request against the signed directory. Requests that fail to
+    /// decrypt or verify come back with valid == false (显示为无效并可忽略).
+    func loadPendingApprovals() async -> [ApprovalInboxEntry]
+    /// Submits the §6.21 decision. Approve requires the unlocked VMK: the
+    /// item key is wrapped one-time to the request's ephemeral key (§8.3
+    /// step 3); deny carries no key material. The Face ID gate is the
+    /// caller's (one authentication, one semantic, §3.3).
+    func decideApproval(approvalID: String, approve: Bool) async throws
+
+    // MARK: second iPhone (Phase 2, §9.4 path 2)
+
+    /// 新手机：generates this device's owner identity, keeps it pending and
+    /// returns the join offer to render as a QR.
+    func prepareJoinOffer(label: String) async throws -> JoinOffer
+    /// 旧手机（Face ID by caller）：signs a directory revision with both
+    /// owners (PUT /v1/directory, revision + 1) and wraps the VMK to the
+    /// new phone's key. Returns the handoff payload to display as a QR.
+    func admitSecondDevice(offer: JoinOffer, label: String) async throws -> String
+    /// 新手机：parses the handoff, unwraps the VMK (AEAD tag = verdict),
+    /// persists local state, starts a session and bootstraps from cursor 0.
+    func adoptSecondDevice(handoffPayload: String) async throws
 }
 
 /// A freshly created vault, before upload. The recovery code is displayed

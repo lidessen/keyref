@@ -36,10 +36,26 @@ public final class LiveBackend: AppBackend {
     var renewalSigner: Ed25519Signer?
     var pendingCreation: CreateVaultRequest?
     var pendingRecovery: PendingRecovery?
+    /// 新手机在「加入已有保险库」时暂存的 owner 身份（§9.4 path 2），
+    /// adopt 时才落 Keychain——取消加入就不留痕迹。
+    var pendingJoin: PendingJoin?
     /// Device ids whose §8.4 rotation is mid-flight (§2.10 失败态).
     var pendingRotation: [String: Int] = [:]
     var auditCursor: Int64 = 0
     var encryptedAudit: [EncryptedAuditRow] = []
+    /// 最近一次拉到的待审批原始行 + 已解开的明文（decide 时复用，§8.3）。
+    var approvalRecords: [String: ApprovalRecord] = [:]
+
+    struct PendingJoin {
+        var owner: OwnerKeys
+        var deviceID: String
+        var label: String
+    }
+
+    struct ApprovalRecord {
+        var row: PendingApproval
+        var plaintext: ApprovalRequestPlaintext
+    }
 
     struct EncryptedAuditRow: Sendable {
         var seq: Int64
@@ -54,15 +70,20 @@ public final class LiveBackend: AppBackend {
         var newDeviceID: String
     }
 
+    let urlSession: URLSession
+
     public init(keyStore: KeyStore, stateStore: UIStateStore,
-                origin: URL = URL(string: "https://sync.keyref.app")!) {
+                origin: URL = URL(string: "https://sync.keyref.app")!,
+                urlSession: URLSession = .shared) {
         self.keyStore = keyStore
         self.stateStore = stateStore
         self.origin = origin
+        self.urlSession = urlSession
     }
 
     var api: APIClient {
-        APIClient(baseURL: origin, bearerToken: { [sessionBox] in sessionBox.get() })
+        APIClient(baseURL: origin, session: urlSession,
+                  bearerToken: { [sessionBox] in sessionBox.get() })
     }
 
     // MARK: - lifecycle (S2/S3/S4)
@@ -1018,5 +1039,185 @@ public final class LiveBackend: AppBackend {
         }
         return TakeoverSummary(itemCount: itemCount,
                                revokedDeviceCount: prep.deviceCountToRevoke)
+    }
+
+    // MARK: - approvals (Phase 2, §8.3, protocol §6.19–§6.21)
+
+    /// Pulls pending approvals and prepares them for display: open the
+    /// request for this owner, re-verify the CLI signature against the
+    /// signed directory (§8.3 step 3 — 通过才展示；验不过显示为无效并可忽略).
+    public func loadPendingApprovals() async -> [ApprovalInboxEntry] {
+        guard let vaultID, let owner, let deviceID = ownDeviceID, vmk != nil else {
+            return []
+        }
+        let rows: [PendingApproval]
+        do {
+            rows = try await api.listApprovals(status: "pending").approvals
+        } catch {
+            return []
+        }
+        let devices = directoryDevices() ?? []
+        let infos = stateStore.allDeviceInfo()
+        var out: [ApprovalInboxEntry] = []
+        approvalRecords.removeAll()
+        for row in rows {
+            let device = devices.first { $0.deviceID == row.cliDeviceID }
+            let label = infos[row.cliDeviceID]?.label ?? device?.fingerprint ?? row.cliDeviceID
+            guard let device else {
+                // 发起设备不在签名目录里：无从验证，视为无效。
+                out.append(.invalid(row, cliDeviceLabel: label))
+                continue
+            }
+            do {
+                let plaintext = try ApprovalFlows.openRequest(row, owner: owner,
+                                                              vaultID: vaultID,
+                                                              ownerDeviceID: deviceID)
+                try ApprovalFlows.verifyRequestSignature(row, device: device)
+                try ApprovalFlows.validatePlaintext(plaintext, pending: row)
+                approvalRecords[row.approvalID] = ApprovalRecord(row: row, plaintext: plaintext)
+                let itemMeta = stateStore.itemByID(row.itemID).flatMap {
+                    try? decryptMeta($0, vmk: vmk!, vaultID: vaultID)
+                }
+                out.append(ApprovalInboxEntry(
+                    approvalID: row.approvalID,
+                    cliDeviceID: row.cliDeviceID,
+                    cliDeviceLabel: label,
+                    itemID: row.itemID,
+                    itemName: itemMeta?.name ?? row.itemID,
+                    itemRef: itemMeta?.ref ?? "",
+                    argv: plaintext.argv,
+                    refs: plaintext.refs,
+                    injection: plaintext.injection,
+                    hosts: plaintext.hosts,
+                    createdAt: row.createdAt,
+                    expiresAt: row.expiresAt,
+                    valid: true))
+            } catch {
+                out.append(.invalid(row, cliDeviceLabel: label))
+            }
+        }
+        return out
+    }
+
+    public func decideApproval(approvalID: String, approve: Bool) async throws {
+        guard let vaultID else { throw LockError.noVault }
+        guard let record = approvalRecords[approvalID] else {
+            throw APIError.notFound
+        }
+        let decision: ApprovalDecisionRequest
+        if approve {
+            // §8.3 step 3: Face ID 已过（调用方），现在用请求里的临时
+            // X25519 公钥包裹该条目 item key——只对这一次请求、这一个条目。
+            guard let (vmkValue, _, _) = try? guardUnlocked() else {
+                throw LockError.noVault
+            }
+            guard let itemRow = stateStore.itemByID(record.plaintext.itemID) else {
+                throw APIError.notFound
+            }
+            let itemKey = try ItemCrypto.unwrapItemKey(vmk: vmkValue,
+                                                       blob: itemRow.vaultWrappedItemKey,
+                                                       vaultID: vaultID,
+                                                       itemID: record.plaintext.itemID)
+            decision = try ApprovalFlows.approveDecision(vaultID: vaultID,
+                                                         pending: record.row,
+                                                         plaintext: record.plaintext,
+                                                         itemKey: itemKey)
+        } else {
+            decision = ApprovalFlows.denyDecision()
+        }
+        try await api.submitApprovalDecision(approvalID: approvalID, decision)
+        approvalRecords.removeValue(forKey: approvalID)
+    }
+
+    // MARK: - second iPhone (Phase 2, §9.4 path 2)
+
+    /// 新手机：生成 owner 身份（暂存内存，adopt 才落 Keychain），出 join offer。
+    public func prepareJoinOffer(label: String) async throws -> JoinOffer {
+        guard !hasVault else {
+            throw APIError.invalidField  // 已有保险库的设备不走加入流程
+        }
+        let joinOwner = try generateOwnerKeys()
+        let deviceID = KeyrefEncoding.newID()
+        pendingJoin = PendingJoin(owner: joinOwner, deviceID: deviceID, label: label)
+        return JoinOffer(hpkeKEM: joinOwner.kemKEMName,
+                         hpkePublicKey: joinOwner.kemPublicKey,
+                         signAlg: joinOwner.signer.signAlg,
+                         signPublicKey: joinOwner.signPublicKey,
+                         deviceID: deviceID,
+                         label: label,
+                         origin: origin)
+    }
+
+    /// 旧手机：签「两台 owner 都 active」的新目录（revision + 1）交给服务器
+    /// （PUT /v1/directory，设备行随目录落库），再把 VMK HPKE 给新手机。
+    public func admitSecondDevice(offer: JoinOffer, label: String) async throws -> String {
+        let (vmk, owner, vaultID) = try guardUnlocked()
+        guard offer.deviceID != ownDeviceID,
+              KeyrefEncoding.isValidID(offer.deviceID) else {
+            throw KeyrefWireError.invalidField("new owner device id is not valid")
+        }
+        guard let current = stateStore.currentDirectory() else {
+            throw APIError.notFound
+        }
+        let join = try OwnerPairing.buildJoinDirectory(vaultID: vaultID, offer: offer,
+                                                       currentDirectorySigned: current.signed)
+        let joinDevices = join.devices.map {
+            KeyrefDirectoryDevice(deviceID: $0.deviceID, kind: $0.kind, status: $0.status,
+                                  hpkeKEM: $0.hpkeKEM, hpkePublicKey: $0.hpkePublicKey,
+                                  signAlg: $0.signAlg, signPublicKey: $0.signPublicKey,
+                                  renewalSignPublicKey: $0.renewalSignPublicKey,
+                                  grantsDigest: $0.grantsDigest)
+        }
+        try await publishDirectory(joinDevices, revision: join.revision,
+                                   owner: owner, vaultID: vaultID)
+        let wrap = try OwnerPairing.wrapVMK(vmk: vmk, vaultID: vaultID, offer: offer)
+        let handoff = JoinHandoff(vaultID: vaultID,
+                                  newOwnerDeviceID: offer.deviceID,
+                                  directoryRevision: join.revision,
+                                  ownerSignPublicKey: owner.signPublicKey,
+                                  vmkWrap: wrap)
+        stateStore.setDeviceInfo(UIStateStore.DeviceInfo(label: label, createdAt: nowMillis()),
+                                 for: offer.deviceID)
+        _ = try? await syncNow()
+        return handoff.payload()
+    }
+
+    /// 新手机：解 VMK（AEAD tag = 判真伪）、落 Keychain、开 session、
+    /// cursor=0 引导全部密文（§10.6）。
+    public func adoptSecondDevice(handoffPayload: String) async throws {
+        guard let pending = pendingJoin else {
+            throw APIError.transport("no pending join offer")
+        }
+        let handoff = try JoinHandoff.parse(handoffPayload)
+        guard handoff.newOwnerDeviceID == pending.deviceID else {
+            throw KeyrefWireError.invalidField("handoff is for another device")
+        }
+        let joinVMK = try OwnerPairing.unwrapHandoffVMK(handoff, owner: pending.owner)
+
+        try pending.owner.persist(to: keyStore, biometryRequired: false)
+        try keyStore.store(.vmkWrap, handoff.vmkWrap)
+        try keyStore.store(.vaultID, Data(handoff.vaultID.utf8))
+        try stateStore.setVaultID(handoff.vaultID)
+        try stateStore.setPinnedOwnerKey(handoff.ownerSignPublicKey)
+        try stateStore.setOwnDeviceID(pending.deviceID)
+        try stateStore.setCursor(0)
+        stateStore.setDeviceInfo(UIStateStore.DeviceInfo(label: pending.label, createdAt: nowMillis()),
+                                 for: pending.deviceID)
+
+        owner = pending.owner
+        renewalSigner = nil
+        vaultID = handoff.vaultID
+        ownDeviceID = pending.deviceID
+        hasVault = true
+        localWrapInvalid = false
+        vmk = joinVMK
+        pendingJoin = nil
+
+        if let session = try? await SessionClient(api: api).start(deviceID: pending.deviceID,
+                                                                  signer: pending.owner.signer) {
+            sessionBox.set(session.token)
+        }
+        let engine = SyncEngine(api: api)
+        _ = try? await engine.run(store: stateStore)
     }
 }

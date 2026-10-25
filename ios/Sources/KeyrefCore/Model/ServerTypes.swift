@@ -21,6 +21,94 @@ public enum WireJSON {
     }
 }
 
+/// A decoded JSON value of any shape, used for sync `change.data`: the
+/// protocol transports it as an embedded JSON object (protocol §8.1), not
+/// as a Base64 string, so it must not go through the Base64 Data strategy.
+public indirect enum RawJSON: Equatable, Sendable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([RawJSON])
+    case object([String: RawJSON])
+
+    /// Captures raw JSON bytes produced by `WireJSON.encoder` or the server.
+    public init(json: Data) throws {
+        self = try RawJSON.fromAny(JSONSerialization.jsonObject(with: json))
+    }
+
+    /// The value re-encoded as JSON bytes, ready for `WireJSON.decoder`.
+    public func jsonData() throws -> Data {
+        try JSONSerialization.data(withJSONObject: foundationValue)
+    }
+
+    private var foundationValue: Any {
+        switch self {
+        case .null: return NSNull()
+        case .bool(let b): return b
+        case .number(let n): return n
+        case .string(let s): return s
+        case .array(let a): return a.map { $0.foundationValue }
+        case .object(let o): return o.mapValues { $0.foundationValue }
+        }
+    }
+
+    private static func fromAny(_ v: Any) throws -> RawJSON {
+        switch v {
+        case is NSNull: return .null
+        case let n as NSNumber:
+            // JSONSerialization hands down both booleans and numbers as
+            // NSNumber; only CFBoolean instances are JSON booleans.
+            if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                return .bool(n.boolValue)
+            }
+            return .number(n.doubleValue)
+        case let s as String: return .string(s)
+        case let a as [Any]: return .array(try a.map(fromAny))
+        case let o as [String: Any]:
+            var out: [String: RawJSON] = [:]
+            for (k, v) in o { out[k] = try fromAny(v) }
+            return .object(out)
+        default:
+            throw DecodingError.dataCorrupted(.init(codingPath: [],
+                debugDescription: "unsupported JSON value: \(type(of: v))"))
+        }
+    }
+}
+
+extension RawJSON: Decodable {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() {
+            self = .null
+        } else if let b = try? c.decode(Bool.self) {
+            self = .bool(b)
+        } else if let n = try? c.decode(Double.self) {
+            self = .number(n)
+        } else if let s = try? c.decode(String.self) {
+            self = .string(s)
+        } else if let a = try? c.decode([RawJSON].self) {
+            self = .array(a)
+        } else {
+            self = .object(try c.decode([String: RawJSON].self))
+        }
+    }
+}
+
+extension RawJSON: Encodable {
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .bool(let b): try c.encode(b)
+        case .number(let n): try c.encode(n)
+        case .string(let s): try c.encode(s)
+        case .array(let a): try c.encode(a)
+        case .object(let o): try c.encode(o)
+        }
+    }
+}
+
 // MARK: - sync rows (§8.3)
 
 /// Item row as delivered by GET /v1/items and by sync "item" changes.
@@ -140,8 +228,8 @@ public struct SyncChange: Codable, Sendable {
     public var entity: String
     public var entityID: String
     public var createdAt: Int64
-    /// Raw JSON whose shape depends on `entity` (§8.3).
-    public var data: Data
+    /// Embedded JSON object whose shape depends on `entity` (protocol §8.1).
+    public var data: RawJSON
 
     enum CodingKeys: String, CodingKey {
         case seq
@@ -154,12 +242,13 @@ public struct SyncChange: Codable, Sendable {
     /// Decodes `data` for the known entities. Unknown entities decode to
     /// nil and are recorded but not applied (same policy as the CLI).
     public func decodedData() throws -> SyncChangePayload? {
+        let raw = try data.jsonData()
         switch entity {
-        case KeyrefEntity.item: return .item(try WireJSON.decoder.decode(ItemData.self, from: data))
-        case KeyrefEntity.grant: return .grant(try WireJSON.decoder.decode(GrantData.self, from: data))
-        case KeyrefEntity.device: return .device(try WireJSON.decoder.decode(DeviceData.self, from: data))
-        case KeyrefEntity.directory: return .directory(try WireJSON.decoder.decode(DirectoryData.self, from: data))
-        case KeyrefEntity.approval: return .approval(try WireJSON.decoder.decode(ApprovalData.self, from: data))
+        case KeyrefEntity.item: return .item(try WireJSON.decoder.decode(ItemData.self, from: raw))
+        case KeyrefEntity.grant: return .grant(try WireJSON.decoder.decode(GrantData.self, from: raw))
+        case KeyrefEntity.device: return .device(try WireJSON.decoder.decode(DeviceData.self, from: raw))
+        case KeyrefEntity.directory: return .directory(try WireJSON.decoder.decode(DirectoryData.self, from: raw))
+        case KeyrefEntity.approval: return .approval(try WireJSON.decoder.decode(ApprovalData.self, from: raw))
         default: return nil
         }
     }

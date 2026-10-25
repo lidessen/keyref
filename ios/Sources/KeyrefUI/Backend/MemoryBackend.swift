@@ -42,6 +42,20 @@ public final class MemoryBackend: AppBackend {
     public private(set) var pairingCompletions: [(offer: PairingOffer, selections: [GrantSelection])] = []
     public private(set) var grantOperations: [(deviceID: String, itemID: String, kind: String, revoke: Bool)] = []
 
+    // Phase 2 seams: approvals (§8.3) and the second iPhone (§9.4 path 2).
+    public var approvalEntries: [ApprovalInboxEntry] = []
+    public private(set) var approvalDecisions: [(approvalID: String, approve: Bool)] = []
+    public var decideApprovalError: Error?
+    public var joinOffers: [JoinOffer] = []
+    public var admitSecondDeviceError: Error?
+    public var adoptSecondDeviceError: Error?
+    public private(set) var admittedJoins: [(offer: JoinOffer, label: String)] = []
+    public private(set) var adoptedHandoffs: [String] = []
+    /// What admitSecondDevice hands back (the UI renders it as a QR).
+    public var nextHandoffPayload: String?
+    /// 新手机端回执的 vault 覆盖（测试里模拟「旧手机给的 vault」）。
+    public var adoptOverridesVaultID: String?
+
     public init(origin: URL = URL(string: "https://sync.keyref.app")!) {
         self.origin = origin
     }
@@ -329,5 +343,55 @@ public final class MemoryBackend: AppBackend {
         unlocked = true
         return TakeoverSummary(itemCount: items.count,
                                revokedDeviceCount: prep.deviceCountToRevoke)
+    }
+
+    // MARK: approvals (§8.3)
+
+    public func loadPendingApprovals() async -> [ApprovalInboxEntry] {
+        approvalEntries
+    }
+
+    public func decideApproval(approvalID: String, approve: Bool) async throws {
+        if let decideApprovalError { throw decideApprovalError }
+        approvalDecisions.append((approvalID, approve))
+        approvalEntries.removeAll { $0.approvalID == approvalID }
+    }
+
+    // MARK: second iPhone (§9.4 path 2)
+
+    public func prepareJoinOffer(label: String) async throws -> JoinOffer {
+        let offer = JoinOffer(
+            hpkeKEM: KEMName.p256,
+            hpkePublicKey: Data([0x04]) + Data(repeating: 0x11, count: 64),
+            signAlg: SignAlg.ecdsaP256,
+            signPublicKey: Data([0x04]) + Data(repeating: 0x22, count: 64),
+            deviceID: KeyrefEncoding.newID(),
+            label: label, origin: origin)
+        joinOffers.append(offer)
+        return offer
+    }
+
+    public func admitSecondDevice(offer: JoinOffer, label: String) async throws -> String {
+        if let admitSecondDeviceError { throw admitSecondDeviceError }
+        admittedJoins.append((offer, label))
+        let handoff = JoinHandoff(
+            vaultID: vaultID ?? KeyrefEncoding.newID(),
+            newOwnerDeviceID: offer.deviceID,
+            directoryRevision: 2,
+            ownerSignPublicKey: Data([0x04]) + Data(repeating: 0x33, count: 64),
+            vmkWrap: Data(repeating: 0x44, count: 129))
+        let payload = nextHandoffPayload ?? handoff.payload()
+        return payload
+    }
+
+    public func adoptSecondDevice(handoffPayload: String) async throws {
+        if let adoptSecondDeviceError { throw adoptSecondDeviceError }
+        let handoff = try JoinHandoff.parse(handoffPayload)
+        adoptedHandoffs.append(handoffPayload)
+        hasVault = true
+        vaultID = adoptOverridesVaultID ?? handoff.vaultID
+        ownDeviceID = handoff.newOwnerDeviceID
+        unlocked = true
+        cachedItemCount = items.count
     }
 }

@@ -86,7 +86,10 @@ final class SyncEngineTests: XCTestCase {
     }
 
     private func change(seq: Int64, entity: String, entityID: String, data: Data) -> SyncChange {
-        SyncChange(seq: seq, entity: entity, entityID: entityID, createdAt: 1, data: data)
+        // The protocol transports change.data as an embedded JSON object
+        // (protocol §8.1), so the encoded row is captured as RawJSON.
+        SyncChange(seq: seq, entity: entity, entityID: entityID, createdAt: 1,
+                   data: (try? RawJSON(json: data)) ?? .null)
     }
 
     // MARK: items
@@ -240,7 +243,7 @@ final class SyncEngineTests: XCTestCase {
             }
             let body = try WireJSON.encoder.encode(SyncResponse(cursor: 9, hasMore: false, changes: [
                 SyncChange(seq: 9, entity: "item", entityID: "item:\(itemID)",
-                           createdAt: 1, data: WireJSON.encoder.encode(bootstrapRow)),
+                           createdAt: 1, data: (try? RawJSON(json: WireJSON.encoder.encode(bootstrapRow))) ?? .null),
             ]))
             return (200, body)
         }
@@ -303,7 +306,7 @@ final class SyncEngineTests: XCTestCase {
             if cursor == 0 {
                 let page = try WireJSON.encoder.encode(SyncResponse(cursor: 3, hasMore: true, changes: [
                     SyncChange(seq: 1, entity: "item", entityID: "item:\(itemID)",
-                               createdAt: 1, data: WireJSON.encoder.encode(row)),
+                               createdAt: 1, data: (try? RawJSON(json: WireJSON.encoder.encode(row))) ?? .null),
                 ]))
                 return (200, page)
             }

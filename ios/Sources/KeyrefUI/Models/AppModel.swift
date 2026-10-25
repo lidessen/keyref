@@ -47,6 +47,8 @@ public final class AppModel {
     public let devices: DevicesStore
     public let audit: AuditStore
     public let settings: SettingsStore
+    /// 审批收件箱（Phase 2, §8.3）：前台轮询 + 待审批角标。
+    public let approvals: ApprovalsStore
 
     public init(backend: any AppBackend,
                 authenticator: any BiometricAuthenticator,
@@ -63,6 +65,7 @@ public final class AppModel {
         self.devices = DevicesStore(backend: backend, haptics: haptics)
         self.audit = AuditStore(backend: backend, haptics: haptics)
         self.settings = SettingsStore(backend: backend, haptics: haptics, autoLock: autoLock)
+        self.approvals = ApprovalsStore(backend: backend, haptics: haptics)
     }
 
     /// Boots the app: reads local state and picks the entry face.
@@ -81,6 +84,7 @@ public final class AppModel {
         await items.refresh()
         await devices.refresh()
         await settings.refreshAccount()
+        await approvals.refresh()
     }
 
     // MARK: unlock (S2 → S3/S4)
@@ -107,6 +111,8 @@ public final class AppModel {
                 await refreshAfterUnlock()
                 // Fire-and-forget first sync; failures surface in the banner.
                 await items.syncNow()
+                // 解锁后开始前台审批轮询（§8.3；只在 App 活跃时进行）。
+                approvals.setActive(true)
             } catch LockError.wrapInvalid {
                 lockDisplay = .wrapInvalid
             } catch {
@@ -121,6 +127,7 @@ public final class AppModel {
         switch scenePhase {
         case .background:
             backgroundedAt = now
+            approvals.setActive(false)   // 轮询只在 App 活跃时进行（§8.3）
         case .active:
             if let backgroundedAt, phase == .unlocked {
                 if now.timeIntervalSince(backgroundedAt) >= settings.autoLock.seconds {
@@ -128,6 +135,11 @@ public final class AppModel {
                 }
             }
             backgroundedAt = nil
+            if phase == .unlocked {
+                approvals.setActive(true)
+            }
+        case .inactive:
+            approvals.setActive(false)
         default:
             break
         }
@@ -138,6 +150,7 @@ public final class AppModel {
         backend.lock()
         phase = .locked
         lockDisplay = backend.localWrapInvalid ? .wrapInvalid : .waiting
+        approvals.setActive(false)
     }
 
     /// §3.4: 拷贝只存在于明文层 — local-only clipboard, 90-second expiry,
@@ -173,6 +186,7 @@ public final class AppModel {
             phase = .unlocked
             await refreshAfterUnlock()
             await items.syncNow()
+            approvals.setActive(true)
         } else {
             phase = .locked
             lockDisplay = .waiting

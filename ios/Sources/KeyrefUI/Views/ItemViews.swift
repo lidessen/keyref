@@ -519,24 +519,18 @@ struct ItemEditView: View {
         }
     }
 
-    /// 策略区（Phase 1 基础编辑，§13）。
+    /// 策略区（Phase 2 精细编辑, §13）：allowCommands / allowedHosts 列表
+    /// 增删 + 命令搜索 + 覆盖默认拒绝名单的红色警示卡；基础开关不动。
     @ViewBuilder
     var policySection: some View {
+        allowCommandsSection
+        allowedHostsSection
         Section {
             // Phase 1 固定「标准」，不提供 approval 档位。
             LabeledContent("敏感级别", value: "标准")
             Toggle(isOn: $model.denyShells) {
                 Text("拒绝 shell 与解释器")
             }
-            TextField("命令白名单（逗号分隔）", text: $model.allowCommandsText)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.body.monospaced())
-            TextField("允许的主机（逗号分隔）", text: $model.allowedHostsText)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .keyboardType(.URL)
-                .font(.body.monospaced())
             Toggle(isOn: Binding(
                 get: { model.allowArgv },
                 set: { newValue in
@@ -556,8 +550,6 @@ struct ItemEditView: View {
             }
         } header: {
             Text("策略")
-        } footer: {
-            Text("只检查命令参数里出现的 http(s) 主机名，必须与列表完全一致。重定向、IP 直连、程序内拼出的 URL 都查不到——这不是网络隔离。")
         }
         .alert("进程参数对本机所有用户可见", isPresented: $model.pendingAllowArgvAlert) {
             Button("允许", role: .destructive) {
@@ -568,6 +560,127 @@ struct ItemEditView: View {
             }
         } message: {
             Text("打开后，秘密可以出现在命令行参数里。同一台机器上的任何用户都能通过进程列表（ps、活动监视器）看到。CLI 侧还必须显式加 --allow-argv，两边都打开才生效。")
+        }
+    }
+
+    /// 命令白名单：列表增删 + 搜索建议；覆盖默认拒绝名单时出现红色警示卡
+    /// （§13：解释器一旦放行脱敏器会失明，建议配合 approval）。
+    @ViewBuilder
+    var allowCommandsSection: some View {
+        Section {
+            ForEach(model.allowCommands, id: \.self) { command in
+                HStack {
+                    Text(command)
+                        .font(.body.monospaced())
+                    if DefaultDeny.isDenied(command) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("在默认拒绝名单上")
+                    }
+                    Spacer()
+                    Button {
+                        model.removeAllowCommand(command)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("移除 \(command)")
+                }
+            }
+            HStack {
+                TextField("添加命令（argv0，如 curl）", text: $model.newCommandInput)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+                    .onSubmit {
+                        if model.addAllowCommand(model.newCommandInput) == .added {
+                            model.newCommandInput = ""
+                        }
+                    }
+                Button("添加") {
+                    if model.addAllowCommand(model.newCommandInput) == .added {
+                        model.newCommandInput = ""
+                    }
+                }
+                .disabled(model.newCommandInput.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            // §13 命令搜索：输入即搜候选；命中默认拒绝名单的候选带警示标记。
+            TextField("搜索命令", text: $model.commandSearch)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            ForEach(model.commandSearchResults(), id: \.self) { suggestion in
+                Button {
+                    if model.addAllowCommand(suggestion) == .added {
+                        model.commandSearch = ""
+                    }
+                } label: {
+                    HStack {
+                        Text(suggestion)
+                            .font(.body.monospaced())
+                            .foregroundStyle(DefaultDeny.isDenied(suggestion) ? .red : .primary)
+                        Spacer()
+                        if DefaultDeny.isDenied(suggestion) {
+                            Text("默认拒绝")
+                                .font(.caption2)
+                                .foregroundStyle(.red)
+                        }
+                        Image(systemName: "plus.circle")
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+            if !model.denyListHits.isEmpty {
+                WarningCard(
+                    title: "白名单覆盖了默认拒绝名单",
+                    body_: "已放行 \(model.denyListHits.joined(separator: "、"))——解释器一旦放行，模型可以把秘密切片打印，输出脱敏器会失明。建议把这类条目的敏感级别设为 approval，让每次执行都过一遍 Face ID（§7.3）。")
+            }
+        } header: {
+            Text("命令白名单")
+        } footer: {
+            Text("白名单非空时它就是全部：argv0 必须命中其中一项。名单可以覆盖默认拒绝——保存时会再向你确认一次。")
+        }
+    }
+
+    /// 参数检查（allowedHosts）：坚持 §7.3 的措辞，不叫「网络隔离」。
+    @ViewBuilder
+    var allowedHostsSection: some View {
+        Section {
+            ForEach(model.allowedHosts, id: \.self) { host in
+                HStack {
+                    Text(host)
+                        .font(.body.monospaced())
+                    Spacer()
+                    Button {
+                        model.removeAllowedHost(host)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("移除 \(host)")
+                }
+            }
+            HStack {
+                TextField("添加主机（如 api.openai.com）", text: $model.newHostInput)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.body.monospaced())
+                    .onSubmit {
+                        if model.addAllowedHost(model.newHostInput) == .added {
+                            model.newHostInput = ""
+                        }
+                    }
+                Button("添加") {
+                    if model.addAllowedHost(model.newHostInput) == .added {
+                        model.newHostInput = ""
+                    }
+                }
+                .disabled(model.newHostInput.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        } header: {
+            Text("参数检查")
+        } footer: {
+            Text("只检查命令参数里出现的 http(s) 主机名，必须与列表完全一致。重定向、IP 直连、程序内拼出的 URL 都查不到——这不是网络隔离。空列表表示不做参数检查。")
         }
     }
 

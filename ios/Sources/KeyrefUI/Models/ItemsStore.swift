@@ -171,6 +171,11 @@ public final class ItemEditorModel {
     public var pendingLeakWarning: [LeakFinding]?
     public var saving = false
     public var errorMessage: String?
+    /// 精细编辑（§13）的命令搜索词。
+    public var commandSearch = ""
+    /// 精细编辑的输入框暂存值（添加一条即清空）。
+    public var newCommandInput = ""
+    public var newHostInput = ""
 
     public struct LeakFinding: Equatable, Sendable {
         public var field: String   // "名称" | "描述"
@@ -205,6 +210,91 @@ public final class ItemEditorModel {
     public var refIsValid: Bool {
         if !isCreate { return true }  // 编辑页只读展示（§2.6）
         return RefValidation.isValid(ref)
+    }
+
+    // MARK: allowCommands / allowedHosts 精细编辑（Phase 2, §13）
+
+    /// 命令搜索的建议池：默认拒绝名单 + 常见白名单候选（§13 命令搜索）。
+    public static var commandSuggestions: [String] {
+        DefaultDeny.commands.union(["curl", "gh", "git", "aws", "kubectl", "openai"])
+            .sorted()
+    }
+
+    /// 当前搜索词命中的建议（输入即搜；命中默认拒绝名单的项在 UI 里警示）。
+    public func commandSearchResults() -> [String] {
+        let q = commandSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return [] }
+        return Self.commandSuggestions.filter { $0.contains(q) && !allowCommands.contains($0) }
+    }
+
+    /// 添加一条 allowCommands（argv0）。返回结果供 UI 决定是否提示；命中
+    /// 默认拒绝名单时发 warning 触感（§3.7），保存前的确认弹窗仍在
+    /// save(force:) 管线里（§2.6 既有行为不动）。
+    @discardableResult
+    public func addAllowCommand(_ raw: String) -> AddResult {
+        let token = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !token.isEmpty,
+              !token.contains(where: { $0 == "," || $0 == "，" || $0.isWhitespace }),
+              !token.hasPrefix("-") else {
+            return .invalid
+        }
+        var list = allowCommands
+        guard !list.contains(token) else { return .duplicate }
+        list.append(token)
+        allowCommandsText = list.joined(separator: ", ")
+        if DefaultDeny.isDenied(token) {
+            haptics.fire(.warning)
+        }
+        return .added
+    }
+
+    public func removeAllowCommand(_ name: String) {
+        allowCommandsText = allowCommands.filter { $0 != name }.joined(separator: ", ")
+    }
+
+    /// 全部落到默认拒绝名单上的 allowCommands（红色警示卡的触发条件，§13：
+    /// 解释器一旦放行脱敏器会失明，建议配合 approval）。
+    public var denyListHits: [String] {
+        allowCommands.filter { DefaultDeny.isDenied($0) }
+    }
+
+    /// 参数检查主机名合法性：无 scheme / 路径 / 端口 / 空格的点分域名。
+    public static func isValidHost(_ raw: String) -> Bool {
+        let h = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !h.isEmpty, h.count <= 253 else { return false }
+        if h.contains("://") || h.contains("/") || h.contains(":") || h.contains(" ")
+            || h.contains("?") || h.contains("#") {
+            return false
+        }
+        for ch in h {
+            if ("a"..."z").contains(ch) || ("0"..."9").contains(ch) || ch == "." || ch == "-" {
+                continue
+            }
+            return false
+        }
+        let labels = h.split(separator: ".", omittingEmptySubsequences: false)
+        return !labels.isEmpty && labels.allSatisfy { !$0.isEmpty }
+    }
+
+    @discardableResult
+    public func addAllowedHost(_ raw: String) -> AddResult {
+        let host = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        guard Self.isValidHost(host) else { return .invalid }
+        var list = allowedHosts
+        guard !list.contains(host) else { return .duplicate }
+        list.append(host)
+        allowedHostsText = list.joined(separator: ", ")
+        return .added
+    }
+
+    public func removeAllowedHost(_ host: String) {
+        allowedHostsText = allowedHosts.filter { $0 != host }.joined(separator: ", ")
+    }
+
+    public enum AddResult: Equatable, Sendable {
+        case added
+        case duplicate
+        case invalid
     }
 
     public var refConflictName: String? {

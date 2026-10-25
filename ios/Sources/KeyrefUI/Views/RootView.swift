@@ -56,7 +56,9 @@ struct MainTabView: View {
                 .tag(0)
             DeviceListView(app: app)
                 .tabItem {
+                    // 待审批角标（Phase 2, §8.3）：待审批数挂在设备 Tab 上。
                     Label("设备", systemImage: "laptopcomputer.and.iphone")
+                        .badge(app.approvals.badgeCount)
                 }
                 .tag(1)
             AuditListView(app: app)

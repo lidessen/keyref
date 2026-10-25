@@ -10,6 +10,7 @@ struct WelcomeView: View {
     let app: AppModel
     @State private var showCreate = false
     @State private var showRecovery = false
+    @State private var showJoin = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -40,6 +41,14 @@ struct WelcomeView: View {
                     .padding(.vertical, 12)
             }
             .buttonStyle(.glass)
+            Button {
+                showJoin = true
+            } label: {
+                Text("加入已有保险库")
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.glass)
             Text("主密钥只活在这台手机的安全隔区里。服务器只保存密文。没有账号，也没有客服重置。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -59,6 +68,12 @@ struct WelcomeView: View {
         .fullScreenCover(isPresented: $showRecovery) {
             NavigationStack {
                 RecoveryFlowView(app: app, mode: .takeover)
+            }
+        }
+        // Phase 2（§9.4 path 2）：旧手机还在时的第二台 iPhone 在线配对。
+        .fullScreenCover(isPresented: $showJoin) {
+            NavigationStack {
+                SecondDeviceFlowView(app: app, role: .newPhone)
             }
         }
     }
