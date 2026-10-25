@@ -373,7 +373,7 @@ CREATE TABLE pair_sessions (
 
 `vault_wrapped_*` 是用 VMK 包起来的 meta key / item key，给 owner 的其他设备用。它们是密文，服务器解不开。新 iPhone 只要拿到 VMK（恢复码接管 §8.5，或旧手机配对），就能解开全部条目。
 
-`grants.kind = view` 包裹的是 meta key。`kind = use` 包裹的是 item key。`approval` 条目只有 `view`，没有长期的 `use`。
+`grants.kind = view` 包裹的是 meta key。`kind = use` 包裹的是 item key。`approval` 条目只有 `view`，没有长期的 `use`——因此服务器随 view 授权一并下发该条目的 secret 密文（CLI 的一次性解密需要它；机密性由 item key 承担，CLI 永不获得长期 use 授权）。
 
 `directory_signed` 是 owner 签过名的当前有效设备名单和 `directory_revision`，誊本格式见 §9.1——含每台设备的 HPKE/签名公钥和它的 `grants_digest`。客户端用它判断撤销是否生效。诚实的服务器只负责递送这份签名。
 
@@ -1194,7 +1194,7 @@ MCP 放在 Phase 2 而不是 Phase 1，是因为 CLI 已经能被现有 agent �
 3. **账号。** 推荐：没有邮箱，恢复码就是恢复手段（§8.5）。若你希望换手机时用 Apple 登录而不是抄写恢复码，需要单独立项，而且仍然不能让 Apple 或服务器解开 VMK。
 4. **团队共享。** 推荐：MVP 只有一个 owner 保险库。若一年内要给同事授权某几条密钥，grant 模型可以延伸，但目录签名和「谁有权轮换」要重新设计。
 5. **操作系统。** 推荐：CLI 先做 macOS 和 Linux。Windows 的 pty、密钥环和 `/dev/fd` 都不同，放在 Phase 4。
-6. **MCP。** 推荐：Phase 2 提供 `keyref mcp`。如果你的第一个使用者只能通过 MCP 接工具，就放进 Phase 1，协议与 `exec` 相同。
+6. **MCP。** 已定：Phase 2 提供 `keyref mcp`（已实现），工具与语义见 §7.8；如果你的第一个使用者只能通过 MCP 接工具，它随时可以提前单独发布。
 7. **标价。** 推荐：$6/月或 $48/年。架构不依赖这个数字。不要低于第 10.5 节的下限（月付标价抽成 30% 之后仍不低于 $4），否则几个付费用户盖不住固定成本。
 8. **Apple Developer 年费什么时候付。** 协议和自托管不依赖它。推荐：给第一个非自己的人安装，或打开 TestFlight 时再付 $99，并从那天把 $8.25/月计入固定成本。APNs 仍在 Phase 2。年费不是开放的产品问题，分发时机才是。
 9. **秘密类型。** 推荐：MVP 只有字符串。SSH 私钥、文件和 OTP 会带来新的注入和脱敏问题。
