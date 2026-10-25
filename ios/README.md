@@ -1,6 +1,6 @@
 # ios
 
-人用的管理端。**尚未实现。** Agent 不在这里运行；这里负责保管主密钥、编辑条目、配对 CLI、批准敏感的 `exec`。
+人用的管理端。Agent 不在这里运行；这里负责保管主密钥、编辑条目、配对 CLI、批准敏感的 `exec`。
 
 设计见 [docs/design.md](../docs/design.md) 的「iOS 应用」和「密码学」两节。
 
@@ -12,17 +12,18 @@
 - 可以展示明文，但每次「显示」都要再走一次生物识别。不要把明文写进系统日志、崩溃报告或分析 SDK。
 - 同步服务器默认是官方托管。设置里可以改成任意 HTTPS origin，用来连自托管。扫到的配对二维码若指向另一台服务器，先显示域名再请人确认。不要因为官方托管是自己人运营就少做端到端加密。
 
-建议的后续布局：
+当前布局：
 
 ```
 ios/
-└── Keyref/
-    ├── Keyref.xcodeproj
-    └── Keyref/
-        ├── App/
-        ├── Vault/
-        ├── Crypto/
-        └── Pairing/
+├── Package.swift            # KeyrefCore（密码学/协议/同步）+ KeyrefUI（全部界面）
+├── Sources/KeyrefCore/      # UI-free 核心：加密、APIClient、SyncEngine、VaultFlows
+├── Sources/KeyrefUI/        # SwiftUI 界面层（docs/ios-ui.md 的 17 屏）
+├── Tests/                   # KeyrefCoreTests + KeyrefUITests（两套都跑模拟器与 macOS）
+├── Keyref.xcodeproj         # App 壳（target "Keyref"，iOS 17+）
+└── Keyref/                  # @main 入口与 Info.plist
 ```
 
-Phase 0 可以先做成本地保险库：没有服务器也能创建条目、解锁、生成恢复密钥。同步和扫码配对从 Phase 1 开始。
+构建：`xcodebuild -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`。
+
+界面规格见 [docs/ios-ui.md](../docs/ios-ui.md)（Phase 1 范围：四 Tab、创建/恢复/配对/撤销/审计/设置；审批收件箱与 Plus 内购在 Phase 2）。

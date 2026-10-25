@@ -1,0 +1,607 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		D50100000000000000000001 /* KeyrefApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D50200000000000000000001 /* KeyrefApp.swift */; };
+		D50100000000000000000002 /* KeyrefUI in Frameworks */ = {isa = PBXBuildFile; productRef = D50400000000000000000001 /* KeyrefUI */; };
+		D50100000000000000000003 /* KeyrefCore in Frameworks */ = {isa = PBXBuildFile; productRef = D50400000000000000000002 /* KeyrefCore */; };
+		D50100000000000000000004 /* KeyrefCore in Frameworks */ = {isa = PBXBuildFile; productRef = D50400000000000000000002 /* KeyrefCore */; };
+		D50100000000000000000005 /* KeyrefUI in Frameworks */ = {isa = PBXBuildFile; productRef = D50400000000000000000001 /* KeyrefUI */; };
+		D50100000000000000000006 /* KeyrefCore in Frameworks */ = {isa = PBXBuildFile; productRef = D50400000000000000000002 /* KeyrefCore */; };
+		D51100000000000000000001 /* APIClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000001 /* APIClientTests.swift */; };
+		D51100000000000000000002 /* CryptoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000002 /* CryptoTests.swift */; };
+		D51100000000000000000003 /* KeyStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000003 /* KeyStoreTests.swift */; };
+		D51100000000000000000004 /* MockURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000004 /* MockURLProtocol.swift */; };
+		D51100000000000000000005 /* RecoveryCodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000005 /* RecoveryCodeTests.swift */; };
+		D51100000000000000000006 /* SyncEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000006 /* SyncEngineTests.swift */; };
+		D51100000000000000000007 /* TranscriptTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000007 /* TranscriptTests.swift */; };
+		D51100000000000000000008 /* VaultFlowsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000008 /* VaultFlowsTests.swift */; };
+		D51100000000000000000009 /* VectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000009 /* VectorTests.swift */; };
+		D51100000000000000000010 /* Fixtures in Resources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000010 /* Fixtures */; };
+		D51100000000000000000011 /* BundleModuleShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000011 /* BundleModuleShim.swift */; };
+		D51100000000000000000012 /* RecoveryAndValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000012 /* RecoveryAndValidationTests.swift */; };
+		D51100000000000000000013 /* StoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000013 /* StoreTests.swift */; };
+		D51100000000000000000014 /* BundleModuleShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000011 /* BundleModuleShim.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		D50D00000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D50900000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D50600000000000000000001;
+			remoteInfo = Keyref;
+		};
+		D50D00000000000000000002 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D50900000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D50600000000000000000001;
+			remoteInfo = Keyref;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		D50200000000000000000001 /* KeyrefApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyrefApp.swift; sourceTree = "<group>"; };
+		D50200000000000000000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		D50200000000000000000003 /* keyref.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = keyref.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D50200000000000000000004 /* KeyrefCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KeyrefCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D50200000000000000000005 /* KeyrefUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KeyrefUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D51200000000000000000001 /* APIClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000002 /* CryptoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CryptoTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000003 /* KeyStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyStoreTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000004 /* MockURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockURLProtocol.swift; sourceTree = "<group>"; };
+		D51200000000000000000005 /* RecoveryCodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryCodeTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000006 /* SyncEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEngineTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000007 /* TranscriptTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000008 /* VaultFlowsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultFlowsTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000009 /* VectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VectorTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000010 /* Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures; sourceTree = "<group>"; };
+		D51200000000000000000011 /* BundleModuleShim.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleModuleShim.swift; sourceTree = "<group>"; };
+		D51200000000000000000012 /* RecoveryAndValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryAndValidationTests.swift; sourceTree = "<group>"; };
+		D51200000000000000000013 /* StoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D50300000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D50100000000000000000002 /* KeyrefUI in Frameworks */,
+				D50100000000000000000003 /* KeyrefCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D50300000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D50100000000000000000004 /* KeyrefCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D50300000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D50100000000000000000005 /* KeyrefUI in Frameworks */,
+				D50100000000000000000006 /* KeyrefCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D50500000000000000000000 /* ios */ = {
+			isa = PBXGroup;
+			children = (
+				D50500000000000000000006 /* Keyref */,
+				D50500000000000000000007 /* Tests */,
+				D50500000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D50500000000000000000006 /* Keyref */ = {
+			isa = PBXGroup;
+			children = (
+				D50200000000000000000001 /* KeyrefApp.swift */,
+				D50200000000000000000002 /* Info.plist */,
+			);
+			path = Keyref;
+			sourceTree = "<group>";
+		};
+		D50500000000000000000007 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				D50500000000000000000002 /* KeyrefCoreTests */,
+				D50500000000000000000004 /* KeyrefUITests */,
+				D50500000000000000000005 /* XcodeHostShims */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		D50500000000000000000002 /* KeyrefCoreTests */ = {
+			isa = PBXGroup;
+			children = (
+				D51200000000000000000001 /* APIClientTests.swift */,
+				D51200000000000000000002 /* CryptoTests.swift */,
+				D51200000000000000000003 /* KeyStoreTests.swift */,
+				D51200000000000000000004 /* MockURLProtocol.swift */,
+				D51200000000000000000005 /* RecoveryCodeTests.swift */,
+				D51200000000000000000006 /* SyncEngineTests.swift */,
+				D51200000000000000000007 /* TranscriptTests.swift */,
+				D51200000000000000000008 /* VaultFlowsTests.swift */,
+				D51200000000000000000009 /* VectorTests.swift */,
+				D51200000000000000000010 /* Fixtures */,
+			);
+			path = KeyrefCoreTests;
+			sourceTree = "<group>";
+		};
+		D50500000000000000000004 /* KeyrefUITests */ = {
+			isa = PBXGroup;
+			children = (
+				D51200000000000000000012 /* RecoveryAndValidationTests.swift */,
+				D51200000000000000000013 /* StoreTests.swift */,
+			);
+			path = KeyrefUITests;
+			sourceTree = "<group>";
+		};
+		D50500000000000000000005 /* XcodeHostShims */ = {
+			isa = PBXGroup;
+			children = (
+				D51200000000000000000011 /* BundleModuleShim.swift */,
+			);
+			path = XcodeHostShims;
+			sourceTree = "<group>";
+		};
+		D50500000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D50200000000000000000003 /* keyref.app */,
+				D50200000000000000000004 /* KeyrefCoreTests.xctest */,
+				D50200000000000000000005 /* KeyrefUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D50600000000000000000001 /* Keyref */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D50700000000000000000002 /* Build configuration list for PBXNativeTarget "Keyref" */;
+			buildPhases = (
+				D50F00000000000000000002 /* Sources */,
+				D50300000000000000000001 /* Frameworks */,
+				D50F00000000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Keyref;
+			packageProductDependencies = (
+				D50400000000000000000001 /* KeyrefUI */,
+				D50400000000000000000002 /* KeyrefCore */,
+			);
+			productName = Keyref;
+			productReference = D50200000000000000000003 /* keyref.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D50600000000000000000002 /* KeyrefCoreTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D50700000000000000000003 /* Build configuration list for PBXNativeTarget "KeyrefCoreTests" */;
+			buildPhases = (
+				D50F00000000000000000003 /* Sources */,
+				D50300000000000000000002 /* Frameworks */,
+				D50F00000000000000000004 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D50E00000000000000000001 /* PBXTargetDependency */,
+			);
+			name = KeyrefCoreTests;
+			packageProductDependencies = (
+				D50400000000000000000003 /* KeyrefCore */,
+			);
+			productName = KeyrefCoreTests;
+			productReference = D50200000000000000000004 /* KeyrefCoreTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		D50600000000000000000003 /* KeyrefUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D50700000000000000000004 /* Build configuration list for PBXNativeTarget "KeyrefUITests" */;
+			buildPhases = (
+				D50F00000000000000000005 /* Sources */,
+				D50300000000000000000003 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D50E00000000000000000002 /* PBXTargetDependency */,
+			);
+			name = KeyrefUITests;
+			packageProductDependencies = (
+				D50400000000000000000004 /* KeyrefUI */,
+				D50400000000000000000005 /* KeyrefCore */,
+			);
+			productName = KeyrefUITests;
+			productReference = D50200000000000000000005 /* KeyrefUITests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D50900000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					D50600000000000000000001 = {
+						CreatedOnToolsVersion = 27.1;
+					};
+					D50600000000000000000002 = {
+						CreatedOnToolsVersion = 27.1;
+						TestTargetID = D50600000000000000000001;
+					};
+					D50600000000000000000003 = {
+						CreatedOnToolsVersion = 27.1;
+						TestTargetID = D50600000000000000000001;
+					};
+				};
+			};
+			buildConfigurationList = D50700000000000000000001 /* Build configuration list for PBXProject "Keyref" */;
+			developmentRegion = zh-CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-CN",
+			);
+			mainGroup = D50500000000000000000000 /* ios */;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D50A00000000000000000001 /* XCLocalSwiftPackageReference "Package.swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = D50500000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D50600000000000000000001 /* Keyref */,
+				D50600000000000000000002 /* KeyrefCoreTests */,
+				D50600000000000000000003 /* KeyrefUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		D50F00000000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D50F00000000000000000004 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D51100000000000000000010 /* Fixtures in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		D50F00000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D50100000000000000000001 /* KeyrefApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D50F00000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D51100000000000000000001 /* APIClientTests.swift in Sources */,
+				D51100000000000000000002 /* CryptoTests.swift in Sources */,
+				D51100000000000000000003 /* KeyStoreTests.swift in Sources */,
+				D51100000000000000000004 /* MockURLProtocol.swift in Sources */,
+				D51100000000000000000005 /* RecoveryCodeTests.swift in Sources */,
+				D51100000000000000000006 /* SyncEngineTests.swift in Sources */,
+				D51100000000000000000007 /* TranscriptTests.swift in Sources */,
+				D51100000000000000000008 /* VaultFlowsTests.swift in Sources */,
+				D51100000000000000000009 /* VectorTests.swift in Sources */,
+				D51100000000000000000011 /* BundleModuleShim.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D50F00000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D51100000000000000000012 /* RecoveryAndValidationTests.swift in Sources */,
+				D51100000000000000000013 /* StoreTests.swift in Sources */,
+				D51100000000000000000014 /* BundleModuleShim.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D50E00000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D50600000000000000000001 /* Keyref */;
+			targetProxy = D50D00000000000000000001 /* PBXContainerItemProxy */;
+		};
+		D50E00000000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D50600000000000000000001 /* Keyref */;
+			targetProxy = D50D00000000000000000002 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		D50B00000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		D50B00000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		D50B00000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Keyref/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios;
+				PRODUCT_NAME = keyref;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		D50B00000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Keyref/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios;
+				PRODUCT_NAME = keyref;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		D50B00000000000000000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios.tests.core;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/keyref.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/keyref";
+			};
+			name = Debug;
+		};
+		D50B00000000000000000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios.tests.core;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/keyref.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/keyref";
+			};
+			name = Release;
+		};
+		D50B00000000000000000007 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios.tests.ui;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/keyref.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/keyref";
+			};
+			name = Debug;
+		};
+		D50B00000000000000000008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios.tests.ui;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/keyref.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/keyref";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		D50700000000000000000001 /* Build configuration list for PBXProject "Keyref" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D50B00000000000000000001 /* Debug */,
+				D50B00000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D50700000000000000000002 /* Build configuration list for PBXNativeTarget "Keyref" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D50B00000000000000000003 /* Debug */,
+				D50B00000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D50700000000000000000003 /* Build configuration list for PBXNativeTarget "KeyrefCoreTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D50B00000000000000000005 /* Debug */,
+				D50B00000000000000000006 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D50700000000000000000004 /* Build configuration list for PBXNativeTarget "KeyrefUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D50B00000000000000000007 /* Debug */,
+				D50B00000000000000000008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D50A00000000000000000001 /* XCLocalSwiftPackageReference "Package.swift" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ".";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D50400000000000000000001 /* KeyrefUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KeyrefUI;
+		};
+		D50400000000000000000002 /* KeyrefCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KeyrefCore;
+		};
+		D50400000000000000000003 /* KeyrefCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KeyrefCore;
+		};
+		D50400000000000000000004 /* KeyrefUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KeyrefUI;
+		};
+		D50400000000000000000005 /* KeyrefCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KeyrefCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = D50900000000000000000001 /* Project object */;
+}

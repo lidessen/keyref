@@ -1,0 +1,155 @@
+// The one seam between the @Observable stores and KeyrefCore. The app shell
+// injects a LiveBackend (real crypto, Keychain, network); tests and previews
+// inject a MemoryBackend. @MainActor keeps the store state machine simple;
+// every network-touching method is async.
+import Foundation
+import KeyrefCore
+
+/// Why a biometric-confirmed unlock attempt could not complete. S2/S3/S4
+/// (docs/ios-ui.md §2.3) are exactly these cases.
+public enum LockError: Error, Equatable {
+    /// Face ID failed; the wrap is intact (S3).
+    case biometricFailed
+    /// The local VMK wrap can no longer be opened — biometric set changed
+    /// (S4). Rebuild with the recovery code (§9.5).
+    case wrapInvalid
+    /// No local vault (S1).
+    case noVault
+}
+
+@MainActor
+public protocol AppBackend: AnyObject {
+    // MARK: lifecycle / phase
+
+    /// Whether a vault exists locally (S1 gate).
+    var hasVault: Bool { get }
+    var vaultID: String? { get }
+    var ownDeviceID: String? { get }
+    /// Cached, non-sensitive count shown on the lock screen (S2).
+    var cachedItemCount: Int { get }
+    /// True after the local wrap was detected as permanently invalid (S4).
+    var localWrapInvalid: Bool { get }
+    /// Current server origin (settings → server row, §2.14).
+    var origin: URL { get }
+    var plan: String { get }
+
+    /// Reads local state at boot: whether the wrap exists, cached counts.
+    func loadLocalState() async
+    /// After a successful Face ID: unwrap the VMK. Throws LockError.wrapInvalid
+    /// when the enclave wrap is permanently dead (S4).
+    func unlockAfterBiometrics() async throws
+    /// Drops the VMK from memory (manual lock or background).
+    func lock()
+
+    // MARK: creation (§2.2)
+
+    /// 设备密码已设置、Face ID 已录入 — both required (§9.3).
+    func checkPrerequisites() -> [Prerequisite]
+    /// Generates owner keys, VMK, recovery code and the revision-1 directory.
+    /// The recovery code is shown exactly once (S9).
+    func prepareCreation(label: String) async throws -> CreatedVaultDraft
+    /// Uploads a previously prepared vault. Retry keeps the same code (§2.2).
+    func uploadCreatedVault(_ draft: CreatedVaultDraft) async throws
+
+    // MARK: items (§2.4–§2.6)
+
+    func loadItems() async -> [ItemRow]
+    /// Decrypts the secret for the Face ID–gated reveal layer.
+    func revealSecret(_ itemID: String) throws -> String
+    func createItem(_ draft: ItemDraft) async throws
+    func updateItem(id: String, _ draft: ItemEditDraft) async throws
+    func deleteItem(id: String) async throws
+    /// 替换值（轮换）: new item key, re-encrypt, re-wrap grants (§2.5).
+    func rotateItem(id: String, newValue: String) async throws
+
+    // MARK: sync & account (§2.4, §2.17)
+
+    func syncNow() async throws -> SyncOutcomeInfo
+    func fetchAccount() async -> AccountSnapshot?
+    /// 未登录的 recovery 端点探测（S11 切换前先探测, §8.5）。
+    func probeVaultExists(onOrigin: URL) async -> Bool
+
+    // MARK: devices & grants (§2.7–§2.10)
+
+    func loadDevices() async -> [DeviceRow]
+    /// Completes a scanned pairing: signs the pair transcript with the
+    /// selected grants (empty until the human checks boxes, design §15).
+    func completePairing(offer: PairingOffer, deviceLabel: String,
+                         selections: [GrantSelection]) async throws
+    func appendGrants(deviceID: String, _ selections: [GrantSelection]) async throws
+    func revokeGrant(deviceID: String, itemID: String, kind: String) async throws
+    func renameDevice(deviceID: String, label: String) async throws
+    /// 撤销（默认含轮换, §8.4）。Reports progress for the checklist page.
+    func revokeDevice(deviceID: String, rotate: Bool,
+                      progress: @Sendable @escaping (RevokeStep) async -> Void) async throws -> RevokeSummary
+    /// Resumes an interrupted rotation (§2.10 失败态: 撤销先于轮换生效).
+    func resumeRotation(deviceID: String,
+                        progress: @Sendable @escaping (RevokeStep) async -> Void) async throws -> RevokeSummary
+    /// Whether a rotation for this device is mid-flight and resumable.
+    func hasPendingRotation(deviceID: String) -> Bool
+
+    // MARK: audit (§2.11)
+
+    /// Loads encrypted rows from the local cache (no decryption).
+    func loadEncryptedAuditRows() async -> [AuditRow]
+    /// Decrypts a batch with one Face ID (§7.7). Rows that fail individually
+    /// stay marked decryptFailed.
+    func decryptAuditRows() async -> [AuditRow]
+
+    // MARK: settings (§2.14–§2.17)
+
+    func fetchAccountSnapshot() async -> AccountSnapshot?
+    /// Applies a new origin. With a vault present the caller confirms first:
+    /// rebuild on the new origin + full upload (§8.5 迁移).
+    func switchOrigin(to newOrigin: URL,
+                      progress: @Sendable @escaping (MigrationStep) async -> Void) async throws
+    /// Two-step delete (§2.16): challenge, then owner-signed confirmation.
+    /// Never reports success unless the server confirmed.
+    func deleteVault() async throws
+    /// 「轮换 VMK 与恢复码」— new wrap layer + new recovery code (§8.4).
+    func rotateVMKAndRecovery() async throws -> String
+    /// 「怀疑恢复码泄露」— same + rotate every item key and re-encrypt (B5).
+    func rotateRecoveryCodeFull() async throws -> String
+
+    // MARK: recovery (§2.12, §2.13)
+
+    /// Parses the code, fetches materials, unwraps the VMK and builds the
+    /// signed directory. Everything before the irreversible commit.
+    func prepareRecovery(code: String, mode: RecoveryMode) async throws -> RecoveryPreparation
+    /// Commits. Takeover revokes all old devices and re-downloads; local
+    /// rebuild only refreshes this device's row (§8.5, §9.5).
+    func commitRecovery(_ prep: RecoveryPreparation,
+                        progress: @Sendable @escaping (RecoveryStep) async -> Void) async throws -> TakeoverSummary
+}
+
+/// A freshly created vault, before upload. The recovery code is displayed
+/// exactly once and grouped for the backfill check (S9).
+public struct CreatedVaultDraft: Equatable, Sendable {
+    public var vaultID: String
+    public var recoveryCode: String
+    /// Grouped display form (5 symbols per group).
+    public var recoveryGroups: [String]
+    public var uploaded: Bool
+
+    public init(vaultID: String, recoveryCode: String, recoveryGroups: [String], uploaded: Bool) {
+        self.vaultID = vaultID
+        self.recoveryCode = recoveryCode
+        self.recoveryGroups = recoveryGroups
+        self.uploaded = uploaded
+    }
+}
+
+public enum MigrationStep: Equatable, Sendable {
+    case createVaultOnNewOrigin
+    case fullUpload
+    case verify
+}
+
+public enum RecoveryStep: Equatable, Sendable {
+    case fetchMaterials       // 取回恢复材料
+    case unwrapVMK            // 解开主密钥
+    case generateOwnerKeys    // 生成这台手机的新隔区密钥
+    case signTranscript       // 签署接管誊本 / 更新本机在设备目录中的登记
+    case download             // 下载全部密文 / 校验本地密文
+    case rotateItems(remaining: Int)  // 轮换条目密钥并重加密
+}
