@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Vet
+        run: |
+          go vet -C server ./...
+          go vet -C cli ./...
+          go vet -C proto ./...
+          go vet -C tools/vectordump ./...
+      - name: Unit tests
+        run: |
+          go test -C server ./...
+          go test -C cli ./...
+          go test -C proto ./...
+          go test -C tools/vectordump ./...
+      - name: End-to-end (CLI against a real server)
+        run: go test -C cli -tags=e2e ./e2e
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the server image (same one the hosted deployment runs)
+        run: docker build -f server/Dockerfile -t keyref-server:ci .
