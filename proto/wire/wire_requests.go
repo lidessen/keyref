@@ -225,6 +225,17 @@ type PairStatusResponse struct {
 	Grants             []GrantData `json:"grants,omitempty"`
 }
 
+// PushTokenRequest is the body of PUT /v1/devices/push-token (design
+// §8.3, Phase 2 APNs). Only a logged-in kind=ios device may register a
+// token, and only for itself — the server attaches it to the
+// authenticated device row. token is the hex APNs device token; env
+// (sandbox | production) selects which APNs environment the token
+// belongs to. Re-registering overwrites the stored token.
+type PushTokenRequest struct {
+	Token string `json:"token"`
+	Env   string `json:"env"`
+}
+
 // Approval status values carried by the approvals table and the polling
 // response (design §6.3, §8.3).
 const (

@@ -14,16 +14,30 @@
 //	KEYREF_LISTEN         plain-HTTP listen address (default 127.0.0.1:8080)
 //	KEYREF_ENFORCE_QUOTAS set to 1 on the hosted deployment: plans, PoW
 //	                      and the global budget; self-hosted runs unlimited
+//
+// APNs push (design §8.3, §12.3 — deployment-environment credentials
+// only, never client-visible config):
+//
+//	KEYREF_APN_KEY_PATH   path to the .p8 signing key file
+//	KEYREF_APN_KEY_ID     key id from the Apple developer console
+//	KEYREF_TEAM_ID        Apple team id
+//	KEYREF_APN_TOPIC      the iOS app bundle id
+//	KEYREF_APN_ENV        sandbox | production
+//
+// When any of these is missing or unusable the process logs one
+// "push disabled" line and serves everything else unchanged.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/lidessen/keyref/server/internal/api"
+	"github.com/lidessen/keyref/server/internal/apns"
 	"github.com/lidessen/keyref/server/internal/httpserver"
 	"github.com/lidessen/keyref/server/internal/pow"
 	"github.com/lidessen/keyref/server/internal/quotas"
@@ -73,7 +87,8 @@ func usage(w *os.File) {
        keyref-server version                      print version and commit
 
 environment: KEYREF_DATA, KEYREF_DOMAIN, KEYREF_ACME_EMAIL, KEYREF_LISTEN,
-             KEYREF_ENFORCE_QUOTAS
+             KEYREF_ENFORCE_QUOTAS, KEYREF_APN_KEY_PATH, KEYREF_APN_KEY_ID,
+             KEYREF_TEAM_ID, KEYREF_APN_TOPIC, KEYREF_APN_ENV
 `)
 }
 
@@ -108,12 +123,20 @@ func serve(args []string) error {
 	if domain := os.Getenv("KEYREF_DOMAIN"); domain != "" {
 		origin = "https://" + domain
 	}
+	// APNs credentials are deployment-environment only (design §12.3):
+	// missing or unusable ones disable push with one log line and leave
+	// every other function untouched.
+	push, pushWhy := apns.LoadFromEnv(os.Getenv)
+	if push == nil {
+		log.Printf("keyref-server: push disabled: %s", pushWhy)
+	}
 	handler := api.New(st, quotas.NewManager(st), pow.NewIssuer(), api.Config{
 		EnforceQuotas: os.Getenv("KEYREF_ENFORCE_QUOTAS") == "1",
 		Version:       version,
 		Commit:        commit,
 		Origin:        origin,
 		DataDir:       dataDir(),
+		Push:          push,
 	}).Handler()
 
 	return httpserver.Run(handler, st, httpserver.Options{

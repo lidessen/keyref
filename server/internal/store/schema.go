@@ -6,7 +6,7 @@ import (
 )
 
 // SchemaVersion is the schema version stamp kept in PRAGMA user_version.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 type migration struct {
 	version int
@@ -26,6 +26,12 @@ type migration struct {
 // ECDSA signatures cannot be recomputed); pair_sessions.result_json
 // stores the pairing result that GET /v1/pair/status serves (protocol
 // §6.18 — the §6.3 base schema has no nonce→result linkage).
+//
+// v3 addition: devices.push_token stores the APNs device token an iOS
+// device registers for approval notifications (design §8.3 Phase 2;
+// PUT /v1/devices/push-token). NULL = push not registered. Directory
+// upserts never touch the column, so a re-signed directory cannot
+// silently unregister pushes.
 var migrations = []migration{
 	{
 		version: 1,
@@ -141,6 +147,12 @@ var migrations = []migration{
 		stmts: []string{
 			`ALTER TABLE vaults ADD COLUMN directory_signature BLOB`,
 			`ALTER TABLE pair_sessions ADD COLUMN result_json TEXT`,
+		},
+	},
+	{
+		version: 3,
+		stmts: []string{
+			`ALTER TABLE devices ADD COLUMN push_token TEXT`,
 		},
 	},
 }

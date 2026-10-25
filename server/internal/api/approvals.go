@@ -97,6 +97,10 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.appendApprovalChange(r, ac.vault.ID, a.ID, nowMs)
+	// Best-effort APNs wake-up for the owner devices (design §8.3
+	// Phase 2). Runs after the row and its change are durable; failures
+	// are logged inside and never reach the approval creator.
+	s.pushApprovalCreated(ac.vault.ID, a.ID)
 	writeJSON(w, http.StatusCreated, wire.ApprovalCreateResponse{
 		ApprovalID: a.ID, ExpiresAt: a.ExpiresAt,
 	})

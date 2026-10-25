@@ -34,6 +34,7 @@ type Device struct {
 	Label         string // plaintext device label shown on other devices
 	CreatedAt     int64
 	RevokedAt     sql.NullInt64
+	PushToken     sql.NullString // APNs token (schema v3); NULL = not registered
 }
 
 // Item is a row of the items table. Tombstone rows carry NULL

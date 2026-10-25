@@ -351,3 +351,74 @@ func TestDeleteChangesOlderThan(t *testing.T) {
 		t.Fatalf("changes after cleanup = %d, want 1", count)
 	}
 }
+
+func TestDevicePushTokenRoundTrip(t *testing.T) {
+	s := openTestStore(t, filepath.Join(t.TempDir(), DBFileName))
+	ctx := context.Background()
+	insertDevice := func(deviceID, kind, status string) {
+		t.Helper()
+		_, err := s.db.Exec(
+			`INSERT INTO devices (device_id, vault_id, kind, status, hpke_kem, hpke_public_key,
+sign_alg, sign_public_key, label, created_at, revoked_at) VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
+			deviceID, tvVault, kind, status, "P-256", []byte{1}, "ed25519", []byte{2}, "d", int64(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertDevice(tvDevice, "ios", "active")
+	owner2 := "22222222222222222222222222222222"
+	revoked := "33333333333333333333333333333333"
+	cliDev := "44444444444444444444444444444444"
+	insertDevice(owner2, "ios", "active")
+	insertDevice(revoked, "ios", "revoked")
+	insertDevice(cliDev, "cli", "active")
+
+	// Registering overwrites; reading the device row shows the newest
+	// token (schema v3 push_token column).
+	if err := s.SetPushToken(ctx, tvDevice, "aabb"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPushToken(ctx, tvDevice, "ccdd"); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.GetDevice(ctx, tvDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.PushToken.Valid || d.PushToken.String != "ccdd" {
+		t.Fatalf("push_token = %v, want ccdd", d.PushToken)
+	}
+	if err := s.SetPushToken(ctx, owner2, "eeff"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The approval push audience is exactly the vault's active iOS
+	// devices with a token — not revoked devices, not CLIs.
+	toks, err := s.ListPushTokens(ctx, tvVault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 2 {
+		t.Fatalf("push tokens = %v, want 2", toks)
+	}
+
+	// ClearPushToken matches by token value: the APNs 410 handler drops
+	// the rejected token wherever it is registered.
+	if err := s.ClearPushToken(ctx, "ccdd"); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.GetDevice(ctx, tvDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.PushToken.Valid {
+		t.Fatalf("push_token not cleared: %v", d.PushToken)
+	}
+	toks, err = s.ListPushTokens(ctx, tvVault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 1 || toks[0] != "eeff" {
+		t.Fatalf("push tokens after clear = %v, want [eeff]", toks)
+	}
+}

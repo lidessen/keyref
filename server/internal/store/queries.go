@@ -242,12 +242,12 @@ func (s *Store) ListAllVaults(ctx context.Context) ([]Vault, error) {
 // devices
 
 const deviceCols = `device_id, vault_id, kind, status, hpke_kem, hpke_public_key,
-sign_alg, sign_public_key, label, created_at, revoked_at`
+sign_alg, sign_public_key, label, created_at, revoked_at, push_token`
 
 func scanDevice(row interface{ Scan(...any) error }) (*Device, error) {
 	var d Device
 	err := row.Scan(&d.ID, &d.VaultID, &d.Kind, &d.Status, &d.HPKEKEM, &d.HPKEPublicKey,
-		&d.SignAlg, &d.SignPublicKey, &d.Label, &d.CreatedAt, &d.RevokedAt)
+		&d.SignAlg, &d.SignPublicKey, &d.Label, &d.CreatedAt, &d.RevokedAt, &d.PushToken)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -344,9 +344,9 @@ func (s *Store) CountActiveDevicesAfterDirectory(ctx context.Context, vaultID st
 
 func txInsertDevice(ctx context.Context, tx *sql.Tx, d *Device) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.VaultID, d.Kind, d.Status, d.HPKEKEM, d.HPKEPublicKey,
-		d.SignAlg, d.SignPublicKey, d.Label, d.CreatedAt, d.RevokedAt)
+		d.SignAlg, d.SignPublicKey, d.Label, d.CreatedAt, d.RevokedAt, d.PushToken)
 	if err != nil {
 		return fmt.Errorf("store: insert device: %w", err)
 	}
@@ -377,13 +377,61 @@ sign_alg = ?, sign_public_key = ?, label = label, revoked_at = ? WHERE device_id
 		return rec.Status == wire.DeviceStatusRevoked, nil
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		rec.DeviceID, vaultID, rec.Kind, rec.Status, rec.HPKEKEM, rec.HPKEPublicKey,
-		rec.SignAlg, rec.SignPublicKey, "", now, revokedAt)
+		rec.SignAlg, rec.SignPublicKey, "", now, revokedAt, nil)
 	if err != nil {
 		return false, fmt.Errorf("store: insert device from directory: %w", err)
 	}
 	return rec.Status == wire.DeviceStatusRevoked, nil
+}
+
+// SetPushToken stores (overwriting) the APNs push token of one device
+// (design §8.3 Phase 2: PUT /v1/devices/push-token).
+func (s *Store) SetPushToken(ctx context.Context, deviceID, token string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE devices SET push_token = ? WHERE device_id = ?`, token, deviceID)
+	if err != nil {
+		return fmt.Errorf("store: set push token: %w", err)
+	}
+	return nil
+}
+
+// ClearPushToken removes the push token wherever it is registered — the
+// APNs 410 (token rejected) handler's cleanup. Matching by token value
+// (not device id) also catches a token that moved between devices.
+func (s *Store) ClearPushToken(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE devices SET push_token = NULL WHERE push_token = ?`, token)
+	if err != nil {
+		return fmt.Errorf("store: clear push token: %w", err)
+	}
+	return nil
+}
+
+// ListPushTokens returns the push tokens of the vault's active iOS
+// devices — the audience of the approval-created push (design §8.3).
+// Revoked or pending devices are never pushed.
+func (s *Store) ListPushTokens(ctx context.Context, vaultID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT push_token FROM devices
+WHERE vault_id = ? AND kind = 'ios' AND status = 'active' AND push_token IS NOT NULL`,
+		vaultID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list push tokens: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var tok sql.NullString
+		if err := rows.Scan(&tok); err != nil {
+			return nil, fmt.Errorf("store: scan push token: %w", err)
+		}
+		if tok.Valid && tok.String != "" {
+			out = append(out, tok.String)
+		}
+	}
+	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -938,7 +986,7 @@ func (s *Store) LookupSession(ctx context.Context, token []byte, now int64) (*De
 	sum := sha256.Sum256(token)
 	row := s.db.QueryRowContext(ctx,
 		`SELECT d.device_id, d.vault_id, d.kind, d.status, d.hpke_kem, d.hpke_public_key,
-d.sign_alg, d.sign_public_key, d.label, d.created_at, d.revoked_at
+d.sign_alg, d.sign_public_key, d.label, d.created_at, d.revoked_at, d.push_token
 FROM sessions s JOIN devices d ON d.device_id = s.device_id
 WHERE s.token_hash = ? AND s.expires_at > ?`, hex.EncodeToString(sum[:]), now)
 	return scanDevice(row)

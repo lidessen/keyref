@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/lidessen/keyref/proto/wire"
+	"github.com/lidessen/keyref/server/internal/apns"
 	"github.com/lidessen/keyref/server/internal/pow"
 	"github.com/lidessen/keyref/server/internal/quotas"
 	"github.com/lidessen/keyref/server/internal/store"
@@ -62,6 +63,11 @@ type Config struct {
 	DataDir       string // for the disk-usage healthz check
 	StartedAt     int64
 	Now           func() time.Time // injectable clock for tests
+
+	// Push is the optional APNs provider (design §8.3 Phase 2, §12.3).
+	// nil — the default for deployments without KEYREF_APN_* variables —
+	// disables push notifications; everything else is unaffected.
+	Push apns.Provider
 }
 
 // Server holds the HTTP API state.
@@ -158,6 +164,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/approvals/{approval_id}", s.approvalPollingFloor(s.handleApprovalPoll))
 	mux.HandleFunc("POST /v1/approvals/{approval_id}/decision", s.handleApprovalDecision)
 	mux.HandleFunc("GET /v1/approvals", s.handleApprovalList)
+
+	// Push token registration (design §8.3 Phase 2): an active iOS
+	// device registers the APNs token approval pushes are sent to.
+	mux.HandleFunc("PUT /v1/devices/push-token", s.handlePutPushToken)
+
 	mux.HandleFunc("POST /v1/billing/apple", notImplemented)
 
 	mux.HandleFunc("/v1/", notImplemented)
