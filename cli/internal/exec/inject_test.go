@@ -93,12 +93,21 @@ func TestValidateHeaderValue(t *testing.T) {
 }
 
 func TestArgvPlaceholders(t *testing.T) {
-	argv := []string{"tool", "--token", "{{keyref:openai-prod}}", "keyref://wifi-home", "literal"}
+	argv := []string{"tool", "--token", "{{keyref:openai-prod}}", "{{keyref:wifi-home}}", "literal", "https://api.example.com/x", "keyref://pair?u=x"}
 	if !HasArgvPlaceholder(argv) {
 		t.Fatal("placeholder not detected")
 	}
 	if HasArgvPlaceholder([]string{"tool", "{{keyref:"}) {
 		t.Fatal("malformed placeholder detected")
+	}
+	// The keyref:// URI form was removed (design v0.6): a bare keyref://…
+	// string must no longer be treated as a placeholder.
+	if HasArgvPlaceholder([]string{"tool", "keyref://openai-prod"}) {
+		t.Fatal("URI placeholder form must not match")
+	}
+	refs := ArgvPlaceholderRefs(argv)
+	if len(refs) != 2 || refs[0] != "openai-prod" || refs[1] != "wifi-home" {
+		t.Fatalf("refs = %v, want [openai-prod wifi-home]", refs)
 	}
 	out, err := ReplaceArgvPlaceholders(argv, func(ref string) ([]byte, error) {
 		if ref == "openai-prod" {
@@ -112,7 +121,7 @@ func TestArgvPlaceholders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"tool", "--token", "SK1", "SK2", "literal"}
+	want := []string{"tool", "--token", "SK1", "SK2", "literal", "https://api.example.com/x", "keyref://pair?u=x"}
 	for i := range want {
 		if out[i] != want[i] {
 			t.Fatalf("argv[%d]=%q want %q", i, out[i], want[i])

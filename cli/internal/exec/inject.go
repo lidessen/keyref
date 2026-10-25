@@ -113,9 +113,10 @@ func ValidateHeaderValue(b []byte) error {
 	return nil
 }
 
-// argvPlaceholderRe matches {{keyref:REF}} and keyref://REF argv
-// placeholders (design.md §7.1).
-var argvPlaceholderRe = regexp.MustCompile(`\{\{keyref:([a-z][a-z0-9-]{0,62}[a-z0-9]|[a-z])\}\}|keyref://([a-z][a-z0-9-]{0,62}[a-z0-9]|[a-z])`)
+// argvPlaceholderRe matches the {{keyref:REF}} argv placeholder (design
+// §7.1). The keyref:// URI form was removed in v0.6: one notation, one
+// parser. The keyref://pair QR scheme (§8.1) is unrelated and unchanged.
+var argvPlaceholderRe = regexp.MustCompile(`\{\{keyref:([a-z][a-z0-9-]{0,62}[a-z0-9]|[a-z])\}\}`)
 
 // HasArgvPlaceholder reports whether any argv element carries a
 // placeholder.
@@ -135,9 +136,6 @@ func ArgvPlaceholderRefs(argv []string) []string {
 	for _, a := range argv {
 		for _, m := range argvPlaceholderRe.FindAllStringSubmatch(a, -1) {
 			ref := m[1]
-			if ref == "" {
-				ref = m[2]
-			}
 			if ref != "" && !seen[ref] {
 				seen[ref] = true
 				refs = append(refs, ref)
@@ -156,14 +154,9 @@ func ReplaceArgvPlaceholders(argv []string, resolve func(ref string) ([]byte, er
 	out := make([]string, len(argv))
 	for i, a := range argv {
 		var replaceErr error
-		res := argvPlaceholderRe.ReplaceAllStringFunc(a, func(m string) string {
-			ref := m
-			if strings.HasPrefix(m, "{{keyref:") {
-				ref = strings.TrimSuffix(strings.TrimPrefix(m, "{{keyref:"), "}}")
-			} else {
-				ref = strings.TrimPrefix(m, "keyref://")
-			}
-			secret, err := resolve(ref)
+	res := argvPlaceholderRe.ReplaceAllStringFunc(a, func(m string) string {
+		ref := strings.TrimSuffix(strings.TrimPrefix(m, "{{keyref:"), "}}")
+		secret, err := resolve(ref)
 			if err != nil {
 				replaceErr = err
 				return m

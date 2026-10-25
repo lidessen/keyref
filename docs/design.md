@@ -24,7 +24,7 @@ v0.2：自托管是一等部署，和官方托管共用一份服务器。费用�
 | --- | --- |
 | 产品边界 | 人用 iOS 管理秘密。Agent 只用 CLI。CLI 的输出里没有明文 |
 | 编辑权 | MVP 里只有 iOS owner 能创建、修改、删除、轮换。CLI 只读 |
-| 引用 | 每个条目有稳定的 `ref`（例如 `openai-prod`）。占位符是 `{{keyref:REF}}`，URI 形式 `keyref://REF` 与之等价 |
+| 引用 | 每个条目有稳定的 `ref`（例如 `openai-prod`）。占位符是 `{{keyref:REF}}`（v0.6 起不再有 URI 等价写法） |
 | 注入 | 优先 `--env`、stdin、额外 fd / 打开后即删除的临时文件。进程参数注入必须显式 `--allow-argv`，且条目策略 `allowArgv = true` |
 | 执行 | CLI 直接 `posix_spawn` / `execve`，不经过 shell。`echo`、`env`、`sh` 等默认拒绝 |
 | 敏感条目 | `sensitivity = approval` 的条目不给 CLI 长期条目密钥。每次 `exec` 由手机批准后下发一次性包裹 |
@@ -437,11 +437,7 @@ canonical 占位符：
 {{keyref:openai-prod}}
 ```
 
-等价的 URI，便于写进只接受 URL 的配置说明里：
-
-```text
-keyref://openai-prod
-```
+这是唯一写法。v0.6 去掉了曾经的 URI 等价形式（`keyref://REF`）：一个语法养两份解析与两份文档不值当；配对二维码的 `keyref://pair?…` scheme 是另一回事，不受影响（§8.1）。
 
 不支持在占位符里做编码变换（没有 `{{keyref:openai-prod | base64}}`）。变换是外泄通道，也让脱敏更难。
 
