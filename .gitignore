@@ -23,10 +23,6 @@ xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 
-# Rust
-cli/target/
-target/
-
 # Go server
 server/keyref-server
 *.exe
