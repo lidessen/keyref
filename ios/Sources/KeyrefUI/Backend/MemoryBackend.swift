@@ -62,6 +62,21 @@ public final class MemoryBackend: AppBackend {
     public var approvalsLoadDelay: Duration?
     public private(set) var approvalLoadCount = 0
 
+    // v0.7 seams: 存储类别（§6.6）、轮换（§8.4）、iCloud 副本（§6.7）。
+    /// 仅本机条目 id 集（seedLocalOnlyItem / createItem 写入）。
+    public var localOnlyItemIDs: Set<String> = []
+    /// 轮换观察记录：rotateItem / rotateAllItems 触达的条目。
+    public private(set) var rotatedItemIDs: [String] = []
+    public var rotateAllItemsError: Error?
+    public private(set) var rotateAllAttempts = 0
+    /// iCloud 副本观察记录。
+    public var cloudBackupEnabled = true
+    public var cloudBackupStatusResult: CloudBackupStatus = .ready(itemCount: 0, snapshotRevision: 0)
+    public var snapshotRestoreResult = SnapshotRestoreSummary(appliedCount: 0, snapshotRevision: 0)
+    public var snapshotRestoreError: Error?
+    public private(set) var snapshotUploadCount = 0
+    public private(set) var snapshotRestoreCount = 0
+
     public init(origin: URL = URL(string: "https://sync.keyref.app")!) {
         self.origin = origin
     }
@@ -99,6 +114,24 @@ public final class MemoryBackend: AppBackend {
                             label: label, createdAt: now(),
                             fingerprint: "A1B2-C3D4-E5F6-7890", grants: grants)
         devices.append(row)
+        return row
+    }
+
+    /// 仅本机条目（§6.6）：sensitivity 派生为 approval、不参与服务器恢复。
+    @discardableResult
+    public func seedLocalOnlyItem(ref: String, name: String, value: String) -> ItemRow {
+        let id = KeyrefEncoding.newID()
+        var policy = ItemPolicy()
+        policy.sensitivity = StorageClass.localOnly.sensitivity
+        let row = ItemRow(
+            id: id, ref: ref, name: name, itemDescription: "仅本机条目",
+            type: "password", masked: "***", policy: policy, injectable: false,
+            createdAt: now(), updatedAt: now(), grants: [], ciphertextBytes: 256,
+            storageClass: .localOnly)
+        items.append(row)
+        secrets[id] = value
+        localOnlyItemIDs.insert(id)
+        cachedItemCount = items.count
         return row
     }
 
@@ -159,13 +192,17 @@ public final class MemoryBackend: AppBackend {
     public func createItem(_ draft: ItemDraft) async throws {
         if let createItemError { throw createItemError }
         let id = KeyrefEncoding.newID()
+        var policy = draft.policy
+        policy.sensitivity = draft.storageClass.sensitivity
         items.append(ItemRow(id: id, ref: draft.ref, name: draft.name,
                              itemDescription: draft.itemDescription, type: draft.type,
-                             masked: "sk-****abcd", policy: draft.policy,
+                             masked: "sk-****abcd", policy: policy,
                              injectable: draft.injectable,
                              createdAt: now(), updatedAt: now(), grants: [],
-                             ciphertextBytes: draft.value.utf8.count))
+                             ciphertextBytes: draft.value.utf8.count,
+                             storageClass: draft.storageClass))
         secrets[id] = draft.value
+        if draft.storageClass == .localOnly { localOnlyItemIDs.insert(id) }
         cachedItemCount = items.count
     }
 
@@ -173,20 +210,29 @@ public final class MemoryBackend: AppBackend {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         items[idx].name = draft.name
         items[idx].itemDescription = draft.itemDescription
-        items[idx].policy = draft.policy
-        items[idx].injectable = draft.injectable
+        var policy = draft.policy
+        policy.sensitivity = draft.storageClass.sensitivity
+        items[idx].policy = policy
+        items[idx].storageClass = draft.storageClass
         items[idx].updatedAt = now()
+        if draft.storageClass == .localOnly {
+            localOnlyItemIDs.insert(id)
+        } else {
+            localOnlyItemIDs.remove(id)
+        }
         if !draft.value.isEmpty { secrets[id] = draft.value }
     }
 
     public func deleteItem(id: String) async throws {
         items.removeAll { $0.id == id }
         secrets.removeValue(forKey: id)
+        localOnlyItemIDs.remove(id)
         cachedItemCount = items.count
     }
 
     public func rotateItem(id: String, newValue: String) async throws {
         secrets[id] = newValue
+        rotatedItemIDs.append(id)
     }
 
     public func syncNow() async throws -> SyncOutcomeInfo {
@@ -318,6 +364,7 @@ public final class MemoryBackend: AppBackend {
         items = []
         devices = []
         secrets = [:]
+        localOnlyItemIDs = []
     }
 
     public func rotateVMKAndRecovery() async throws -> String {
@@ -397,18 +444,54 @@ public final class MemoryBackend: AppBackend {
             directoryRevision: 2,
             ownerSignPublicKey: Data([0x04]) + Data(repeating: 0x33, count: 64),
             vmkWrap: Data(repeating: 0x44, count: 129))
-        let payload = nextHandoffPayload ?? handoff.payload()
+        let payload = nextHandoffPayload ?? JoinHandoffEnvelope(
+            handoff: handoff,
+            snapshot: localOnlyItemIDs.isEmpty ? nil : Data("memory-snapshot".utf8)).payload()
         return payload
     }
 
     public func adoptSecondDevice(handoffPayload: String) async throws {
         if let adoptSecondDeviceError { throw adoptSecondDeviceError }
-        let handoff = try JoinHandoff.parse(handoffPayload)
         adoptedHandoffs.append(handoffPayload)
         hasVault = true
+        let handoff = try JoinHandoff.parse(handoffPayload)
         vaultID = adoptOverridesVaultID ?? handoff.vaultID
         ownDeviceID = handoff.newOwnerDeviceID
         unlocked = true
         cachedItemCount = items.count
+    }
+
+    // MARK: rotation ritual (v0.7, §8.4)
+
+    public func rotateAllItems(progress: @Sendable @escaping (RotationProgress) async -> Void) async throws -> RotationSummary {
+        rotateAllAttempts += 1
+        if let rotateAllItemsError { throw rotateAllItemsError }
+        let total = items.count
+        for (i, row) in items.enumerated() {
+            rotatedItemIDs.append(row.id)
+            await progress(RotationProgress(rotated: i + 1, total: total))
+        }
+        return RotationSummary(rotatedCount: total, failedCount: 0)
+    }
+
+    // MARK: iCloud whole-file copy (v0.7, §6.7)
+
+    public func setCloudBackupEnabled(_ enabled: Bool) {
+        cloudBackupEnabled = enabled
+    }
+
+    public func uploadSnapshotIfDirty() async {
+        snapshotUploadCount += 1
+    }
+
+    public func cloudBackupStatus() async -> CloudBackupStatus {
+        cloudBackupEnabled ? cloudBackupStatusResult : .disabled
+    }
+
+    @discardableResult
+    public func restoreCloudSnapshot() async throws -> SnapshotRestoreSummary {
+        snapshotRestoreCount += 1
+        if let snapshotRestoreError { throw snapshotRestoreError }
+        return snapshotRestoreResult
     }
 }

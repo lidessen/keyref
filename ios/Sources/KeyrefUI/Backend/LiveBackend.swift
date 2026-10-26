@@ -20,6 +20,12 @@ final class SessionBox: @unchecked Sendable {
 public final class LiveBackend: AppBackend {
     public let keyStore: KeyStore
     public let stateStore: UIStateStore
+    /// 仅本机条目的 secret 密文（AES-GCM(item key)，锁机后是惰性字节，
+    /// §6.6）。生产用 SQLite 实现；测试/预览注入内存实现。
+    public let localSecrets: LocalSecretStore
+    /// iCloud 整文件副本的存储缝（§6.7）。nil = 此构建未启用（设置里显示
+    /// 「副本不可用」，本地功能不受影响）。
+    public let snapshotStore: (any SnapshotStore)?
     let sessionBox = SessionBox()
 
     public private(set) var hasVault = false
@@ -45,6 +51,9 @@ public final class LiveBackend: AppBackend {
     var encryptedAudit: [EncryptedAuditRow] = []
     /// 最近一次拉到的待审批原始行 + 已解开的明文（decide 时复用，§8.3）。
     var approvalRecords: [String: ApprovalRecord] = [:]
+    /// §6.7 全局开关（默认开）+ 去抖脏标记（编辑后置位，退后台消费）。
+    var cloudBackupEnabled = true
+    var snapshotDirty = false
 
     struct PendingJoin {
         var owner: OwnerKeys
@@ -74,11 +83,15 @@ public final class LiveBackend: AppBackend {
 
     public init(keyStore: KeyStore, stateStore: UIStateStore,
                 origin: URL = URL(string: "https://sync.keyref.app")!,
-                urlSession: URLSession = .shared) {
+                urlSession: URLSession = .shared,
+                localSecrets: LocalSecretStore = InMemoryLocalSecretStore(),
+                snapshotStore: (any SnapshotStore)? = nil) {
         self.keyStore = keyStore
         self.stateStore = stateStore
         self.origin = origin
         self.urlSession = urlSession
+        self.localSecrets = localSecrets
+        self.snapshotStore = snapshotStore
     }
 
     var api: APIClient {
@@ -246,7 +259,10 @@ public final class LiveBackend: AppBackend {
                 policy: meta.policy, injectable: meta.injectable,
                 createdAt: row.updatedAt, updatedAt: row.updatedAt,
                 grants: itemGrants,
-                ciphertextBytes: row.metaCiphertext.count + row.secretCiphertext.count))
+                ciphertextBytes: row.metaCiphertext.count
+                    + row.secretCiphertext.count
+                    + ((try? localSecrets.record(itemID: row.itemID))??.secretCiphertext.count ?? 0),
+                storageClass: StorageClass(sensitivity: meta.policy.sensitivity)))
         }
         cachedItemCount = out.count
         return out.sorted { $0.updatedAt > $1.updatedAt }
@@ -259,10 +275,26 @@ public final class LiveBackend: AppBackend {
                                        vaultID: vaultID, itemID: row.itemID)
     }
 
+    /// 仅本机条目的 secret 密文不在服务器行上（secret_ciphertext = NULL，
+    /// §6.6）——从本地加密存储取字节、用本地包裹解 item key。解锁路径与
+    /// 同步条目相同：都需要先解出 VMK。
     func decryptSecret(_ row: ItemData, vmk: Data, vaultID: String) throws -> SecretPlaintext {
-        let itemKey = try ItemCrypto.unwrapItemKey(vmk: vmk, blob: row.vaultWrappedItemKey,
+        let itemKey: Data
+        let blob: Data
+        if row.vaultWrappedItemKey.isEmpty || row.secretCiphertext.isEmpty {
+            guard let record = try localSecrets.record(itemID: row.itemID),
+                  !record.secretCiphertext.isEmpty, !record.vaultWrappedItemKey.isEmpty else {
+                throw KeyrefCryptoError.invalidBlob
+            }
+            itemKey = try ItemCrypto.unwrapItemKey(vmk: vmk, blob: record.vaultWrappedItemKey,
                                                    vaultID: vaultID, itemID: row.itemID)
-        return try ItemCrypto.openSecret(key: itemKey, blob: row.secretCiphertext,
+            blob = record.secretCiphertext
+        } else {
+            itemKey = try ItemCrypto.unwrapItemKey(vmk: vmk, blob: row.vaultWrappedItemKey,
+                                                   vaultID: vaultID, itemID: row.itemID)
+            blob = row.secretCiphertext
+        }
+        return try ItemCrypto.openSecret(key: itemKey, blob: blob,
                                          vaultID: vaultID, itemID: row.itemID)
     }
 
@@ -280,12 +312,23 @@ public final class LiveBackend: AppBackend {
                             description: draft.itemDescription, type: draft.type,
                             masked: maskOf(draft.value, type: draft.type),
                             injectable: draft.injectable, policy: draft.policy)
-        let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: itemID, revision: 1,
-                                             writerDeviceID: deviceID, vmk: vmk,
-                                             signer: owner.signer, meta: meta,
-                                             secret: SecretPlaintext(v: 1, value: draft.value))
-        storeSealed(sealed, itemID: itemID, revision: 1, vaultID: vaultID, deviceID: deviceID)
-        _ = try? await api.putItem(itemID: itemID, putRequest(sealed, revision: 1, deviceID: deviceID))
+        let secret = SecretPlaintext(v: 1, value: draft.value)
+        if draft.storageClass == .localOnly {
+            // 仅本机（§6.6）：签名誊本与 PUT 只带 meta 材料，secret 密文与
+            // item key 包裹落本地加密存储。
+            let sealed = try ItemCrypto.sealLocalOnlyItem(vaultID: vaultID, itemID: itemID,
+                                                          revision: 1, writerDeviceID: deviceID,
+                                                          vmk: vmk, signer: owner.signer,
+                                                          meta: meta, secret: secret)
+            storeLocalOnly(sealed, itemID: itemID, revision: 1, vaultID: vaultID, deviceID: deviceID)
+            snapshotDirty = true
+        } else {
+            let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: itemID, revision: 1,
+                                                 writerDeviceID: deviceID, vmk: vmk,
+                                                 signer: owner.signer, meta: meta, secret: secret)
+            storeSealed(sealed, itemID: itemID, revision: 1, vaultID: vaultID, deviceID: deviceID)
+        }
+        _ = try? await syncPut(itemID: itemID, vaultID: vaultID)
     }
 
     public func updateItem(id: String, _ draft: ItemEditDraft) async throws {
@@ -296,18 +339,70 @@ public final class LiveBackend: AppBackend {
               let oldSecret = try? decryptSecret(row, vmk: vmk, vaultID: vaultID) else {
             throw APIError.notFound
         }
+        let currentClass = StorageClass(sensitivity: oldMeta.policy.sensitivity)
+        // 同步 → 仅本机不可行（§6.6）：服务器上已有的密文无法撤回。
+        guard !(currentClass == .synced && draft.storageClass == .localOnly) else {
+            throw APIError.invalidField
+        }
         let value = draft.value.isEmpty ? oldSecret.value : draft.value
+        let targetClass = draft.storageClass
         let meta = ItemMeta(v: 1, ref: oldMeta.ref, name: draft.name,
                             description: draft.itemDescription, type: oldMeta.type,
                             masked: maskOf(value, type: oldMeta.type),
-                            injectable: draft.injectable, policy: draft.policy)
+                            injectable: draft.injectable,
+                            policy: ItemPolicy(sensitivity: targetClass.sensitivity,
+                                               commandPolicy: draft.policy.commandPolicy,
+                                               allowCommands: draft.policy.allowCommands,
+                                               allowedHosts: draft.policy.allowedHosts,
+                                               allowArgv: draft.policy.allowArgv))
+        let secret = SecretPlaintext(v: 1, value: value)
         let revision = row.revision + 1
-        let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: id, revision: revision,
-                                             writerDeviceID: deviceID, vmk: vmk,
-                                             signer: owner.signer, meta: meta,
-                                             secret: SecretPlaintext(v: 1, value: value))
-        storeSealed(sealed, itemID: id, revision: revision, vaultID: vaultID, deviceID: deviceID)
-        _ = try? await api.putItem(itemID: id, putRequest(sealed, revision: revision, deviceID: deviceID))
+        switch (currentClass, targetClass) {
+        case (.localOnly, .localOnly):
+            // meta 重封、item key 不变；secret 用同一把 key 重加密，本地包裹更新。
+            let itemKey = try unwrapLocalItemKey(row, vmk: vmk, vaultID: vaultID)
+            let metaKey = try ItemCrypto.unwrapMetaKey(vmk: vmk, blob: row.vaultWrappedMetaKey,
+                                                       vaultID: vaultID, itemID: id)
+            let metaCT = try ItemCrypto.sealMeta(key: metaKey, meta: meta,
+                                                 vaultID: vaultID, itemID: id)
+            let secretCT = try ItemCrypto.sealSecret(key: itemKey, secret: secret,
+                                                     vaultID: vaultID, itemID: id)
+            let vwMeta = try ItemCrypto.wrapMetaKeyWithVMK(vmk: vmk, metaKey: metaKey,
+                                                           vaultID: vaultID, itemID: id)
+            let vwItem = try ItemCrypto.wrapItemKeyWithVMK(vmk: vmk, itemKey: itemKey,
+                                                           vaultID: vaultID, itemID: id)
+            let t = ItemTranscript(vaultID: vaultID, itemID: id, revision: revision,
+                                   metaCiphertext: metaCT, secretCiphertext: Data(),
+                                   vaultWrappedMetaKey: vwMeta, vaultWrappedItemKey: Data(),
+                                   writerDeviceID: deviceID)
+            let signature = try owner.signer.sign(t.buildBytes())
+            try? stateStore.upsertItem(ItemData.make(
+                vaultID: vaultID, itemID: id, revision: revision, tombstone: false,
+                metaCiphertext: metaCT, secretCiphertext: Data(),
+                vaultWrappedMetaKey: vwMeta, vaultWrappedItemKey: Data(),
+                writerDeviceID: deviceID, signature: signature, updatedAt: nowMillis()))
+            let oldRecord = try localSecrets.record(itemID: id)
+                ?? LocalSecretRecord(itemID: id, secretCiphertext: Data(),
+                                     vaultWrappedItemKey: Data(), revision: 0, updatedAt: 0)
+            try localSecrets.save(LocalSecretRecord(
+                itemID: id, secretCiphertext: secretCT, vaultWrappedItemKey: vwItem,
+                revision: max(oldRecord.revision, revision), updatedAt: nowMillis()))
+            snapshotDirty = true
+        case (.localOnly, .synced):
+            // 仅本机 → 同步：新 revision 全量上传（secret 首次上服务器）。
+            let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: id, revision: revision,
+                                                 writerDeviceID: deviceID, vmk: vmk,
+                                                 signer: owner.signer, meta: meta, secret: secret)
+            storeSealed(sealed, itemID: id, revision: revision, vaultID: vaultID, deviceID: deviceID)
+            try localSecrets.remove(itemID: id)
+            snapshotDirty = true
+        default:
+            let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: id, revision: revision,
+                                                 writerDeviceID: deviceID, vmk: vmk,
+                                                 signer: owner.signer, meta: meta, secret: secret)
+            storeSealed(sealed, itemID: id, revision: revision, vaultID: vaultID, deviceID: deviceID)
+        }
+        _ = try? await syncPut(itemID: id, vaultID: vaultID)
     }
 
     public func deleteItem(id: String) async throws {
@@ -319,6 +414,8 @@ public final class LiveBackend: AppBackend {
                                                      writerDeviceID: deviceID,
                                                      signer: owner.signer)
         try stateStore.deleteItem(id)
+        try? localSecrets.remove(itemID: id)
+        snapshotDirty = true
         _ = try? await api.deleteItem(itemID: id,
                                       DeleteItemRequest.make(revision: revision, signature: signature))
     }
@@ -331,8 +428,23 @@ public final class LiveBackend: AppBackend {
               let old = try? decryptSecret(row, vmk: vmk, vaultID: vaultID) else {
             throw APIError.notFound
         }
-        try await reencryptItem(row, meta: meta,
-                                value: newValue.isEmpty ? old.value : newValue,
+        let value = newValue.isEmpty ? old.value : newValue
+        if StorageClass.of(row) == .localOnly {
+            // 仅本机：只轮换本地包裹（新 item key、重加密、重包裹），不动
+            // 服务器（§8.4 定期轮换 / §2.5 替换值）。
+            let record = try localSecrets.record(itemID: id)
+                ?? LocalSecretRecord(itemID: id, secretCiphertext: Data(),
+                                     vaultWrappedItemKey: Data(),
+                                     revision: row.revision, updatedAt: nowMillis())
+            let updated = try ItemCrypto.rotateLocalOnlySecret(vaultID: vaultID, itemID: id,
+                                                               vmk: vmk, meta: meta,
+                                                               secret: SecretPlaintext(v: 1, value: value),
+                                                               oldRecord: record)
+            try localSecrets.save(updated)
+            snapshotDirty = true
+            return
+        }
+        try await reencryptItem(row, meta: meta, value: value,
                                 vaultID: vaultID, owner: owner, deviceID: deviceID)
     }
 
@@ -343,6 +455,55 @@ public final class LiveBackend: AppBackend {
                        vaultWrappedMetaKey: sealed.transcript.vaultWrappedMetaKey,
                        vaultWrappedItemKey: sealed.transcript.vaultWrappedItemKey,
                        writerDeviceID: deviceID, signature: sealed.signature)
+    }
+
+    /// PUT /v1/items/:item_id from the locally stored row: full material for
+    /// synced items, meta-only for 仅本机 (§6.6: secret_ciphertext 省略,
+    /// vault_wrapped_item_key 不上传——服务器上没有 use 授权，用不到它).
+    func syncPut(itemID: String, vaultID: String) async throws {
+        guard let row = stateStore.itemByID(itemID), !row.tombstone else { return }
+        let localOnly = StorageClass.of(row) == .localOnly
+        let put = PutItemRequest.make(
+            revision: row.revision, tombstone: false,
+            metaCiphertext: row.metaCiphertext,
+            secretCiphertext: localOnly ? Data() : row.secretCiphertext,
+            vaultWrappedMetaKey: row.vaultWrappedMetaKey,
+            vaultWrappedItemKey: localOnly ? Data() : row.vaultWrappedItemKey,
+            writerDeviceID: row.writerDeviceID, signature: row.signature)
+        _ = try? await api.putItem(itemID: itemID, put)
+    }
+
+    /// 仅本机条目：行里只有 meta 材料；secret 密文与 item key 包裹进本地
+    /// 加密存储（§6.6）。
+    func storeLocalOnly(_ sealed: ItemCrypto.SealedLocalOnlyItem, itemID: String,
+                        revision: UInt64, vaultID: String, deviceID: String) {
+        try? stateStore.upsertItem(ItemData.make(
+            vaultID: vaultID, itemID: itemID, revision: revision, tombstone: false,
+            metaCiphertext: sealed.transcript.metaCiphertext,
+            secretCiphertext: Data(),
+            vaultWrappedMetaKey: sealed.transcript.vaultWrappedMetaKey,
+            vaultWrappedItemKey: Data(),
+            writerDeviceID: deviceID, signature: sealed.signature,
+            updatedAt: nowMillis()))
+        try? localSecrets.save(LocalSecretRecord(
+            itemID: itemID, secretCiphertext: sealed.secretCiphertext,
+            vaultWrappedItemKey: sealed.vaultWrappedItemKey,
+            revision: revision, updatedAt: nowMillis()))
+    }
+
+    /// Unwraps a local-only item's key from its LOCAL wrap (the server row
+    /// carries no vault_wrapped_item_key, §6.6).
+    func unwrapLocalItemKey(_ row: ItemData, vmk: Data, vaultID: String) throws -> Data {
+        if !row.vaultWrappedItemKey.isEmpty {
+            return try ItemCrypto.unwrapItemKey(vmk: vmk, blob: row.vaultWrappedItemKey,
+                                                vaultID: vaultID, itemID: row.itemID)
+        }
+        guard let record = try localSecrets.record(itemID: row.itemID),
+              !record.vaultWrappedItemKey.isEmpty else {
+            throw KeyrefCryptoError.invalidBlob
+        }
+        return try ItemCrypto.unwrapItemKey(vmk: vmk, blob: record.vaultWrappedItemKey,
+                                            vaultID: vaultID, itemID: row.itemID)
     }
 
     func storeSealed(_ sealed: ItemCrypto.SealedItem, itemID: String, revision: UInt64,
@@ -477,6 +638,8 @@ public final class LiveBackend: AppBackend {
         let expires = nowMillis() + 30 * 86_400_000
         for selection in selections {
             guard let row = stateStore.itemByID(selection.itemID) else { continue }
+            // 仅本机条目永远没有 use 授予（§6.6）；UI 已隐藏，这里兜底。
+            if selection.kind == "use", StorageClass.of(row) == .localOnly { continue }
             let key: Data
             if selection.kind == "use" {
                 key = try ItemCrypto.unwrapItemKey(vmk: vmk, blob: row.vaultWrappedItemKey,
@@ -515,6 +678,7 @@ public final class LiveBackend: AppBackend {
         let expires = nowMillis() + 30 * 86_400_000
         for selection in selections {
             guard let row = stateStore.itemByID(selection.itemID) else { continue }
+            if selection.kind == "use", StorageClass.of(row) == .localOnly { continue }  // §6.6
             let key: Data
             if selection.kind == "use" {
                 key = try ItemCrypto.unwrapItemKey(vmk: vmk, blob: row.vaultWrappedItemKey,
@@ -813,12 +977,14 @@ public final class LiveBackend: AppBackend {
         // 绝不显示「已删除」，除非服务器确认成功).
         try? keyStore.removeAll()
         stateStore.wipeAll()
+        try? localSecrets.removeAll()   // 仅本机 secret 密文随库删除（§6.6）
         vmk = nil
         self.owner = nil
         hasVault = false
         self.vaultID = nil
         ownDeviceID = nil
         cachedItemCount = 0
+        snapshotDirty = false
     }
 
     public func rotateVMKAndRecovery() async throws -> String {
@@ -1022,6 +1188,8 @@ public final class LiveBackend: AppBackend {
         // devices held — §8.4 default action, no confirmation needed.
         let itemCount = stateStore.allItems().filter { !$0.tombstone }.count
         if prep.mode == .takeover {
+            // 仅本机条目的 iCloud 副本要用新 owner 的密钥重签上传（§6.7）。
+            snapshotDirty = true
             await progress(.rotateItems(remaining: itemCount))
             let vmk = prep.vmk
             let deviceID = pending.newDeviceID
@@ -1114,14 +1282,31 @@ public final class LiveBackend: AppBackend {
             guard let itemRow = stateStore.itemByID(record.plaintext.itemID) else {
                 throw APIError.notFound
             }
-            let itemKey = try ItemCrypto.unwrapItemKey(vmk: vmkValue,
-                                                       blob: itemRow.vaultWrappedItemKey,
-                                                       vaultID: vaultID,
-                                                       itemID: record.plaintext.itemID)
-            decision = try ApprovalFlows.approveDecision(vaultID: vaultID,
-                                                         pending: record.row,
-                                                         plaintext: record.plaintext,
-                                                         itemKey: itemKey)
+            if StorageClass.of(itemRow) == .localOnly {
+                // 仅本机条目（§6.6）：服务器上没有 secret_ciphertext，包裹
+                // 载荷换成 secret 密文本身（info 绑定不变）。
+                let record_ = try localSecrets.record(itemID: itemRow.itemID)
+                let secretCT: Data
+                if let localRecord = record_, !localRecord.secretCiphertext.isEmpty {
+                    secretCT = localRecord.secretCiphertext
+                } else if !itemRow.secretCiphertext.isEmpty {
+                    secretCT = itemRow.secretCiphertext
+                } else {
+                    throw KeyrefCryptoError.invalidBlob
+                }
+                decision = try ApprovalFlows.approveSecretDeliveryDecision(
+                    vaultID: vaultID, pending: record.row,
+                    plaintext: record.plaintext, secretCiphertext: secretCT)
+            } else {
+                let itemKey = try ItemCrypto.unwrapItemKey(vmk: vmkValue,
+                                                           blob: itemRow.vaultWrappedItemKey,
+                                                           vaultID: vaultID,
+                                                           itemID: record.plaintext.itemID)
+                decision = try ApprovalFlows.approveDecision(vaultID: vaultID,
+                                                             pending: record.row,
+                                                             plaintext: record.plaintext,
+                                                             itemKey: itemKey)
+            }
         } else {
             decision = ApprovalFlows.denyDecision()
         }
@@ -1179,16 +1364,24 @@ public final class LiveBackend: AppBackend {
         stateStore.setDeviceInfo(UIStateStore.DeviceInfo(label: label, createdAt: nowMillis()),
                                  for: offer.deviceID)
         _ = try? await syncNow()
-        return handoff.payload()
+        // 转移即分叉（§9.4 / §6.6 双 owner 行）：交接载荷带上仅本机条目的
+        // 快照 blob（§6.7 快照格式，owner 签名）。此后两台各自编辑、不合并。
+        var envelope = JoinHandoffEnvelope(handoff: handoff, snapshot: nil)
+        if let snapshot = buildLocalOnlySnapshot(signer: owner.signer) {
+            envelope.snapshot = snapshot.data
+        }
+        return envelope.payload()
     }
 
     /// 新手机：解 VMK（AEAD tag = 判真伪）、落 Keychain、开 session、
-    /// cursor=0 引导全部密文（§10.6）。
+    /// cursor=0 引导全部密文（§10.6）；交接码里的仅本机快照验签后入库
+    /// （§9.4 转移即分叉）。
     public func adoptSecondDevice(handoffPayload: String) async throws {
         guard let pending = pendingJoin else {
             throw APIError.transport("no pending join offer")
         }
-        let handoff = try JoinHandoff.parse(handoffPayload)
+        let envelope = try JoinHandoffEnvelope.parse(handoffPayload)
+        let handoff = envelope.handoff
         guard handoff.newOwnerDeviceID == pending.deviceID else {
             throw KeyrefWireError.invalidField("handoff is for another device")
         }
@@ -1219,6 +1412,18 @@ public final class LiveBackend: AppBackend {
         }
         let engine = SyncEngine(api: api)
         _ = try? await engine.run(store: stateStore)
+        // 转移即分叉：交接快照（仅本机条目）先验签（用旧 owner 的签名公钥，
+        // 即交接码里那把）再入库（§9.4）。快照的 revision 单调延续。
+        if let snapshot = envelope.snapshot, !snapshot.isEmpty {
+            _ = try? SnapshotEngine.restore(
+                data: snapshot, vaultID: handoff.vaultID,
+                rows: stateStore.allItems(), state: stateStore,
+                secrets: localSecrets,
+                trustedOwnerKeys: [handoff.ownerSignPublicKey])
+            try? localSecrets.setSnapshotRevision(
+                (try? SnapshotCodec.parseUnverified(snapshot))?.snapshotRevision ?? 0)
+            snapshotDirty = true
+        }
     }
 
     // MARK: - push (Phase 2, §13)
@@ -1233,5 +1438,140 @@ public final class LiveBackend: AppBackend {
             // 静默失败（会话过期 / 网络 / 限流）：轮询兜底照常，下次注册重试。
             return false
         }
+    }
+
+    // MARK: - rotation ritual (v0.7, §8.4 定期轮换)
+
+    /// 立即轮换全部条目。同步条目走既有 per-item 原子 PUT（新 item key、
+    /// 重包裹、重加密、revision + 1，重发 use 授权）；仅本机条目只轮换本地
+    /// 包裹（§8.4：不动服务器）。逐条自洽：某条失败计入 failedCount 并继续，
+    /// 整轮重试即可补齐（已轮换的条目再轮换一次无副作用）。
+    public func rotateAllItems(progress: @Sendable @escaping (RotationProgress) async -> Void) async throws -> RotationSummary {
+        let (vmk, owner, vaultID) = try guardUnlocked()
+        let deviceID = ownDeviceID ?? ""
+        let rows = stateStore.allItems().filter { !$0.tombstone }.sorted { $0.itemID < $1.itemID }
+        var rotated = 0
+        var failed = 0
+        for (index, row) in rows.enumerated() {
+            do {
+                if StorageClass.of(row) == .localOnly {
+                    guard let meta = try? decryptMeta(row, vmk: vmk, vaultID: vaultID),
+                          let secret = try? decryptSecret(row, vmk: vmk, vaultID: vaultID) else {
+                        throw KeyrefCryptoError.invalidBlob
+                    }
+                    let record = try localSecrets.record(itemID: row.itemID)
+                        ?? LocalSecretRecord(itemID: row.itemID, secretCiphertext: Data(),
+                                             vaultWrappedItemKey: Data(),
+                                             revision: row.revision, updatedAt: nowMillis())
+                    let updated = try ItemCrypto.rotateLocalOnlySecret(
+                        vaultID: vaultID, itemID: row.itemID, vmk: vmk, meta: meta,
+                        secret: secret, oldRecord: record)
+                    try localSecrets.save(updated)
+                    snapshotDirty = true
+                } else {
+                    guard let meta = try? decryptMeta(row, vmk: vmk, vaultID: vaultID),
+                          let secret = try? decryptSecret(row, vmk: vmk, vaultID: vaultID) else {
+                        throw KeyrefCryptoError.invalidBlob
+                    }
+                    try await reencryptItem(row, meta: meta, value: secret.value,
+                                            vaultID: vaultID, owner: owner, deviceID: deviceID)
+                }
+                rotated += 1
+            } catch {
+                failed += 1
+            }
+            await progress(RotationProgress(rotated: index + 1, total: rows.count))
+        }
+        return RotationSummary(rotatedCount: rotated, failedCount: failed)
+    }
+
+    // MARK: - iCloud whole-file copy (v0.7, §6.7)
+
+    public func setCloudBackupEnabled(_ enabled: Bool) {
+        cloudBackupEnabled = enabled
+    }
+
+    /// 编辑后退后台的去抖上传（§6.7）：合并云端（「revision 大者胜」双向）、
+    /// 以更高的 snapshot_revision 重传。签名需要 owner 密钥——Face ID 场景
+    /// 下失败就保留脏标记，下次后台/解锁再试（绝不阻塞本地功能）。
+    public func uploadSnapshotIfDirty() async {
+        guard snapshotDirty, cloudBackupEnabled, hasVault,
+              let vaultID, let owner, snapshotStore != nil else { return }
+        snapshotDirty = false
+        do {
+            _ = try await uploadSnapshotNow(vaultID: vaultID, owner: owner)
+        } catch {
+            snapshotDirty = true  // 下次再试（§6.7：绝不因此阻塞本地功能）
+        }
+    }
+
+    /// Trusted owner sign keys for snapshot verification: the pinned key
+    /// plus every owner key recorded in the signed directory (a pre-takeover
+    /// snapshot is signed by the pre-takeover owner, §6.7 恢复路径).
+    func trustedOwnerKeys() -> [Data] {
+        var keys: [Data] = []
+        if let pinned = try? stateStore.pinnedOwnerKey(), !pinned.isEmpty {
+            keys.append(pinned)
+        }
+        if let own = owner {
+            keys.append(own.signPublicKey)
+        }
+        for device in directoryDevices() ?? [] where device.kind == DeviceKind.ios {
+            keys.append(device.signPublicKey)
+        }
+        return keys
+    }
+
+    func buildLocalOnlySnapshot(signer: TranscriptSigner) -> SnapshotBuildResult? {
+        guard let vaultID else { return nil }
+        let revision = (try? localSecrets.snapshotRevision()) ?? 0
+        return try? SnapshotEngine.build(
+            vaultID: vaultID, snapshotRevision: revision + 1,
+            rows: stateStore.allItems(), secrets: localSecrets, signer: signer)
+    }
+
+    func uploadSnapshotNow(vaultID: String, owner: OwnerKeys) async throws -> SnapshotManifest? {
+        guard let store = snapshotStore else { return nil }
+        return try await SnapshotEngine.uploadMerged(
+            vaultID: vaultID, rows: stateStore.allItems(), state: stateStore,
+            secrets: localSecrets, signer: owner.signer, store: store,
+            trustedOwnerKeys: trustedOwnerKeys())
+    }
+
+    public func cloudBackupStatus() async -> CloudBackupStatus {
+        guard hasVault, vaultID != nil else { return .noVault }
+        guard cloudBackupEnabled else { return .disabled }
+        guard let snapshotStore else {
+            return .unavailable("此构建未启用 iCloud 副本")
+        }
+        let probe = await snapshotStore.checkAvailability()
+        guard probe.available else {
+            return .unavailable(probe.reason ?? "副本不可用")
+        }
+        let localCount = stateStore.allItems()
+            .filter { StorageClass.of($0) == .localOnly }.count
+        let revision = (try? localSecrets.snapshotRevision()) ?? 0
+        return .ready(itemCount: localCount, snapshotRevision: revision)
+    }
+
+    @discardableResult
+    public func restoreCloudSnapshot() async throws -> SnapshotRestoreSummary {
+        guard let vaultID else { throw LockError.noVault }
+        guard let snapshotStore else {
+            throw SnapshotStoreError.unavailable("此构建未启用 iCloud 副本")
+        }
+        guard let data = try await snapshotStore.download(vaultID: vaultID) else {
+            throw SnapshotEngineError.notFound
+        }
+        let outcome = try SnapshotEngine.restore(
+            data: data, vaultID: vaultID, rows: stateStore.allItems(),
+            state: stateStore, secrets: localSecrets,
+            trustedOwnerKeys: trustedOwnerKeys())
+        if outcome.snapshotRevision > ((try? localSecrets.snapshotRevision()) ?? 0) {
+            try? localSecrets.setSnapshotRevision(outcome.snapshotRevision)
+        }
+        snapshotDirty = true
+        return SnapshotRestoreSummary(appliedCount: outcome.applied,
+                                      snapshotRevision: outcome.snapshotRevision)
     }
 }

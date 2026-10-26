@@ -503,9 +503,30 @@ struct ItemEditView: View {
                     Text("笔记").tag("note")
                     Text("通用").tag("generic")
                 }
+                if model.isCreate {
+                    Picker("存储位置", selection: $model.storageClass) {
+                        Text("同步到服务器").tag(StorageClass.synced)
+                        Text("仅本机").tag(StorageClass.localOnly)
+                    }
+                    .pickerStyle(.segmented)
+                }
             } else {
                 LabeledContent("ref", value: model.ref)
                     .font(.body.monospaced())
+                if !model.isCreate, model.storageClass == .localOnly {
+                    Label("仅本机条目：密文不上服务器，每次使用需手机批准。", systemImage: "iphone")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if model.isCreate && model.storageClass == .localOnly {
+                Section {
+                    Label("仅本机条目的密文不上传服务器。手机丢失时只能靠 iCloud 副本找回；每次使用都需要手机批准。", systemImage: "exclamationmark.shield")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                } header: {
+                    Text("仅本机")
+                }
             }
             SecureField(model.isCreate ? "值" : "值（留空 = 不修改）", text: $model.value)
                 .font(.body.monospaced())

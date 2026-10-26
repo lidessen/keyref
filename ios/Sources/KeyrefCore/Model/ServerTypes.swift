@@ -142,6 +142,35 @@ public struct ItemData: Codable, Equatable, Sendable {
     }
 }
 
+public extension ItemData {
+    /// v0.7 (design §6.6): 仅本机 rows carry secret_ciphertext = NULL and no
+    /// vault_wrapped_item_key — the server may emit those fields as JSON
+    /// `null` or omit them entirely. Both decode to empty Data so the sync
+    /// stream keeps applying; a live row with empty secret fields is exactly
+    /// the local-only signal (`StorageClass.of(row:)`). Declared in an
+    /// extension so the internal memberwise initializer survives.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        vaultID = try c.decode(String.self, forKey: .vaultID)
+        itemID = try c.decode(String.self, forKey: .itemID)
+        revision = try c.decode(UInt64.self, forKey: .revision)
+        tombstone = try c.decodeIfPresent(Bool.self, forKey: .tombstone) ?? false
+        func field(_ key: CodingKeys) throws -> Data {
+            if c.contains(key), !(try c.decodeNil(forKey: key)) {
+                return try c.decode(Data.self, forKey: key)
+            }
+            return Data()
+        }
+        metaCiphertext = try field(.metaCiphertext)
+        secretCiphertext = try field(.secretCiphertext)
+        vaultWrappedMetaKey = try field(.vaultWrappedMetaKey)
+        vaultWrappedItemKey = try field(.vaultWrappedItemKey)
+        writerDeviceID = try c.decode(String.self, forKey: .writerDeviceID)
+        signature = try field(.signature)
+        updatedAt = try c.decodeIfPresent(Int64.self, forKey: .updatedAt) ?? 0
+    }
+}
+
 /// Grant row (§8.3, §3.2): wire form of PUT /v1/grants entries,
 /// grants/self rows and sync "grant" changes. Deleted rows carry
 /// deleted=true, a bumped revision and empty crypto fields.

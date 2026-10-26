@@ -54,6 +54,10 @@ public final class SettingsStore {
     public private(set) var newRecoveryCode: String?
     public private(set) var rotating = false
 
+    // v0.7（§6.7、§8.4）：iCloud 副本开关与轮换提醒。
+    public var cloudBackupOn = true
+    public var rotationReminderOn = false
+
     public init(backend: any AppBackend, haptics: any Haptics,
                 autoLock: AutoLockInterval = .oneMinute) {
         self.backend = backend

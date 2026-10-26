@@ -88,6 +88,11 @@ struct SettingsView: View {
                 Text("Plus（$6/月）")
             }
             .disabled(true)
+            NavigationLink {
+                CloudBackupView(app: app)
+            } label: {
+                Text("iCloud 副本（仅本机条目）")
+            }
         } header: {
             Text("保险库与配额")
         }
@@ -115,6 +120,11 @@ struct SettingsView: View {
                 RotationEntryView(app: app, kind: .recoveryLeak)
             } label: {
                 Text("怀疑恢复码泄露")
+            }
+            NavigationLink {
+                ItemKeyRotationView(app: app)
+            } label: {
+                Text("轮换条目密钥")
             }
         } header: {
             Text("安全")

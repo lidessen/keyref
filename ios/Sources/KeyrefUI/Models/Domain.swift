@@ -37,11 +37,13 @@ public struct ItemRow: Identifiable, Equatable, Sendable {
     public var updatedAt: Int64
     public var grants: [GrantSummary]
     public var ciphertextBytes: Int
+    /// 存储类别（v0.7 §6.6）：同步 / 仅本机。派生自 meta 的 sensitivity。
+    public var storageClass: StorageClass
 
     public init(id: String, ref: String, name: String, itemDescription: String,
                 type: String, masked: String, policy: ItemPolicy, injectable: Bool,
                 createdAt: Int64, updatedAt: Int64, grants: [GrantSummary],
-                ciphertextBytes: Int = 0) {
+                ciphertextBytes: Int = 0, storageClass: StorageClass = .synced) {
         self.id = id
         self.ref = ref
         self.name = name
@@ -54,6 +56,7 @@ public struct ItemRow: Identifiable, Equatable, Sendable {
         self.updatedAt = updatedAt
         self.grants = grants
         self.ciphertextBytes = ciphertextBytes
+        self.storageClass = storageClass
     }
 }
 
@@ -66,9 +69,12 @@ public struct ItemDraft: Equatable, Sendable {
     public var value: String
     public var policy: ItemPolicy
     public var injectable: Bool
+    /// 存储类别（v0.7 §6.6）：仅本机条目的 secret 只存本地加密存储。
+    public var storageClass: StorageClass
 
     public init(ref: String, name: String, itemDescription: String, type: String,
-                value: String, policy: ItemPolicy, injectable: Bool = false) {
+                value: String, policy: ItemPolicy, injectable: Bool = false,
+                storageClass: StorageClass = .synced) {
         self.ref = ref
         self.name = name
         self.itemDescription = itemDescription
@@ -76,6 +82,7 @@ public struct ItemDraft: Equatable, Sendable {
         self.value = value
         self.policy = policy
         self.injectable = injectable
+        self.storageClass = storageClass
     }
 }
 
@@ -86,14 +93,18 @@ public struct ItemEditDraft: Equatable, Sendable {
     public var value: String
     public var policy: ItemPolicy
     public var injectable: Bool
+    /// 存储类别。同步 → 仅本机 的改向被拒绝（服务器上已有的密文无法撤回）。
+    public var storageClass: StorageClass
 
     public init(name: String, itemDescription: String, value: String,
-                policy: ItemPolicy, injectable: Bool) {
+                policy: ItemPolicy, injectable: Bool,
+                storageClass: StorageClass = .synced) {
         self.name = name
         self.itemDescription = itemDescription
         self.value = value
         self.policy = policy
         self.injectable = injectable
+        self.storageClass = storageClass
     }
 }
 
@@ -280,5 +291,57 @@ public struct GrantSelection: Equatable, Sendable {
     public init(itemID: String, kind: String) {
         self.itemID = itemID
         self.kind = kind
+    }
+}
+
+// MARK: - v0.7 §8.4 定期轮换
+
+public struct RotationProgress: Equatable, Sendable {
+    public var rotated: Int
+    public var total: Int
+
+    public init(rotated: Int, total: Int) {
+        self.rotated = rotated
+        self.total = total
+    }
+}
+
+/// Result of 立即轮换全部同步条目 (§8.4 定期轮换): per-item atomic PUTs are
+/// 逐条自洽 — an item that failed can be retried by running the rotation
+/// again (already-rotated items just rotate once more).
+public struct RotationSummary: Equatable, Sendable {
+    public var rotatedCount: Int
+    public var failedCount: Int
+
+    public init(rotatedCount: Int, failedCount: Int) {
+        self.rotatedCount = rotatedCount
+        self.failedCount = failedCount
+    }
+}
+
+// MARK: - v0.7 §6.7 iCloud 整文件副本
+
+/// 「副本」状态 (§6.7 降级)：never blocks local functionality; the settings
+/// page shows it as-is.
+public enum CloudBackupStatus: Equatable, Sendable {
+    /// 开关关闭。
+    case disabled
+    /// 没有保险库（尚未创建 / 已删除）。
+    case noVault
+    /// CloudKit 不可用（未登录 iCloud 等）——显示「副本不可用」。
+    case unavailable(String)
+    /// 副本可上传 / 已存在；itemCount 是本地仅本机条目数。
+    case ready(itemCount: Int, snapshotRevision: UInt64)
+}
+
+/// Result of pulling a verified cloud snapshot into local state
+/// (恢复接管 / 双机加入后的提示入库, §6.7 恢复路径).
+public struct SnapshotRestoreSummary: Equatable, Sendable {
+    public var appliedCount: Int
+    public var snapshotRevision: UInt64
+
+    public init(appliedCount: Int, snapshotRevision: UInt64) {
+        self.appliedCount = appliedCount
+        self.snapshotRevision = snapshotRevision
     }
 }

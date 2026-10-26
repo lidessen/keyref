@@ -195,6 +195,7 @@ public final class ItemEditorModel {
         if case .edit(let row) = mode {
             name = row.name
             itemDescription = row.itemDescription
+            storageClass = row.storageClass
             denyShells = row.policy.commandPolicy == "deny-shells"
             allowCommandsText = row.policy.allowCommands.joined(separator: ", ")
             allowedHostsText = row.policy.allowedHosts.joined(separator: ", ")
@@ -359,10 +360,14 @@ public final class ItemEditorModel {
                       value: value, policy: policy, injectable: injectable)
     }
 
+    /// v0.7 §6.6：存储类别仅创建时可选（规格：创建时二选一，编辑不改）。
+    public var storageClass: StorageClass = .synced
+
     public var createDraft: ItemDraft {
         ItemDraft(ref: ref.lowercased(), name: name,
                   itemDescription: itemDescription, type: type,
-                  value: value, policy: policy, injectable: injectable)
+                  value: value, policy: policy, injectable: injectable,
+                  storageClass: storageClass)
     }
 
     // MARK: save pipeline

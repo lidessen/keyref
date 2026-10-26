@@ -152,6 +152,26 @@ public protocol AppBackend: AnyObject {
     /// 确认（204）；false = 当前无有效会话或上传失败——注册状态机在下次
     /// 解锁后重试，前台轮询兜底不受影响（失败静默，§13）。
     func putPushToken(token: String, env: String) async -> Bool
+
+    // MARK: rotation ritual (v0.7, §8.4 定期轮换)
+
+    /// 立即轮换全部条目（同步条目原子 PUT：新 item key、重包裹、重加密、
+    /// revision + 1；仅本机条目只轮换本地包裹，不动服务器）。逐条自洽：
+    /// 中途失败可整轮重试。仅统计同步条目的轮换数（§8.4）。
+    func rotateAllItems(progress: @Sendable @escaping (RotationProgress) async -> Void) async throws -> RotationSummary
+
+    // MARK: iCloud whole-file copy (v0.7, §6.7)
+
+    /// 全局开关（默认开）。关闭后不再上传，已有副本保留在 iCloud。
+    func setCloudBackupEnabled(_ enabled: Bool)
+    /// 编辑后去抖上传：退后台 / 解锁合并时调用；没有待传内容时是 no-op。
+    func uploadSnapshotIfDirty() async
+    /// 「副本」状态（设置页显示；绝不阻塞本地功能，§6.7 降级）。
+    func cloudBackupStatus() async -> CloudBackupStatus
+    /// 恢复接管 / 双机加入完成后：拉取云端快照、验签、按 revision 合并入库
+    /// （§6.7 恢复路径）。云端没有快照或验签不过时抛错/返回 0。
+    @discardableResult
+    func restoreCloudSnapshot() async throws -> SnapshotRestoreSummary
 }
 
 /// A freshly created vault, before upload. The recovery code is displayed
