@@ -21,7 +21,9 @@ public final class InMemorySyncStateStore: SyncStateStore, @unchecked Sendable {
 
     public init() {}
 
-    private func grantKey(_ itemID: String, _ kind: String) -> String { "\(itemID)|\(kind)" }
+    private func grantKey(_ deviceID: String, _ itemID: String, _ kind: String) -> String {
+        "\(deviceID)|\(itemID)|\(kind)"
+    }
 
     public func cursor() throws -> Int64 { lock.lock(); defer { lock.unlock() }; return state.cursor }
     public func setCursor(_ v: Int64) throws { lock.lock(); defer { lock.unlock() }; state.cursor = v }
@@ -40,12 +42,12 @@ public final class InMemorySyncStateStore: SyncStateStore, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         state.items.removeValue(forKey: itemID)
         // Cascade: a tombstoned item drops all its grants (design §6.3).
-        state.grants = state.grants.filter { !$0.key.hasPrefix("\(itemID)|") }
+        state.grants = state.grants.filter { $0.value.itemID != itemID }
     }
 
     public func upsertGrant(_ grant: GrantData) throws {
         lock.lock(); defer { lock.unlock() }
-        state.grants[grantKey(grant.itemID, grant.kind)] = grant
+        state.grants[grantKey(grant.deviceID, grant.itemID, grant.kind)] = grant
     }
 
     public func grants() throws -> [GrantData] {
@@ -53,9 +55,9 @@ public final class InMemorySyncStateStore: SyncStateStore, @unchecked Sendable {
         return Array(state.grants.values)
     }
 
-    public func deleteGrant(itemID: String, kind: String) throws {
+    public func deleteGrant(deviceID: String, itemID: String, kind: String) throws {
         lock.lock(); defer { lock.unlock() }
-        state.grants.removeValue(forKey: grantKey(itemID, kind))
+        state.grants.removeValue(forKey: grantKey(deviceID, itemID, kind))
     }
 
     public func storeDirectory(_ directory: DirectoryData) throws {

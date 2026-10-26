@@ -52,6 +52,17 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the log end BEFORE listing changes — the same order bootstrap
+	// uses (design §10.6). A change that commits after this read gets a
+	// seq above maxSeq and is delivered next round; reading MaxChangeSeq
+	// after ListChanges instead would let a commit landing between the
+	// two reads fall inside the empty-page jump range and be skipped
+	// forever.
+	maxSeq, err := s.st.MaxChangeSeq(r.Context())
+	if err != nil {
+		writeError(w, "internal")
+		return
+	}
 	rows, err := s.st.ListChanges(r.Context(), ac.vault.ID, cursor, syncPageSize+1)
 	if err != nil {
 		writeError(w, "internal")
@@ -64,16 +75,24 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	changes := make([]wire.SyncChange, 0, len(rows))
 	newCursor := cursor
 	for _, row := range rows {
-		newCursor = row.Seq
-		if ch, ok := s.renderChange(r, ac, row); ok {
+		ch, visible, err := s.renderChange(r, ac, row)
+		if err != nil {
+			// A transient store failure must not advance the cursor past
+			// an undelivered change (design §10.6): abort the page, the
+			// client retries from the same cursor.
+			writeError(w, "internal")
+			return
+		}
+		if visible {
 			changes = append(changes, ch)
 		}
+		newCursor = row.Seq
 	}
-	if len(rows) == 0 {
-		// Nothing new; report the current log end so clients converge.
-		if maxSeq, err := s.st.MaxChangeSeq(r.Context()); err == nil && maxSeq > cursor {
-			newCursor = maxSeq
-		}
+	if len(rows) == 0 && maxSeq > cursor {
+		// Nothing new; report the log end so clients converge. Every
+		// change above maxSeq was already committed before ListChanges,
+		// so this jump cannot skip one.
+		newCursor = maxSeq
 	}
 	writeJSON(w, http.StatusOK, wire.SyncResponse{
 		Cursor:  newCursor,
@@ -186,16 +205,20 @@ func (s *Server) handleSyncBootstrap(w http.ResponseWriter, r *http.Request, ac 
 	}
 
 	// Approvals (§8.1 bootstrap: "相关审批状态"): the owner sees the
-	// vault's queue, a CLI sees the approvals it initiated.
+	// vault's queue, a CLI sees the approvals it initiated. A store
+	// failure here must abort the bootstrap, not silently omit approval
+	// state from it.
 	approvals, err := s.st.ListApprovals(r.Context(), ac.vault.ID, "")
-	if err == nil {
-		for i := range approvals {
-			a := &approvals[i]
-			if !isOwner && a.CLIDeviceID != ac.device.ID {
-				continue
-			}
-			addChange(wire.EntityApproval, "approval:"+a.ID, approvalWireData(a))
+	if err != nil {
+		writeError(w, "internal")
+		return
+	}
+	for i := range approvals {
+		a := &approvals[i]
+		if !isOwner && a.CLIDeviceID != ac.device.ID {
+			continue
 		}
+		addChange(wire.EntityApproval, "approval:"+a.ID, approvalWireData(a))
 	}
 
 	writeJSON(w, http.StatusOK, wire.SyncResponse{Cursor: endSeq, HasMore: false, Changes: changes})
@@ -220,11 +243,14 @@ func (s *Server) cliItemData(r *http.Request, ac *authCtx, it *store.Item) wire.
 
 // renderChange materializes one log row for this caller, applying the
 // §10.6 visibility rules. A false return means "not visible to this
-// device" — the cursor still advances past it.
-func (s *Server) renderChange(r *http.Request, ac *authCtx, row store.ChangeRow) (wire.SyncChange, bool) {
+// device" — the cursor still advances past it. Only store.ErrNotFound
+// means that: any other store error is returned so the caller aborts
+// the page instead of silently advancing the cursor past a change that
+// was never delivered.
+func (s *Server) renderChange(r *http.Request, ac *authCtx, row store.ChangeRow) (wire.SyncChange, bool, error) {
 	kind, parts, err := wire.ParseEntityID(row.EntityID)
 	if err != nil || kind != row.Entity {
-		return wire.SyncChange{}, false // malformed rows are skipped, not fatal
+		return wire.SyncChange{}, false, nil // malformed rows are skipped, not fatal
 	}
 	// Revocation strips owner privileges first (design §10.6): a revoked
 	// iOS device falls through to the same restricted view as a revoked
@@ -239,7 +265,7 @@ func (s *Server) renderChange(r *http.Request, ac *authCtx, row store.ChangeRow)
 		// must match the log position (design §10.6).
 		vault, err := s.st.GetVault(r.Context(), ac.vault.ID)
 		if err != nil {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, err
 		}
 		return wire.SyncChange{
 			Seq: row.Seq, Entity: row.Entity, EntityID: row.EntityID, CreatedAt: row.CreatedAt,
@@ -248,20 +274,20 @@ func (s *Server) renderChange(r *http.Request, ac *authCtx, row store.ChangeRow)
 				Signed:            vault.DirectorySigned,
 				Signature:         vault.DirectorySignature,
 			}),
-		}, true
+		}, true, nil
 
 	case wire.EntityItem:
 		if len(parts) != 1 {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil
 		}
 		item, err := s.st.GetItem(r.Context(), ac.vault.ID, parts[0])
 		if errors.Is(err, store.ErrNotFound) {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil // purged tombstone: nothing to deliver
 		} else if err != nil {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, err
 		}
 		if isOwner {
-			return s.change(row, itemWireData(item, true, true, true)), true
+			return s.change(row, itemWireData(item, true, true, true)), true, nil
 		}
 		var hasGrant, activeGrant bool
 		for _, k := range []string{wire.GrantKindView, wire.GrantKindUse} {
@@ -276,50 +302,55 @@ func (s *Server) renderChange(r *http.Request, ac *authCtx, row store.ChangeRow)
 		if revoked {
 			// Only tombstones, and only of items this device held.
 			if !item.Tombstone || !hasGrant {
-				return wire.SyncChange{}, false
+				return wire.SyncChange{}, false, nil
 			}
-			return s.change(row, itemWireData(item, false, false, false)), true
+			return s.change(row, itemWireData(item, false, false, false)), true, nil
 		}
 		if item.Tombstone {
 			if !hasGrant {
-				return wire.SyncChange{}, false
+				return wire.SyncChange{}, false, nil
 			}
-			return s.change(row, itemWireData(item, false, false, false)), true
+			return s.change(row, itemWireData(item, false, false, false)), true, nil
 		}
 		if !activeGrant {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil
 		}
-		return s.change(row, s.cliItemData(r, ac, item)), true
+		return s.change(row, s.cliItemData(r, ac, item)), true, nil
 
 	case wire.EntityGrant:
 		if len(parts) != 3 {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil
 		}
 		g, err := s.st.GetGrant(r.Context(), ac.vault.ID, parts[0], parts[1], parts[2])
 		if errors.Is(err, store.ErrNotFound) {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil // deletion row already purged
 		} else if err != nil {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, err
 		}
 		deleted := len(g.HPKEEnc) == 0
 		if isOwner {
-			return s.change(row, grantWireData(g)), true
+			return s.change(row, grantWireData(g)), true, nil
 		}
 		if g.DeviceID != ac.device.ID {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil
 		}
 		if revoked && !deleted {
-			return wire.SyncChange{}, false // revoked: deletions only
+			return wire.SyncChange{}, false, nil // revoked: deletions only
 		}
-		return s.change(row, grantWireData(g)), true
+		return s.change(row, grantWireData(g)), true, nil
 
 	case wire.EntityDevice:
 		if revoked || !isOwner {
-			return wire.SyncChange{}, false // CLI devices learn statuses via the directory
+			return wire.SyncChange{}, false, nil // CLI devices learn statuses via the directory
 		}
 		dev, err := s.st.GetDevice(r.Context(), parts[0])
-		if err != nil || dev.VaultID != ac.vault.ID {
-			return wire.SyncChange{}, false
+		if errors.Is(err, store.ErrNotFound) {
+			return wire.SyncChange{}, false, nil // device row already purged
+		} else if err != nil {
+			return wire.SyncChange{}, false, err
+		}
+		if dev.VaultID != ac.vault.ID {
+			return wire.SyncChange{}, false, nil
 		}
 		revokedAt := (*int64)(nil)
 		if dev.RevokedAt.Valid {
@@ -329,28 +360,28 @@ func (s *Server) renderChange(r *http.Request, ac *authCtx, row store.ChangeRow)
 		return s.change(row, wire.DeviceData{
 			DeviceID: dev.ID, Kind: dev.Kind, Status: dev.Status, Label: dev.Label,
 			CreatedAt: dev.CreatedAt, RevokedAt: revokedAt,
-		}), true
+		}), true, nil
 
 	case wire.EntityApproval:
 		if len(parts) != 1 {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil
 		}
 		a, err := s.st.GetApproval(r.Context(), ac.vault.ID, parts[0])
 		if errors.Is(err, store.ErrNotFound) {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil // resolved approval already pruned
 		} else if err != nil {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, err
 		}
 		// Approval state is visible to the owner and to the CLI that
 		// initiated the request (design §10.6: "与自己相关的审批").
 		if !isOwner && a.CLIDeviceID != ac.device.ID {
-			return wire.SyncChange{}, false
+			return wire.SyncChange{}, false, nil
 		}
-		return s.change(row, approvalWireData(a)), true
+		return s.change(row, approvalWireData(a)), true, nil
 
 	default:
 		// Nothing else exists in the log.
-		return wire.SyncChange{}, false
+		return wire.SyncChange{}, false, nil
 	}
 }
 

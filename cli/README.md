@@ -9,6 +9,7 @@
 | 命令 | 作用 |
 | --- | --- |
 | `keyref pair` | 生成设备密钥，在终端显示二维码，和 iOS 保险库配对 |
+| `keyref session` | 建立或续期服务器会话（挑战换令牌，protocol §6.7） |
 | `keyref status` | 配对状态、会话是否解锁、授予剩余有效期 |
 | `keyref lock` / `keyref unlock` | 丢掉或恢复内存里的条目密钥 |
 | `keyref sync` | 拉取授权范围内的密文 |
@@ -27,19 +28,29 @@
 - 不要用 shell 去跑用户命令。`sh -c`、`echo`、`env` 一类默认拒绝。
 - 机器可读输出用英文表头，方便 agent 解析。
 
-目录布局（按 docs/protocol.md §2.3）：
+目录布局（实际树，2026-10-27 核对；`cli/internal` 共 17 个包）：
 
 ```
 cli/
-├── cmd/keyref/          # 命令入口（含 mcp.go：stdio JSON-RPC）
+├── cmd/keyref/          # 命令入口（main.go + mcp.go：stdio JSON-RPC）
 ├── internal/approval/   # approval 条目的审批请求/轮询/一次性解包（design §8.3）
-├── internal/exec/       # 策略（含 shebang 解析）、注入、脱敏、pty/reply
+├── internal/audit/      # exec 审计事件的封箱与上传
+├── internal/client/     # 同步 API 的薄 HTTP 客户端
 ├── internal/config/     # origin 配置（0700 目录）
-├── internal/keyring/    # SecretStore 接口；go-keyring 实现；测试用目录实现
-├── internal/store/      # cache.sqlite（0600，密文缓存）
-├── internal/secret/     # memguard 守护缓冲区、秘密 JSON 无字符串解析
+├── internal/device/     # 设备身份：X25519 HPKE 密钥 + 签名密钥
+├── internal/exec/       # 策略（含 shebang 解析）、注入、脱敏、pty/reply
+├── internal/exitcode/   # design §7.6 退出码表
 ├── internal/itemcrypt/  # grant 解包、meta/secret 解密
-└── e2e/                 //go:build e2e 端到端测试
+├── internal/keyring/    # SecretStore 接口；go-keyring 实现；测试用目录实现
+├── internal/meta/       # list/get：只解 meta，输出掩码
+├── internal/pair/       # 二维码生成、pair/register、pair/status 轮询
+├── internal/qr/         # 终端二维码渲染
+├── internal/secret/     # memguard 守护缓冲区、秘密 JSON 无字符串解析
+├── internal/session/    # 挑战→令牌、token 复用与续期
+├── internal/store/      # cache.sqlite（0600，密文缓存）
+├── internal/syncing/    # 服务器变更应用到本地缓存
+├── internal/testowner/  # 测试与 e2e 用的软件 P-256 owner
+└── e2e/                 # //go:build e2e 端到端测试
 ```
 
 验收时用固定夹具：夹具里的明文不得出现在 `list`、`get`、`exec` 的 stdout/stderr 里，包括 base64、hex 和 URL 编码。

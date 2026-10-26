@@ -117,9 +117,3 @@ func (m *Manager) Token() (string, error) {
 	}
 	return tok, nil
 }
-
-// Drop forgets the cached token (after 401s or unpair).
-func (m *Manager) Drop() {
-	_ = m.st.SetKV(KVToken, nil)
-	_ = m.st.SetKV(KVExpiresAt, nil)
-}

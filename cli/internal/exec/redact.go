@@ -58,6 +58,13 @@ func NewRedactor(secrets map[string][]byte) *Redactor {
 	sort.Strings(refs) // deterministic needle order
 	for _, ref := range refs {
 		secret := secrets[ref]
+		if len(secret) == 0 {
+			// An empty value is legal (jsonscan.go: empty string value) but
+			// produces only zero-length patterns: every variant would match
+			// at every position and a zero-length needle would leave emit
+			// spinning in place forever. Nothing to redact — skip it.
+			continue
+		}
 		replacement := []byte("<redacted:" + ref + ">")
 		for _, variant := range guardedVariants(secret) {
 			dup := false
@@ -248,7 +255,10 @@ func (r *Redactor) emit(final bool) error {
 		if decided {
 			matched := false
 			for _, n := range r.needles {
-				if len(n.pattern) <= len(r.buf)-i && bytes.Equal(r.buf[i:i+len(n.pattern)], n.pattern) {
+				// len(n.pattern) > 0: a zero-length needle can never match
+				// (and would not advance i). Defensive; NewRedactor skips
+				// empty secrets outright.
+				if len(n.pattern) > 0 && len(n.pattern) <= len(r.buf)-i && bytes.Equal(r.buf[i:i+len(n.pattern)], n.pattern) {
 					out = append(out, n.replace...)
 					r.replaced++
 					i += len(n.pattern)

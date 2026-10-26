@@ -112,15 +112,17 @@ public final class NoSystemOpener: SystemOpener, @unchecked Sendable {
 /// S14 lands as a local notification 7 days and 1 day before a `use` grant
 /// expires (design §8.4: 到期预警是产品的一部分).
 public protocol NotificationScheduler: Sendable {
-    func scheduleExpiryNotices(deviceLabel: String, itemRef: String,
-                               expiresAt: Date)
+    /// `deviceID` 参与 identifier（与 cancelExpiryNotices 对齐）；`deviceLabel`
+    /// 只进通知正文。
+    func scheduleExpiryNotices(deviceLabel: String, deviceID: String,
+                               itemRef: String, expiresAt: Date)
     func cancelExpiryNotices(itemRef: String, deviceID: String)
 }
 
 public final class LiveNotificationScheduler: NotificationScheduler, @unchecked Sendable {
     public init() {}
-    public func scheduleExpiryNotices(deviceLabel: String, itemRef: String,
-                                      expiresAt: Date) {
+    public func scheduleExpiryNotices(deviceLabel: String, deviceID: String,
+                                      itemRef: String, expiresAt: Date) {
         #if os(iOS)
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert]) { _, _ in }
@@ -133,12 +135,12 @@ public final class LiveNotificationScheduler: NotificationScheduler, @unchecked 
             let comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: fire)
             let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
             let request = UNNotificationRequest(
-                identifier: "expiry-\(itemRef)-\(deviceLabel)-\(days)d",
+                identifier: Self.identifier(itemRef: itemRef, deviceID: deviceID, days: days),
                 content: content, trigger: trigger)
             center.add(request)
         }
         #else
-        _ = deviceLabel; _ = itemRef; _ = expiresAt
+        _ = deviceLabel; _ = deviceID; _ = itemRef; _ = expiresAt
         #endif
     }
 
@@ -146,19 +148,24 @@ public final class LiveNotificationScheduler: NotificationScheduler, @unchecked 
         #if os(iOS)
         let center = UNUserNotificationCenter.current()
         center.removePendingNotificationRequests(withIdentifiers: [
-            "expiry-\(itemRef)-\(deviceID)-7d",
-            "expiry-\(itemRef)-\(deviceID)-1d",
+            Self.identifier(itemRef: itemRef, deviceID: deviceID, days: 7),
+            Self.identifier(itemRef: itemRef, deviceID: deviceID, days: 1),
         ])
         #else
         _ = itemRef; _ = deviceID
         #endif
     }
+
+    static func identifier(itemRef: String, deviceID: String, days: Int) -> String {
+        "expiry-\(itemRef)-\(deviceID)-\(days)d"
+    }
 }
 
 public final class NoNotificationScheduler: NotificationScheduler, @unchecked Sendable {
     public init() {}
-    public func scheduleExpiryNotices(deviceLabel: String, itemRef: String, expiresAt: Date) {
-        _ = deviceLabel; _ = itemRef; _ = expiresAt
+    public func scheduleExpiryNotices(deviceLabel: String, deviceID: String,
+                                      itemRef: String, expiresAt: Date) {
+        _ = deviceLabel; _ = deviceID; _ = itemRef; _ = expiresAt
     }
     public func cancelExpiryNotices(itemRef: String, deviceID: String) {
         _ = itemRef; _ = deviceID

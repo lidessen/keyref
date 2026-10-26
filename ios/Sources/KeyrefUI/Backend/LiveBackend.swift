@@ -54,6 +54,33 @@ public final class LiveBackend: AppBackend {
     /// §6.7 全局开关（默认开）+ 去抖脏标记（编辑后置位，退后台消费）。
     var cloudBackupEnabled = true
     var snapshotDirty = false
+    /// §6.7 每条目覆盖：本机对每个 item 的最近一次决定（含时间戳）。
+    /// 快照是整文件共享物——排除集随 manifest 分发、上传前与云端做 LWW
+    /// 合并（SnapshotEngine.mergeExclusions），本机 UserDefaults 只持久化
+    /// 自己的写入（item id 不是密钥材料）。
+    var snapshotExclusions: [String: SnapshotExclusion] = LiveBackend.loadSnapshotExclusions()
+
+    static func loadSnapshotExclusions() -> [String: SnapshotExclusion] {
+        guard let raw = UserDefaults.standard.dictionary(
+            forKey: "settings.snapshotExclusions") as? [String: String] else { return [:] }
+        var out: [String: SnapshotExclusion] = [:]
+        for (id, value) in raw {
+            let parts = value.split(separator: "|")
+            guard parts.count == 2, let at = Int64(parts[1]),
+                  KeyrefEncoding.isValidID(id) else { continue }
+            out[id] = SnapshotExclusion(itemID: id, excluded: parts[0] == "excluded",
+                                        atMillis: at)
+        }
+        return out
+    }
+
+    func persistSnapshotExclusions() {
+        var raw: [String: String] = [:]
+        for (id, e) in snapshotExclusions {
+            raw[id] = "\(e.excluded ? "excluded" : "included")|\(e.atMillis)"
+        }
+        UserDefaults.standard.set(raw, forKey: "settings.snapshotExclusions")
+    }
 
     struct PendingJoin {
         var owner: OwnerKeys
@@ -80,18 +107,23 @@ public final class LiveBackend: AppBackend {
     }
 
     let urlSession: URLSession
+    /// §8.4 到期预警（S14）：授予写入/续期后排 7 天与 1 天前的本地通知，
+    /// 撤销后取消。生产注入 LiveNotificationScheduler；测试注入 no-op。
+    let notifications: NotificationScheduler
 
     public init(keyStore: KeyStore, stateStore: UIStateStore,
                 origin: URL = URL(string: "https://sync.keyref.app")!,
                 urlSession: URLSession = .shared,
                 localSecrets: LocalSecretStore = InMemoryLocalSecretStore(),
-                snapshotStore: (any SnapshotStore)? = nil) {
+                snapshotStore: (any SnapshotStore)? = nil,
+                notifications: NotificationScheduler = NoNotificationScheduler()) {
         self.keyStore = keyStore
         self.stateStore = stateStore
         self.origin = origin
         self.urlSession = urlSession
         self.localSecrets = localSecrets
         self.snapshotStore = snapshotStore
+        self.notifications = notifications
     }
 
     var api: APIClient {
@@ -111,8 +143,44 @@ public final class LiveBackend: AppBackend {
             hasVault = false
         }
         ownDeviceID = stateStore.ownID()
+        // 回灌（§6.5）：UIStateStore 的行在内存里，进程重启后 ownDeviceID /
+        // pinnedOwnerKey / cursor 从 Keychain 恢复。没有 ownDeviceID，解锁
+        // 会解不出 VMK（info 绑定设备 id），SyncEngine 也直接 notPaired。
+        if ownDeviceID == nil, let stored = try? keyStore.retrieve(.ownDeviceID),
+           !stored.isEmpty, let id = String(data: stored, encoding: .utf8) {
+            ownDeviceID = id
+            try? stateStore.setOwnDeviceID(id)
+        }
+        let pinnedMissing = ((try? stateStore.pinnedOwnerKey()) ?? nil)?.isEmpty ?? true
+        if pinnedMissing, let stored = try? keyStore.retrieve(.pinnedOwnerKey),
+           !stored.isEmpty {
+            try? stateStore.setPinnedOwnerKey(stored)
+        }
+        let storedVaultID = (try? stateStore.vaultID()) ?? nil
+        if storedVaultID == nil || storedVaultID?.isEmpty == true {
+            if let vaultID { try? stateStore.setVaultID(vaultID) }
+        }
+        if (try? stateStore.cursor()) == 0, let stored = try? keyStore.retrieve(.syncCursor),
+           !stored.isEmpty, let text = String(data: stored, encoding: .utf8),
+           let saved = Int64(text), saved > 0 {
+            try? stateStore.setCursor(saved)
+        }
         cachedItemCount = stateStore.allItems().count
         localWrapInvalid = false
+    }
+
+    /// Persists the restart-critical state-store seeds (§6.5). Called at
+    /// every point that writes them into the (memory-only) state store.
+    func persistLocalStateSeeds(vaultID: String, ownDeviceID: String,
+                                pinnedOwnerKey: Data, cursor: Int64) {
+        try? keyStore.store(.ownDeviceID, Data(ownDeviceID.utf8))
+        try? keyStore.store(.pinnedOwnerKey, pinnedOwnerKey)
+        try? keyStore.store(.syncCursor, Data(String(cursor).utf8))
+    }
+
+    func persistSyncCursor() {
+        guard let cursor = try? stateStore.cursor() else { return }
+        try? keyStore.store(.syncCursor, Data(String(cursor).utf8))
     }
 
     public func unlockAfterBiometrics() async throws {
@@ -122,7 +190,16 @@ public final class LiveBackend: AppBackend {
             throw LockError.wrapInvalid
         }
         guard let owner = loadOwnerKeys() else { throw LockError.wrapInvalid }
-        let deviceID = stateStore.ownID() ?? ""
+        // ownDeviceID 缺失先恢复（loadLocalState 已做一遍；这里兜底）——
+        // 它丢失不是「包裹失效」（S4 的定义是隔区/AEAD 打不开），静默恢复
+        // 才不会把健康保险库误送进本机重建流程。
+        var deviceID = stateStore.ownID() ?? ""
+        if deviceID.isEmpty, let stored = try? keyStore.retrieve(.ownDeviceID),
+           !stored.isEmpty, let id = String(data: stored, encoding: .utf8) {
+            deviceID = id
+            try? stateStore.setOwnDeviceID(id)
+            ownDeviceID = id
+        }
         do {
             vmk = try VaultFlows.unwrapLocalVMK(owner: owner, wrap: wrapData,
                                                 vaultID: vaultID, ownerDeviceID: deviceID)
@@ -204,6 +281,8 @@ public final class LiveBackend: AppBackend {
         try stateStore.setOwnDeviceID(deviceID)
         try stateStore.setPinnedOwnerKey(owner.signPublicKey)
         try stateStore.setCursor(0)
+        persistLocalStateSeeds(vaultID: vaultID, ownDeviceID: deviceID,
+                               pinnedOwnerKey: owner.signPublicKey, cursor: 0)
         stateStore.setDeviceInfo(UIStateStore.DeviceInfo(label: label, createdAt: nowMillis()), for: deviceID)
 
         self.owner = owner
@@ -262,7 +341,8 @@ public final class LiveBackend: AppBackend {
                 ciphertextBytes: row.metaCiphertext.count
                     + row.secretCiphertext.count
                     + ((try? localSecrets.record(itemID: row.itemID))??.secretCiphertext.count ?? 0),
-                storageClass: StorageClass(sensitivity: meta.policy.sensitivity)))
+                storageClass: StorageClass(sensitivity: meta.policy.sensitivity),
+                snapshotExcluded: snapshotExclusions[row.itemID]?.excluded == true))
         }
         cachedItemCount = out.count
         return out.sorted { $0.updatedAt > $1.updatedAt }
@@ -328,7 +408,15 @@ public final class LiveBackend: AppBackend {
                                                  signer: owner.signer, meta: meta, secret: secret)
             storeSealed(sealed, itemID: itemID, revision: 1, vaultID: vaultID, deviceID: deviceID)
         }
-        _ = try? await syncPut(itemID: itemID, vaultID: vaultID)
+        do {
+            try await syncPut(itemID: itemID, vaultID: vaultID)
+        } catch {
+            // 上传失败：回滚本次创建，避免「本地已存在、重试再建一条重复
+            // 条目」。调用方（编辑器）显示失败，重试是干净的一次新建。
+            try? stateStore.deleteItem(itemID)
+            try? localSecrets.remove(itemID: itemID)
+            throw error
+        }
     }
 
     public func updateItem(id: String, _ draft: ItemEditDraft) async throws {
@@ -357,6 +445,12 @@ public final class LiveBackend: AppBackend {
                                                allowArgv: draft.policy.allowArgv))
         let secret = SecretPlaintext(v: 1, value: value)
         let revision = row.revision + 1
+        // 上传失败时要恢复的写入前状态：服务器要求 PUT revision 恰为
+        // current+1（items.go `want = current.Revision+1`）——本地先停在
+        // N+1 的话，之后每次重试都算出 N+2，永远 revision_conflict，条目
+        // 从此改不了/转不了/删不了。
+        let preEditRow = row
+        let preEditRecord = try? localSecrets.record(itemID: id)
         switch (currentClass, targetClass) {
         case (.localOnly, .localOnly):
             // meta 重封、item key 不变；secret 用同一把 key 重加密，本地包裹更新。
@@ -397,12 +491,48 @@ public final class LiveBackend: AppBackend {
             try localSecrets.remove(itemID: id)
             snapshotDirty = true
         default:
-            let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: id, revision: revision,
-                                                 writerDeviceID: deviceID, vmk: vmk,
-                                                 signer: owner.signer, meta: meta, secret: secret)
-            storeSealed(sealed, itemID: id, revision: revision, vaultID: vaultID, deviceID: deviceID)
+            // (.synced, .synced)：编辑复用现有 metaKey/itemKey（§6.3 授权绑
+            // key）。每次换新 key 会让已配对 CLI 的全部 view/use 授权在下一
+            // 次 list/get/exec 时解不开新密文（exit 16）——换 key 只属于
+            // rotateItem → reencryptItem（会重发全部授权）。
+            let metaKey = try ItemCrypto.unwrapMetaKey(vmk: vmk, blob: row.vaultWrappedMetaKey,
+                                                       vaultID: vaultID, itemID: id)
+            let itemKey = try ItemCrypto.unwrapItemKey(vmk: vmk, blob: row.vaultWrappedItemKey,
+                                                       vaultID: vaultID, itemID: id)
+            let metaCT = try ItemCrypto.sealMeta(key: metaKey, meta: meta,
+                                                 vaultID: vaultID, itemID: id)
+            // 值未改动时保留原 secret 密文（明文相同，不必重新加密）。
+            let secretCT = draft.value.isEmpty
+                ? row.secretCiphertext
+                : try ItemCrypto.sealSecret(key: itemKey, secret: secret,
+                                            vaultID: vaultID, itemID: id)
+            // key 与 VMK 都没变，两个包裹原样保留（AAD 绑 vault+item，不含 revision）。
+            let t = ItemTranscript(vaultID: vaultID, itemID: id, revision: revision,
+                                   metaCiphertext: metaCT, secretCiphertext: secretCT,
+                                   vaultWrappedMetaKey: row.vaultWrappedMetaKey,
+                                   vaultWrappedItemKey: row.vaultWrappedItemKey,
+                                   writerDeviceID: deviceID)
+            let signature = try owner.signer.sign(t.buildBytes())
+            try? stateStore.upsertItem(ItemData.make(
+                vaultID: vaultID, itemID: id, revision: revision, tombstone: false,
+                metaCiphertext: metaCT, secretCiphertext: secretCT,
+                vaultWrappedMetaKey: row.vaultWrappedMetaKey,
+                vaultWrappedItemKey: row.vaultWrappedItemKey,
+                writerDeviceID: deviceID, signature: signature, updatedAt: nowMillis()))
         }
-        _ = try? await syncPut(itemID: id, vaultID: vaultID)
+        do {
+            try await syncPut(itemID: id, vaultID: vaultID)
+        } catch {
+            // 回滚到写入前状态再抛出（照 createItem 的处理）：本地与服务器
+            // 停在同一 revision，重试才有效。
+            try? stateStore.upsertItem(preEditRow)
+            if let preEditRecord {
+                try? localSecrets.save(preEditRecord)
+            } else {
+                try? localSecrets.remove(itemID: id)
+            }
+            throw error
+        }
     }
 
     public func deleteItem(id: String) async throws {
@@ -413,11 +543,13 @@ public final class LiveBackend: AppBackend {
                                                      revision: revision,
                                                      writerDeviceID: deviceID,
                                                      signer: owner.signer)
+        // 服务器确认成功才删本地行（§2.16：绝不先斩后奏——本地先删会让
+        // 重试从 revision 1 重新计数，永远追不上服务器的 revision_conflict）。
+        try await api.deleteItem(itemID: id,
+                                 DeleteItemRequest.make(revision: revision, signature: signature))
         try stateStore.deleteItem(id)
         try? localSecrets.remove(itemID: id)
         snapshotDirty = true
-        _ = try? await api.deleteItem(itemID: id,
-                                      DeleteItemRequest.make(revision: revision, signature: signature))
     }
 
     public func rotateItem(id: String, newValue: String) async throws {
@@ -460,6 +592,8 @@ public final class LiveBackend: AppBackend {
     /// PUT /v1/items/:item_id from the locally stored row: full material for
     /// synced items, meta-only for 仅本机 (§6.6: secret_ciphertext 省略,
     /// vault_wrapped_item_key 不上传——服务器上没有 use 授权，用不到它).
+    /// 错误向上传播：吞掉它意味着这次写入永远不会再上传（服务器停在旧
+    /// revision，CLI 与迁移都拉不到），UI 还会假报成功。
     func syncPut(itemID: String, vaultID: String) async throws {
         guard let row = stateStore.itemByID(itemID), !row.tombstone else { return }
         let localOnly = StorageClass.of(row) == .localOnly
@@ -470,7 +604,7 @@ public final class LiveBackend: AppBackend {
             vaultWrappedMetaKey: row.vaultWrappedMetaKey,
             vaultWrappedItemKey: localOnly ? Data() : row.vaultWrappedItemKey,
             writerDeviceID: row.writerDeviceID, signature: row.signature)
-        _ = try? await api.putItem(itemID: itemID, put)
+        _ = try await api.putItem(itemID: itemID, put)
     }
 
     /// 仅本机条目：行里只有 meta 材料；secret 密文与 item key 包裹进本地
@@ -520,10 +654,24 @@ public final class LiveBackend: AppBackend {
 
     /// New item key, re-encrypt, re-wrap `use` grants to remaining active
     /// devices (§8.4 step 3). Returns how many grants were re-wrapped.
+    /// 仅本机行走 §6.6 分流：只轮换本地包裹（新 item key、重加密、重包裹、
+    /// 本地 revision + 1），绝不上传 secret 密文、不改写服务器行。
     @discardableResult
     func reencryptItem(_ row: ItemData, meta: ItemMeta, value: String,
                        vaultID: String, owner: OwnerKeys, deviceID: String) async throws -> Int {
         let vmk = try guardUnlocked().vmk
+        if StorageClass.of(row) == .localOnly {
+            let record = try localSecrets.record(itemID: row.itemID)
+                ?? LocalSecretRecord(itemID: row.itemID, secretCiphertext: Data(),
+                                     vaultWrappedItemKey: Data(),
+                                     revision: row.revision, updatedAt: nowMillis())
+            let updated = try ItemCrypto.rotateLocalOnlySecret(
+                vaultID: vaultID, itemID: row.itemID, vmk: vmk, meta: meta,
+                secret: SecretPlaintext(v: 1, value: value), oldRecord: record)
+            try localSecrets.save(updated)
+            snapshotDirty = true
+            return 0
+        }
         let revision = row.revision + 1
         let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: row.itemID,
                                              revision: revision, writerDeviceID: deviceID,
@@ -531,8 +679,16 @@ public final class LiveBackend: AppBackend {
                                              meta: meta, secret: SecretPlaintext(v: 1, value: value))
         storeSealed(sealed, itemID: row.itemID, revision: revision,
                     vaultID: vaultID, deviceID: deviceID)
-        _ = try? await api.putItem(itemID: row.itemID,
-                                   putRequest(sealed, revision: revision, deviceID: deviceID))
+        do {
+            try await api.putItem(itemID: row.itemID,
+                                  putRequest(sealed, revision: revision, deviceID: deviceID))
+        } catch {
+            // PUT 失败：服务器还停在 N（want = N+1）——本地必须回到 N，
+            // 否则之后每次重试都算出 N+2，永远 revision_conflict（轮换/
+            // 撤销轮换卡死）。grants 重包在 PUT 之后，此时还未动。
+            try? stateStore.upsertItem(row)
+            throw error
+        }
         var rewrapped = 0
         var newGrants: [GrantData] = []
         for grant in stateStore.allGrants()
@@ -551,20 +707,16 @@ public final class LiveBackend: AppBackend {
             rewrapped += 1
         }
         if !newGrants.isEmpty {
-            _ = try? await api.putGrants(PutGrantsRequest.make(grants: newGrants))
+            try await api.putGrants(PutGrantsRequest.make(grants: newGrants))
             for g in newGrants { try? stateStore.upsertGrant(g) }
         }
         return rewrapped
     }
 
+    /// §6.1 掩码：前缀表 + 长度下限在 KeyrefCore.ItemMasking（规则与设计
+    /// 文档一致；password/note 永远 ***）。
     func maskOf(_ value: String, type: String) -> String {
-        guard !value.isEmpty else { return "***" }
-        switch type {
-        case "password", "note": return "***"
-        default:
-            let tail = value.suffix(4)
-            return "\(value.prefix(3))****\(tail)"
-        }
+        ItemMasking.mask(value, type: type)
     }
 
     func nowMillis() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
@@ -578,6 +730,7 @@ public final class LiveBackend: AppBackend {
             let outcome = try await engine.run(store: stateStore)
             frozen = false
             cachedItemCount = stateStore.allItems().count
+            persistSyncCursor()   // 重启后不必从 0 重新引导（§10.6）
             return SyncOutcomeInfo(applied: outcome.applied, deleted: outcome.deleted,
                                    revokedSelf: outcome.revokedSelf)
         } catch let e as APIError {
@@ -662,6 +815,7 @@ public final class LiveBackend: AppBackend {
         try await PairingClient(api: api).complete(vaultID: vaultID, nonce: offer.nonce,
                                                    device: device, grants: grants,
                                                    ownerSigner: owner.signer)
+        scheduleGrantNotices(grants, vaultID: vaultID, vmk: vmk)
         stateStore.setDeviceInfo(UIStateStore.DeviceInfo(label: deviceLabel, createdAt: nowMillis()),
                                   for: device.deviceID)
         _ = try? await syncNow()
@@ -697,12 +851,103 @@ public final class LiveBackend: AppBackend {
             rows.append(g)
             revision += 1
         }
-        _ = try? await api.putGrants(PutGrantsRequest.make(grants: rows))
+        try await api.putGrants(PutGrantsRequest.make(grants: rows))
         for g in rows { try? stateStore.upsertGrant(g) }
+        scheduleGrantNotices(rows, vaultID: vaultID, vmk: vmk)
+    }
+
+    /// §8.4 到期预警（S14）：授予落库后为每条非永久授权排 7 天/1 天前的
+    /// 本地通知。通知 identifier 用 deviceID（与 cancelExpiryNotices 对齐）。
+    func scheduleGrantNotices(_ grants: [GrantData], vaultID: String, vmk: Data) {
+        for g in grants where g.expiresAt > 0 {
+            let ref = stateStore.itemByID(g.itemID).flatMap {
+                try? decryptMeta($0, vmk: vmk, vaultID: vaultID)
+            }?.ref ?? g.itemID
+            let label = stateStore.info(for: g.deviceID)?.label ?? g.deviceID
+            notifications.scheduleExpiryNotices(
+                deviceLabel: label, deviceID: g.deviceID, itemRef: ref,
+                expiresAt: Date(timeIntervalSince1970: Double(g.expiresAt) / 1000))
+        }
+    }
+
+    func cancelGrantNotices(_ grants: [GrantData], vaultID: String, vmk: Data) {
+        for g in grants {
+            let ref = stateStore.itemByID(g.itemID).flatMap {
+                try? decryptMeta($0, vmk: vmk, vaultID: vaultID)
+            }?.ref ?? g.itemID
+            notifications.cancelExpiryNotices(itemRef: ref, deviceID: g.deviceID)
+        }
+    }
+
+    // MARK: grant renewal (§8.4 授权生命周期)
+
+    /// §8.4 续期（前台解锁路径）：把 7 天内到期（含已过期）的 use/view 授予
+    /// 用 VMK 重包顺延——新包裹、expiresAt 顺延 30 天、revision + 1，
+    /// owner 签名 PUT /v1/grants（服务器校验 owner 签名与 revision 严格递增，
+    /// protocol §6.12，已接受这种更新）。已撤销/不在目录的设备跳过。
+    /// 返回顺延的授予条数；网络失败静默（下次解锁再试）。
+    @discardableResult
+    public func renewExpiringGrants() async -> Int {
+        guard let (vmk, owner, vaultID) = try? guardUnlocked() else { return 0 }
+        let now = nowMillis()
+        let horizon = now + 7 * 86_400_000
+        let devices = directoryDevices() ?? []
+        var rows: [GrantData] = []
+        for grant in stateStore.allGrants()
+        where !grant.deleted && grant.expiresAt != 0 && grant.expiresAt <= horizon {
+            guard grant.deviceID != ownDeviceID else { continue }  // 本机不持有授予
+            guard let device = devices.first(where: { $0.deviceID == grant.deviceID }),
+                  device.status == DeviceStatus.active else { continue }
+            guard let row = stateStore.itemByID(grant.itemID) else { continue }
+            // §6.6：仅本机条目上的 use 授予本就不存在（拦截只防脏数据）；
+            // view 授予是仅本机条目唯一合法授予——metaKey 在行上，照常续期。
+            if grant.kind == GrantKind.use, StorageClass.of(row) == .localOnly { continue }
+            let key: Data
+            do {
+                if grant.kind == GrantKind.use {
+                    key = try ItemCrypto.unwrapItemKey(vmk: vmk, blob: row.vaultWrappedItemKey,
+                                                       vaultID: vaultID, itemID: row.itemID)
+                } else if grant.kind == GrantKind.view {
+                    key = try ItemCrypto.unwrapMetaKey(vmk: vmk, blob: row.vaultWrappedMetaKey,
+                                                       vaultID: vaultID, itemID: row.itemID)
+                } else {
+                    continue
+                }
+            } catch {
+                continue
+            }
+            let (enc, ct): (Data, Data)
+            do {
+                (enc, ct) = try ItemCrypto.wrapGrantKey(
+                    kemName: device.hpkeKEM, recipientPublicKey: device.hpkePublicKey,
+                    kind: grant.kind, vaultID: vaultID,
+                    recipientDeviceID: grant.deviceID, key: key)
+            } catch {
+                continue
+            }
+            var g = GrantData.make(deviceID: grant.deviceID, itemID: grant.itemID,
+                              kind: grant.kind, hpkeEnc: enc, wrappedKey: ct,
+                              expiresAt: now + 30 * 86_400_000,
+                              revision: grant.revision + 1, signature: Data(), deleted: false)
+            guard let signature = try? owner.signer.sign(g.transcript(vaultID: vaultID).buildBytes()) else {
+                continue
+            }
+            g.signature = signature
+            rows.append(g)
+        }
+        guard !rows.isEmpty else { return 0 }
+        do {
+            _ = try await api.putGrants(PutGrantsRequest.make(grants: rows))
+        } catch {
+            return 0  // 下次解锁重试；UI 不因此阻塞
+        }
+        for g in rows { try? stateStore.upsertGrant(g) }
+        scheduleGrantNotices(rows, vaultID: vaultID, vmk: vmk)
+        return rows.count
     }
 
     public func revokeGrant(deviceID: String, itemID: String, kind: String) async throws {
-        let (_, owner, vaultID) = try guardUnlocked()
+        let (vmk, owner, vaultID) = try guardUnlocked()
         guard let grant = stateStore.allGrants().first(where: {
             $0.deviceID == deviceID && $0.itemID == itemID && $0.kind == kind && !$0.deleted
         }) else { throw APIError.notFound }
@@ -710,10 +955,12 @@ public final class LiveBackend: AppBackend {
         let t = GrantTranscript.deletion(vaultID: vaultID, deviceID: deviceID,
                                          itemID: itemID, kind: kind, revision: revision)
         let signature = try owner.signer.sign(t.buildBytes())
-        try stateStore.deleteGrant(itemID: itemID, kind: kind)
-        _ = try? await api.deleteGrant(DeleteGrantRequest.make(deviceID: deviceID, itemID: itemID,
+        // 服务器确认成功才动本地行（§2.16 同一原则：失败可重试）。
+        try await api.deleteGrant(DeleteGrantRequest.make(deviceID: deviceID, itemID: itemID,
                                                           kind: kind, revision: revision,
                                                           signature: signature))
+        try stateStore.deleteGrant(deviceID: deviceID, itemID: itemID, kind: kind)
+        cancelGrantNotices([grant], vaultID: vaultID, vmk: vmk)
     }
 
     public func renameDevice(deviceID: String, label: String) async throws {
@@ -800,6 +1047,8 @@ public final class LiveBackend: AppBackend {
     }
 
     func deleteGrantsOfDevice(deviceID: String, owner: OwnerKeys, vaultID: String) async throws {
+        let vmk = try guardUnlocked().vmk
+        var deleted: [GrantData] = []
         for grant in stateStore.allGrants()
         where grant.deviceID == deviceID && !grant.deleted {
             let revision = grant.revision + 1
@@ -807,13 +1056,15 @@ public final class LiveBackend: AppBackend {
                                              itemID: grant.itemID, kind: grant.kind,
                                              revision: revision)
             let signature = try owner.signer.sign(t.buildBytes())
-            try stateStore.deleteGrant(itemID: grant.itemID, kind: grant.kind)
-            _ = try? await api.deleteGrant(DeleteGrantRequest.make(deviceID: deviceID,
+            try await api.deleteGrant(DeleteGrantRequest.make(deviceID: deviceID,
                                                               itemID: grant.itemID,
                                                               kind: grant.kind,
                                                               revision: revision,
                                                               signature: signature))
+            try stateStore.deleteGrant(deviceID: grant.deviceID, itemID: grant.itemID, kind: grant.kind)
+            deleted.append(grant)
         }
+        cancelGrantNotices(deleted, vaultID: vaultID, vmk: vmk)
     }
 
     /// Rotation of every item the device held a `use` grant on (§8.4).
@@ -938,25 +1189,44 @@ public final class LiveBackend: AppBackend {
             signature: try owner.signer.sign(dirBytes), pow: nil)
         _ = try await newAPI.createVault(create)
 
-        // Full upload: re-seal every item at fresh revisions on the new vault
-        // (§2.15: 新服务器上会重建这个保险库，并上传全部密文).
+        // Full upload. Per-item revision restarts at 1 on the fresh vault
+        // (server contract: a new item's first PUT is revision 1), and the
+        // writer must be this device (the only active iOS row in the new
+        // directory). 仅本机行按 §6.6 分流：只投 meta 材料（重签 revision-1
+        // 誊本），secret 密文与 item key 包裹留在本机，不落到新服务器。
         await progress(.fullUpload)
         let vmk = try guardUnlocked().vmk
-        var revision: UInt64 = 1
         for row in stateStore.allItems() where !row.tombstone {
+            if StorageClass.of(row) == .localOnly {
+                let t = ItemTranscript(vaultID: vaultID, itemID: row.itemID, revision: 1,
+                                       metaCiphertext: row.metaCiphertext,
+                                       secretCiphertext: Data(),
+                                       vaultWrappedMetaKey: row.vaultWrappedMetaKey,
+                                       vaultWrappedItemKey: Data(),
+                                       writerDeviceID: deviceID)
+                let signature = try owner.signer.sign(t.buildBytes())
+                let put = PutItemRequest.make(revision: 1, tombstone: false,
+                                         metaCiphertext: row.metaCiphertext,
+                                         secretCiphertext: Data(),
+                                         vaultWrappedMetaKey: row.vaultWrappedMetaKey,
+                                         vaultWrappedItemKey: Data(),
+                                         writerDeviceID: deviceID, signature: signature)
+                _ = try await newAPI.putItem(itemID: row.itemID, put)
+                continue
+            }
             guard let meta = try? decryptMeta(row, vmk: vmk, vaultID: vaultID),
                   let secret = try? decryptSecret(row, vmk: vmk, vaultID: vaultID) else { continue }
             let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: row.itemID,
-                                                 revision: revision, writerDeviceID: deviceID,
+                                                 revision: 1, writerDeviceID: deviceID,
                                                  vmk: vmk, signer: owner.signer,
                                                  meta: meta, secret: secret)
             _ = try await newAPI.putItem(itemID: row.itemID,
-                                         putRequest(sealed, revision: revision, deviceID: deviceID))
-            revision += 1
+                                         putRequest(sealed, revision: 1, deviceID: deviceID))
         }
 
         await progress(.verify)
         try stateStore.setCursor(0)
+        persistSyncCursor()
         origin = newOrigin
         if let session = try? await SessionClient(api: api).start(deviceID: deviceID,
                                                                   signer: owner.signer) {
@@ -995,59 +1265,222 @@ public final class LiveBackend: AppBackend {
         try await rotateRecovery(layerOnly: false)
     }
 
+    /// 续转被中断的轮换：rotateRecovery 在任何服务器写入之前把新 VMK 的
+    /// HPKE 包裹存进 .pendingVMKWrap——进程中途被杀后，服务器上可能已有
+    /// 用该 VMK 包裹的行（重启后 sync 会把它们拉回本地），轮换必须复用这
+    /// 把 VMK 才能继续/收尾。轮换完成后移除该槽。
+    func resumedRotationVMK(owner: OwnerKeys, vaultID: String, deviceID: String) -> Data? {
+        guard let blob = try? keyStore.retrieve(.pendingVMKWrap), !blob.isEmpty else { return nil }
+        return try? VaultFlows.unwrapLocalVMK(owner: owner, wrap: blob,
+                                              vaultID: vaultID, ownerDeviceID: deviceID)
+    }
+
+    func stashPendingRotationVMK(_ vmk: Data, owner: OwnerKeys, vaultID: String,
+                                 deviceID: String) throws {
+        let info = try hpkeInfo(purpose: KeyrefPurpose.vmk, vaultID: vaultID,
+                                recipientDeviceID: deviceID)
+        let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: owner.kemKEMName,
+                                               recipientPublicKey: owner.kemPublicKey,
+                                               info: info, plaintext: vmk)
+        try keyStore.store(.pendingVMKWrap, enc + ct)
+    }
+
     /// §8.4: 只换包裹层 (layerOnly) vs B5 全套 (rotate every item key and
     /// re-encrypt). Both publish a new recovery code, shown exactly once (S9).
+    ///
+    /// 提交顺序是「先服务器、后本地」：本地行在任何 PUT 成功前绝不改写
+    /// （本地行始终可用旧 VMK 解开）。逐条 PUT 带 revision-conflict 重签
+    /// （服务器要求恰好 current+1；上次中断/补偿轮可能已把存储行推到更高
+    /// revision）。中途失败对「已 PUT 成功」的条目做服务器侧回滚——用旧
+    /// 行材料在更高 revision 重签传回，使服务器回到与旧 VMK 一致的包裹，
+    /// 本地与服务器保持一致、整轮可重试；个别补偿失败也由下次重试的
+    /// conflict-bump 自愈。仅本机行按 §6.6 分流：服务器行只换 meta 包裹
+    /// （secret/vwItem 字段保持空），item key 包裹在本地加密存储里换新 VMK。
     func rotateRecovery(layerOnly: Bool) async throws -> String {
         guard let owner, let vaultID, let deviceID = ownDeviceID else { throw LockError.noVault }
         let currentVMK = try guardUnlocked().vmk
-        let newVMK = randomKey()
+        // 中断续转：复用暂存的 VMK（若有），否则生成新的并在任何 PUT 之前
+        // 暂存——这是「失败可重试」的关键（重启后本地行可能已被 sync 换成
+        // 服务器的新包裹，只有这把 VMK 解得开）。
+        let newVMK: Data
+        if let resumed = resumedRotationVMK(owner: owner, vaultID: vaultID, deviceID: deviceID) {
+            newVMK = resumed
+        } else {
+            newVMK = randomKey()
+            try stashPendingRotationVMK(newVMK, owner: owner, vaultID: vaultID, deviceID: deviceID)
+        }
 
+        struct RowPlan {
+            var itemID: String
+            var oldRow: ItemData
+            /// 新包裹材料（签名字段不参与誊本重签，仅四个密文字段被使用）。
+            var newRowMaterial: ItemData
+            var newRecord: LocalSecretRecord?
+            var put: PutItemRequest?
+        }
+        func materialRow(itemID: String, metaCT: Data, secretCT: Data,
+                         vwMeta: Data, vwItem: Data) -> ItemData {
+            ItemData.make(vaultID: vaultID, itemID: itemID, revision: 0, tombstone: false,
+                          metaCiphertext: metaCT, secretCiphertext: secretCT,
+                          vaultWrappedMetaKey: vwMeta, vaultWrappedItemKey: vwItem,
+                          writerDeviceID: deviceID, signature: Data(), updatedAt: 0)
+        }
+        var plans: [RowPlan] = []
         for row in stateStore.allItems() where !row.tombstone {
-            let metaKey = try ItemCrypto.unwrapMetaKey(vmk: currentVMK, blob: row.vaultWrappedMetaKey,
-                                                       vaultID: vaultID, itemID: row.itemID)
-            let itemKey = try ItemCrypto.unwrapItemKey(vmk: currentVMK, blob: row.vaultWrappedItemKey,
-                                                       vaultID: vaultID, itemID: row.itemID)
-            let metaCT = row.metaCiphertext
-            let secretCT: Data
-            if layerOnly {
-                secretCT = row.secretCiphertext
-            } else {
-                let plain = try ItemCrypto.openSecret(key: itemKey, blob: row.secretCiphertext,
-                                                      vaultID: vaultID, itemID: row.itemID)
-                secretCT = try ItemCrypto.sealSecret(key: itemKey, secret: plain,
-                                                     vaultID: vaultID, itemID: row.itemID)
+            func unwrapMeta(_ vmk: Data) throws -> Data {
+                try ItemCrypto.unwrapMetaKey(vmk: vmk, blob: row.vaultWrappedMetaKey,
+                                             vaultID: vaultID, itemID: row.itemID)
+            }
+            // 行的 metaKey 用旧 VMK 解；解不开说明该行在上次中断的尝试里
+            // 已被推上服务器（重启后被 sync 拉回）——用暂存的新 VMK 解。
+            let metaKey: Data
+            do {
+                metaKey = try unwrapMeta(currentVMK)
+            } catch {
+                metaKey = try unwrapMeta(newVMK)
             }
             let vwMeta = try ItemCrypto.wrapMetaKeyWithVMK(vmk: newVMK, metaKey: metaKey,
                                                            vaultID: vaultID, itemID: row.itemID)
-            let vwItem = try ItemCrypto.wrapItemKeyWithVMK(vmk: newVMK, itemKey: itemKey,
+            let metaCT = row.metaCiphertext
+            var secretCT = row.secretCiphertext
+            var vwItem = row.vaultWrappedItemKey
+            var newRecord: LocalSecretRecord?
+            if StorageClass.of(row) == .localOnly {
+                // 仅本机（§6.6）：item key 包裹在本地记录里，不在行上。
+                // 记录从不被服务器覆写，始终可用旧 VMK 解开。
+                guard let record = try localSecrets.record(itemID: row.itemID),
+                      !record.vaultWrappedItemKey.isEmpty else {
+                    throw KeyrefCryptoError.invalidBlob
+                }
+                let itemKey = try ItemCrypto.unwrapItemKey(vmk: currentVMK, blob: record.vaultWrappedItemKey,
                                                            vaultID: vaultID, itemID: row.itemID)
-            let revision = row.revision + 1
-            let t = ItemTranscript(vaultID: vaultID, itemID: row.itemID, revision: revision,
-                                   metaCiphertext: metaCT, secretCiphertext: secretCT,
-                                   vaultWrappedMetaKey: vwMeta, vaultWrappedItemKey: vwItem,
-                                   writerDeviceID: deviceID)
-            let signature = try owner.signer.sign(t.buildBytes())
-            let put = PutItemRequest.make(revision: revision, tombstone: false,
-                                     metaCiphertext: metaCT, secretCiphertext: secretCT,
-                                     vaultWrappedMetaKey: vwMeta, vaultWrappedItemKey: vwItem,
-                                     writerDeviceID: deviceID, signature: signature)
-            try? stateStore.upsertItem(ItemData.make(vaultID: vaultID, itemID: row.itemID,
-                                                revision: revision, tombstone: false,
-                                                metaCiphertext: metaCT, secretCiphertext: secretCT,
-                                                vaultWrappedMetaKey: vwMeta,
-                                                vaultWrappedItemKey: vwItem,
-                                                writerDeviceID: deviceID, signature: signature,
-                                                updatedAt: nowMillis()))
-            _ = try? await api.putItem(itemID: row.itemID, put)
+                if layerOnly {
+                    newRecord = LocalSecretRecord(
+                        itemID: row.itemID, secretCiphertext: record.secretCiphertext,
+                        vaultWrappedItemKey: try ItemCrypto.wrapItemKeyWithVMK(
+                            vmk: newVMK, itemKey: itemKey, vaultID: vaultID, itemID: row.itemID),
+                        revision: record.revision, updatedAt: nowMillis())
+                } else {
+                    // B5：新 item key + 重加密 + 换新 VMK 包裹（本地 revision + 1），
+                    // 与 ItemCrypto.rotateLocalOnlySecret 同一语义（meta 不动）。
+                    let plain = try ItemCrypto.openSecret(key: itemKey, blob: record.secretCiphertext,
+                                                          vaultID: vaultID, itemID: row.itemID)
+                    let newItemKey = randomKey()
+                    let secretCTNew = try ItemCrypto.sealSecret(key: newItemKey, secret: plain,
+                                                                vaultID: vaultID, itemID: row.itemID)
+                    newRecord = LocalSecretRecord(
+                        itemID: row.itemID, secretCiphertext: secretCTNew,
+                        vaultWrappedItemKey: try ItemCrypto.wrapItemKeyWithVMK(
+                            vmk: newVMK, itemKey: newItemKey, vaultID: vaultID, itemID: row.itemID),
+                        revision: record.revision + 1, updatedAt: nowMillis())
+                }
+                // 行上保持 §6.6 形状：secret 与 vwItem 为空（签名的就是空字段）。
+                secretCT = Data()
+                vwItem = Data()
+            } else {
+                let itemKey: Data
+                do {
+                    itemKey = try ItemCrypto.unwrapItemKey(vmk: currentVMK, blob: row.vaultWrappedItemKey,
+                                                           vaultID: vaultID, itemID: row.itemID)
+                } catch {
+                    itemKey = try ItemCrypto.unwrapItemKey(vmk: newVMK, blob: row.vaultWrappedItemKey,
+                                                           vaultID: vaultID, itemID: row.itemID)
+                }
+                if !layerOnly {
+                    let plain = try ItemCrypto.openSecret(key: itemKey, blob: row.secretCiphertext,
+                                                          vaultID: vaultID, itemID: row.itemID)
+                    secretCT = try ItemCrypto.sealSecret(key: itemKey, secret: plain,
+                                                         vaultID: vaultID, itemID: row.itemID)
+                }
+                vwItem = try ItemCrypto.wrapItemKeyWithVMK(vmk: newVMK, itemKey: itemKey,
+                                                           vaultID: vaultID, itemID: row.itemID)
+            }
+            plans.append(RowPlan(
+                itemID: row.itemID, oldRow: row,
+                newRowMaterial: materialRow(itemID: row.itemID, metaCT: metaCT,
+                                            secretCT: secretCT, vwMeta: vwMeta, vwItem: vwItem),
+                newRecord: newRecord, put: nil))
         }
 
-        // Re-wrap the local VMK wrap (new wrap layer, §8.4).
+        // 组装阶段（纯内存）到这里为止——任何失败都还没写过任何状态。
+
+        func makePut(_ p: RowPlan, revision: UInt64, material: ItemData) throws -> PutItemRequest {
+            let t = ItemTranscript(vaultID: vaultID, itemID: p.itemID, revision: revision,
+                                   metaCiphertext: material.metaCiphertext,
+                                   secretCiphertext: material.secretCiphertext,
+                                   vaultWrappedMetaKey: material.vaultWrappedMetaKey,
+                                   vaultWrappedItemKey: material.vaultWrappedItemKey,
+                                   writerDeviceID: deviceID)
+            let signature = try owner.signer.sign(t.buildBytes())
+            return PutItemRequest.make(revision: revision, tombstone: false,
+                                       metaCiphertext: material.metaCiphertext,
+                                       secretCiphertext: material.secretCiphertext,
+                                       vaultWrappedMetaKey: material.vaultWrappedMetaKey,
+                                       vaultWrappedItemKey: material.vaultWrappedItemKey,
+                                       writerDeviceID: deviceID, signature: signature)
+        }
+
+        /// PUT with re-signing on revision_conflict: the server wants exactly
+        /// current+1; a previous interrupted/compensated round may already
+        /// have advanced the stored revision past `base`. Re-signs the same
+        /// material at the next revision, bounded (3 extra attempts).
+        func putItemResilient(_ p: RowPlan, baseRevision: UInt64,
+                              material: ItemData) async throws -> PutItemRequest {
+            var revision = baseRevision
+            while true {
+                let put = try makePut(p, revision: revision, material: material)
+                do {
+                    _ = try await api.putItem(itemID: p.itemID, put)
+                    return put
+                } catch let e as APIError {
+                    guard case .revisionConflict = e,
+                          revision < baseRevision + 3 else { throw e }
+                    revision += 1
+                }
+            }
+        }
+
+        // 提交阶段：先服务器，全部成功才写本地。
+        do {
+            for i in plans.indices {
+                plans[i].put = try await putItemResilient(plans[i],
+                                                          baseRevision: plans[i].oldRow.revision + 1,
+                                                          material: plans[i].newRowMaterial)
+            }
+        } catch {
+            // 服务器侧回滚：把已 PUT 成功的条目用旧行材料重签传回（服务器
+            // 存的是 put.revision，want = +1），恢复与旧 VMK 一致的包裹；
+            // 本地行从未写入，仍可用旧 VMK 解开。补偿逐条尽力（失败静默：
+            // 下次重试靠 conflict-bump 收敛）。
+            for p in plans where p.put != nil {
+                _ = try? await putItemResilient(p, baseRevision: (p.put?.revision ?? 0) + 1,
+                                                material: p.oldRow)
+            }
+            throw error
+        }
+
+        // 全部行已用 newVMK 包裹并同步——现在才写本地行/记录并提交新包裹层
+        // （同步代码，无 await，中途不存在不一致窗口）。
+        for p in plans {
+            guard let put = p.put else {
+                throw APIError.transport("rotation row \(p.itemID) missing its commit PUT")
+            }
+            try stateStore.upsertItem(ItemData.make(
+                vaultID: vaultID, itemID: p.itemID, revision: put.revision, tombstone: false,
+                metaCiphertext: put.metaCiphertext, secretCiphertext: put.secretCiphertext,
+                vaultWrappedMetaKey: put.vaultWrappedMetaKey,
+                vaultWrappedItemKey: put.vaultWrappedItemKey,
+                writerDeviceID: put.writerDeviceID, signature: put.signature,
+                updatedAt: nowMillis()))
+            if let nr = p.newRecord { try localSecrets.save(nr) }
+        }
         let info = try hpkeInfo(purpose: KeyrefPurpose.vmk, vaultID: vaultID, recipientDeviceID: deviceID)
         let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: owner.kemKEMName,
                                                recipientPublicKey: owner.kemPublicKey,
                                                info: info, plaintext: newVMK)
         try keyStore.store(.vmkWrap, enc + ct)
         vmk = newVMK
+        try? keyStore.remove(.pendingVMKWrap)
 
         let (request, code, _) = try VaultFlows.replaceRecoveryMaterial(vaultID: vaultID,
                                                                         vmk: newVMK, owner: owner)
@@ -1168,6 +1601,21 @@ public final class LiveBackend: AppBackend {
         try stateStore.setPinnedOwnerKey(owner.signPublicKey)
         try stateStore.setOwnDeviceID(pending.newDeviceID)
         try stateStore.setCursor(0)
+        persistLocalStateSeeds(vaultID: prep.vaultID, ownDeviceID: pending.newDeviceID,
+                               pinnedOwnerKey: owner.signPublicKey, cursor: 0)
+        // Keychain 的「保险库存在」事实与 VMK 包裹必须现在落盘（§9.3，
+        // 创建/加入路径同样写这两项）：loadLocalState 以 .vaultID 判定
+        // hasVault——漏写的话，接管成功后杀掉 App 重启就回到欢迎页（保险库
+        // 「消失」），本机重建场景回到 S4 循环。owner 私钥已由 prepareRecovery
+        // 落盘，这里用新 owner 公钥 HPKE 包裹 prep.vmk（照加入路径模式）。
+        try keyStore.store(.vaultID, Data(prep.vaultID.utf8))
+        let vmkWrapInfo = try hpkeInfo(purpose: KeyrefPurpose.vmk, vaultID: prep.vaultID,
+                                       recipientDeviceID: pending.newDeviceID)
+        let (vmkWrapEnc, vmkWrapCT) = try KeyrefHPKE.wrapKey(
+            kemName: owner.kemKEMName, recipientPublicKey: owner.kemPublicKey,
+            info: vmkWrapInfo, plaintext: prep.vmk)
+        try keyStore.store(.vmkWrap, vmkWrapEnc + vmkWrapCT)
+        try? keyStore.remove(.pendingVMKWrap)   // 旧 owner 的中断轮换残留随之失效
         vaultID = prep.vaultID
         ownDeviceID = pending.newDeviceID
         hasVault = true
@@ -1183,6 +1631,10 @@ public final class LiveBackend: AppBackend {
             // 校验本地密文 — ciphertext already here (§2.13 difference).
             _ = stateStore.allItems().count
         }
+        // §6.7 恢复路径：接管 / 本机重建完成后拉取 iCloud 快照（先验签再
+        // 入库，按 revision 合并）——仅本机条目靠它找回。没有快照或验签
+        // 不过都不阻塞恢复流程（降级为「快照不可用」）。
+        _ = try? await restoreCloudSnapshot()
 
         // Auto background step (§2.12): rotate the item keys the revoked
         // devices held — §8.4 default action, no confirmation needed.
@@ -1394,6 +1846,8 @@ public final class LiveBackend: AppBackend {
         try stateStore.setPinnedOwnerKey(handoff.ownerSignPublicKey)
         try stateStore.setOwnDeviceID(pending.deviceID)
         try stateStore.setCursor(0)
+        persistLocalStateSeeds(vaultID: handoff.vaultID, ownDeviceID: pending.deviceID,
+                               pinnedOwnerKey: handoff.ownerSignPublicKey, cursor: 0)
         stateStore.setDeviceInfo(UIStateStore.DeviceInfo(label: pending.label, createdAt: nowMillis()),
                                  for: pending.deviceID)
 
@@ -1424,6 +1878,9 @@ public final class LiveBackend: AppBackend {
                 (try? SnapshotCodec.parseUnverified(snapshot))?.snapshotRevision ?? 0)
             snapshotDirty = true
         }
+        // §6.7 恢复路径：接入后同时拉一次 iCloud 快照（验签、按 revision
+        // 合并）——交接码里没带的条目从云端补齐。失败不阻塞。
+        _ = try? await restoreCloudSnapshot()
     }
 
     // MARK: - push (Phase 2, §13)
@@ -1527,15 +1984,27 @@ public final class LiveBackend: AppBackend {
         let revision = (try? localSecrets.snapshotRevision()) ?? 0
         return try? SnapshotEngine.build(
             vaultID: vaultID, snapshotRevision: revision + 1,
-            rows: stateStore.allItems(), secrets: localSecrets, signer: signer)
+            rows: stateStore.allItems(), secrets: localSecrets,
+            exclusions: Array(snapshotExclusions.values), signer: signer)
     }
 
     func uploadSnapshotNow(vaultID: String, owner: OwnerKeys) async throws -> SnapshotManifest? {
         guard let store = snapshotStore else { return nil }
         return try await SnapshotEngine.uploadMerged(
             vaultID: vaultID, rows: stateStore.allItems(), state: stateStore,
-            secrets: localSecrets, signer: owner.signer, store: store,
+            secrets: localSecrets, exclusions: Array(snapshotExclusions.values),
+            signer: owner.signer, store: store,
             trustedOwnerKeys: trustedOwnerKeys())
+    }
+
+    /// §6.7 每条目覆盖：把一条仅本机条目排除出 / 放回 iCloud 副本。写入带
+    /// 时间戳——快照 manifest 里的排除集按 LWW 合并，两台 owner 设备互不
+    /// 静默翻转对方的选择（后写的决定胜出）。
+    public func setSnapshotExcluded(itemID: String, excluded: Bool) {
+        snapshotExclusions[itemID] = SnapshotExclusion(itemID: itemID, excluded: excluded,
+                                                       atMillis: nowMillis())
+        persistSnapshotExclusions()
+        snapshotDirty = true
     }
 
     public func cloudBackupStatus() async -> CloudBackupStatus {

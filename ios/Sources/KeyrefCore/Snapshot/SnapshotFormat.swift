@@ -38,6 +38,11 @@
 //     u64be len vault_wrapped_meta_key    vault_wrapped_meta_key
 //     u64be len vault_wrapped_item_key    vault_wrapped_item_key
 //     u64be len writer_device_id     writer_device_id
+//   exclusions section (§6.7 每条目覆盖 — the snapshot is a shared whole
+//   file, so the per-item override rides INSIDE it; LWW per item_id):
+//     NUL u64be exclusion_count NUL
+//     count × fixed 44-byte records (no separators between records):
+//       <item_id 32 hex> NUL u64be at_millis NUL flag(0x30|0x31) NUL
 //
 // An entry is exactly the local-only item's stored bytes (§6.6): meta
 // ciphertext plus vault_wrapped_meta_key from the server row, secret
@@ -68,17 +73,37 @@ public struct SnapshotEntry: Equatable, Sendable {
     }
 }
 
+/// One per-item snapshot override (§6.7 每条目覆盖): whether the item is
+/// excluded from the iCloud copy, and WHEN the decision was written — the
+/// timestamp makes the merge last-writer-wins per item (SnapshotEngine
+/// .mergeExclusions), so one device's exclusion cannot be silently flipped
+/// by another device's upload, and a re-include propagates the same way.
+public struct SnapshotExclusion: Equatable, Sendable {
+    public var itemID: String
+    public var excluded: Bool
+    public var atMillis: Int64
+
+    public init(itemID: String, excluded: Bool, atMillis: Int64) {
+        self.itemID = itemID
+        self.excluded = excluded
+        self.atMillis = atMillis
+    }
+}
+
 /// The decoded snapshot manifest: vault id, the monotonic snapshot_revision
 /// and the 仅本机 entry list (§6.7 条目清单).
 public struct SnapshotManifest: Equatable, Sendable {
     public var vaultID: String
     public var snapshotRevision: UInt64
     public var entries: [SnapshotEntry]
+    public var exclusions: [SnapshotExclusion]
 
-    public init(vaultID: String, snapshotRevision: UInt64, entries: [SnapshotEntry]) {
+    public init(vaultID: String, snapshotRevision: UInt64, entries: [SnapshotEntry],
+                exclusions: [SnapshotExclusion] = []) {
         self.vaultID = vaultID
         self.snapshotRevision = snapshotRevision
         self.entries = entries
+        self.exclusions = exclusions
     }
 }
 
@@ -128,6 +153,16 @@ public enum SnapshotCodec {
             if i > 0 { b.append(nul) }
             b.append(try entryBytes(entry))
         }
+        // Exclusions section: always written (even when empty) so the parser
+        // never has to guess whether the section exists.
+        b.append(nul)
+        KeyrefEncoding.appendU64BE(UInt64(manifest.exclusions.count), to: &b); b.append(nul)
+        for e in manifest.exclusions.sorted(by: { $0.itemID < $1.itemID }) {
+            try requireID("exclusion item_id", e.itemID)
+            b.append(contentsOf: e.itemID.utf8); b.append(nul)
+            KeyrefEncoding.appendU64BE(UInt64(bitPattern: e.atMillis), to: &b); b.append(nul)
+            b.append(e.excluded ? UInt8(ascii: "1") : UInt8(ascii: "0")); b.append(nul)
+        }
         return b
     }
 
@@ -144,7 +179,10 @@ public enum SnapshotCodec {
         appendLenField(e.secretCiphertext, to: &b)
         appendLenField(e.vaultWrappedMetaKey, to: &b)
         appendLenField(e.vaultWrappedItemKey, to: &b)
-        b.append(contentsOf: e.writerDeviceID.utf8)
+        // writer_device_id is length-prefixed like every other variable
+        // field — NUL separation cannot delimit the LAST entry's writer
+        // (there is no trailing separator to close it).
+        appendLenField(Data(e.writerDeviceID.utf8), to: &b)
         return b
     }
 
@@ -260,7 +298,7 @@ public enum SnapshotCodec {
         guard count <= 100_000 else { throw SnapshotFormatError.malformed("entry count too large") }
 
         var entries: [SnapshotEntry] = []
-        for _ in 0..<count {
+        for i in 0..<count {
             let itemID = try takeString()
             try requireID("item_id", itemID)
             let revision = try takeU64()
@@ -271,25 +309,62 @@ public enum SnapshotCodec {
             let secretCT = try takeLenField()
             let vwMeta = try takeLenField()
             let vwItem = try takeLenField()
-            let writer = try takeString()
+            let writerBytes = try takeLenField()
+            let writer = String(decoding: writerBytes, as: UTF8.self)
             try requireID("writer_device_id", writer)
             entries.append(SnapshotEntry(itemID: itemID, revision: revision,
                                          metaCiphertext: metaCT, secretCiphertext: secretCT,
                                          vaultWrappedMetaKey: vwMeta,
                                          vaultWrappedItemKey: vwItem,
                                          writerDeviceID: writer))
-            if !body.isEmpty {
+            if i < count - 1 {
                 guard body.first == sep else {
                     throw SnapshotFormatError.malformed("entry separator missing")
                 }
                 body = body.dropFirst(1)
             }
         }
+
+        // Exclusions section (§6.7 每条目覆盖) — always present, see
+        // manifestBytes. Fixed-width 44-byte records.
+        guard body.first == sep else {
+            throw SnapshotFormatError.malformed("missing exclusions section")
+        }
+        body = body.dropFirst(1)
+        let exclusionCount = try takeU64()
+        guard exclusionCount <= 100_000 else {
+            throw SnapshotFormatError.malformed("exclusion count too large")
+        }
+        var exclusions: [SnapshotExclusion] = []
+        for _ in 0..<exclusionCount {
+            guard body.count >= 34 else {
+                throw SnapshotFormatError.malformed("truncated exclusion id")
+            }
+            let id = String(decoding: body.prefix(32), as: UTF8.self)
+            body = body.dropFirst(32)
+            guard body.first == sep else {
+                throw SnapshotFormatError.malformed("exclusion id not NUL-terminated")
+            }
+            body = body.dropFirst(1)
+            try requireID("exclusion item_id", id)
+            let at = try takeU64()
+            guard let flag = body.first,
+                  flag == UInt8(ascii: "0") || flag == UInt8(ascii: "1") else {
+                throw SnapshotFormatError.malformed("bad exclusion flag")
+            }
+            body = body.dropFirst(1)
+            guard body.first == sep else {
+                throw SnapshotFormatError.malformed("exclusion flag not NUL-terminated")
+            }
+            body = body.dropFirst(1)
+            exclusions.append(SnapshotExclusion(itemID: id, excluded: flag == UInt8(ascii: "1"),
+                                                atMillis: Int64(bitPattern: at)))
+        }
         guard body.isEmpty else {
-            throw SnapshotFormatError.malformed("trailing bytes after entries")
+            throw SnapshotFormatError.malformed("trailing bytes after exclusions")
         }
         return SnapshotManifest(vaultID: vaultID, snapshotRevision: snapshotRevision,
-                                entries: entries)
+                                entries: entries, exclusions: exclusions)
     }
 
     private static func requireID(_ name: String, _ v: String) throws {

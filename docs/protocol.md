@@ -1,8 +1,8 @@
 # keyref 线协议契约
 
-状态：v1.0，对应 design.md v0.4。本文是唯一的线格式依据：并行的 Go 服务器实现者与 Go CLI 实现者都只按本文写字节。design.md 讲「为什么」，本文讲「精确是什么」。两者冲突时，以本文对线格式的拍板为准，并把差异登记在第 12 节。
+状态：v1.1，对应 design.md v0.7。本文是唯一的线格式依据：并行的 Go 服务器实现者与 Go CLI 实现者都只按本文写字节。design.md 讲「为什么」，本文讲「精确是什么」。两者冲突时，以本文对线格式的拍板为准，并把差异登记在第 12 节。
 
-日期：2026-10-24。实现语言：Go（design §12.2，v0.4 起 CLI 与服务器同为 Go）。
+日期：2026-10-27（v1.1 修订：补 §5.27/§6.27 推送令牌端点、目录与 Go 版本对齐实际树；初版 2026-10-24）。实现语言：Go（design §12.2，v0.4 起 CLI 与服务器同为 Go）。
 
 ---
 
@@ -84,22 +84,23 @@
 
 ## 2. 模块、依赖与目录
 
-### 2.1 go.work：三模块共用，不做 vendoring
+### 2.1 go.work：四模块共用，不做 vendoring
 
-拍板：根 `go.work` 连接三个模块，共享誊本与密码学代码放独立模块 `proto/`。理由：服务器与 CLI 都要构造/重建誊本并验签（§3），`internal/` 跨模块不可见，复制代码会让两侧誊本漂移；vendoring 冻结依赖、拖慢修补，且 go.work 已是 2026 年多模块仓库的标准做法。Docker 构建以仓库根为 context，`go.work` 在 WORKDIR 内自动生效。
+拍板：根 `go.work` 连接四个模块（cli、proto、server 与 tools/vectordump——生成 iOS 跨语言金向量的开发工具，不参与线上字节），共享誊本与密码学代码放独立模块 `proto/`。理由：服务器与 CLI 都要构造/重建誊本并验签（§3），`internal/` 跨模块不可见，复制代码会让两侧誊本漂移；vendoring 冻结依赖、拖慢修补，且 go.work 已是 2026 年多模块仓库的标准做法。Docker 构建以仓库根为 context，`go.work` 在 WORKDIR 内自动生效。
 
 ```
 // /go.work
-go 1.25
+go 1.26.0
 
 use (
+	./cli
 	./proto
 	./server
-	./cli
+	./tools/vectordump
 )
 ```
 
-模块路径假定为 `github.com/lidessen/keyref/{proto,server,cli}`（镜像名 `ghcr.io/lidessen/keyref-server` 推断，见第 13 节假设）。
+模块路径为 `github.com/lidessen/keyref/{proto,server,cli,tools/vectordump}`（已由各 go.mod 落地，见第 13 节假设）。
 
 ### 2.2 proto/（共享协议模块）
 
@@ -121,16 +122,24 @@ proto/crypto/testdata/      // 金向量 JSON（§11.3）
 
 ```
 cli/go.mod                  // module github.com/lidessen/keyref/cli
-cli/cmd/keyref/main.go      // 命令入口：pair status lock unlock sync list get exec server
+cli/cmd/keyref/main.go      // 命令入口：pair session status lock unlock sync list get exec server mcp
+cli/internal/approval/      // 审批流 CLI 侧：发起审批请求、轮询、一次性解包（design §8.3）
+cli/internal/audit/         // 封箱并上传 exec 审计事件（§6.23）
+cli/internal/client/        // 同步 API 的薄 HTTP 客户端
 cli/internal/config/        // origin 配置（0700 目录）、KEYREF_SERVER 覆盖
+cli/internal/device/        // 设备身份：X25519 HPKE 密钥 + 签名密钥的生成与保管
+cli/internal/exec/          // spawn（os/exec + SysProcAttr）、策略与 shebang、注入、脱敏、pty/reply
+cli/internal/exitcode/      // design §7.6 的退出码表
+cli/internal/itemcrypt/     // CLI 侧解密路径：owner 验签 + grant/meta/secret 解密
 cli/internal/keyring/       // SecretStore 接口；go-keyring 实现；e2e 用的目录实现（§11.4）
-cli/internal/store/         // cache.sqlite（模式 0600，密文缓存 + 已验签 revision）
-cli/internal/session/       // 挑战→令牌、token 复用与续期
-cli/internal/sync/          // 拉取、验签、cursor=0 引导、grants_digest 对账、撤销检测
 cli/internal/meta/          // list/get：只解 meta，输出掩码
 cli/internal/pair/          // 二维码生成、pair/register、pair/status 轮询、钉死 owner 公钥
-cli/internal/exec/          // spawn（os/exec + SysProcAttr）、策略与 shebang、注入、脱敏、审计
 cli/internal/qr/            // skip2/go-qrcode 封装；ToSmallString 的 ▀▄█ 半块字符写 stdout
+cli/internal/secret/        // memguard 守护缓冲区、秘密 JSON 无字符串解析
+cli/internal/session/       // 挑战→令牌、token 复用与续期
+cli/internal/store/         // cache.sqlite（模式 0600，密文缓存 + 已验签 revision）
+cli/internal/syncing/       // 把服务器变更应用到本地缓存（cursor=0 引导、撤销检测）
+cli/internal/testowner/     // 测试与 e2e 用的软件 P-256 owner（§11.2）
 cli/e2e/doc.go              // package e2e；无 build 标签，只有包注释（防 ./... 报 exclude all Go files）
 cli/e2e/*_test.go           // 全部带 //go:build e2e（§11）
 ```
@@ -273,7 +282,7 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 
 ## 4. 库可行性结论（2026-10-24 实测）
 
-全部在本机 `go version go1.27.3 darwin/arm64` 上验证；`go.mod` 统一写 `go 1.25`。
+全部在本机 `go version go1.27.3 darwin/arm64` 上验证。`go.mod` 现状（v1.1 核对）：`cli` 与 `server` 写 `go 1.26.0`，`proto` 与 `tools/vectordump` 写 `go 1.25.0`（circl v1.6.5 的下限）；根 `go.work` 写 `go 1.26.0`。
 
 | 库 | 拍板版本 | 核实命令 | 结果 |
 | --- | --- | --- |---|
@@ -321,8 +330,9 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 | 5.24 | `GET /v1/audit?cursor=` | bearer + owner | iOS owner |
 | 5.25 | `GET /v1/account` | bearer + owner | iOS owner |
 | 5.26 | `POST /v1/billing/apple` | bearer + owner | iOS owner（仅托管；自托管 404） |
+| 5.27 | `PUT /v1/devices/push-token` | bearer + owner | iOS owner（APNs 令牌登记） |
 
-通用校验（每个端点都做）：设备属于该 vault 且 `status = active`（§8.4 送达语义的例外除外）；`kind = cli` 调 5.10/5.11/5.12/5.13/5.15/5.4/5.5 → `403 forbidden`；签名字段在该设备当前公钥下验证；正文上限 §1.2。
+通用校验（每个端点都做）：设备属于该 vault 且 `status = active`（§8.4 送达语义的例外除外）；`kind = cli` 调 5.10/5.11/5.12/5.13/5.15/5.4/5.5/5.27 → `403 forbidden`；签名字段在该设备当前公钥下验证；正文上限 §1.2。
 
 ## 6. 端点明细
 
@@ -571,6 +581,14 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 
 `{"transaction_id":"…"}` → `200 {"plan":"plus","plan_expires_at":…}`；自托管 `404 not_found`。服务器自行调 App Store Server API，不回显收据。
 
+### 6.27 `PUT /v1/devices/push-token` — 登记 APNs 推送令牌（owner）
+
+```json
+{ "token": "<hex、偶数长度、32–200 字符（APNs 当前 64）>", "env": "sandbox" | "production" }
+```
+
+→ `204`。令牌写到**调用者自己的**设备行（owner 即 `kind=ios`；`kind=cli` → `403 forbidden`），重复登记覆盖旧值；`env` 只校验取值、不落库。错误：`unauthorized`、`forbidden`、`invalid_field`（`env` 非 `sandbox|production`、token 非 hex 或长度越界）。登记只存令牌；新审批落库后，服务器向各 owner 设备已登记的 token **尽力推送**（best-effort，失败只记日志；APNs 回 410 即清除该 token，design §8.3）。未配置 APNs 凭据的部署照常接受登记，只是不推送。
+
 ---
 
 ## 7. 关键流程串起来
@@ -748,9 +766,9 @@ CLI：`keyref pair` 生成密钥（私钥入密钥环）→ 打印二维码 + �
 
 ## 13. 假设
 
-1. **模块路径** `github.com/lidessen/keyref/{proto,server,cli}`：从镜像名 `ghcr.io/lidessen/keyref-server`（design §10.4）推断，仓库尚未有 go.mod，未经仓库所有者确认。改名是全局替换。
+1. **模块路径** `github.com/lidessen/keyref/{proto,server,cli,tools/vectordump}`：初版由镜像名 `ghcr.io/lidessen/keyref-server`（design §10.4）推断，现已由各 go.mod 落地确认。
 2. `docs/protocol.md` 此前不存在（`docs/` 只有 `design.md` 与 `README.md`），没有早先 Rust 版本需要改写；本文全新撰写，无 Rust 残句。
-3. Go 最低 1.25（circl v1.6.5 的 `go.mod` 要求 `go 1.25.0`）；本契约全部核实命令在 go1.27.3 darwin/arm64 上执行。
-4. CLI 命令面（`pair status lock unlock sync list get exec server`）与退出码（10–18）按 design §7.6/§12.2 原样执行，本文不重复定义；`--pty`/`--reply` 为 Phase 2 接口预留。
+3. Go 最低 1.25（circl v1.6.5 的 `go.mod` 要求 `go 1.25.0`）；仓库实际声明：`go.work` 与 `cli`/`server` 为 `go 1.26.0`，`proto`/`tools/vectordump` 为 `go 1.25.0`。本契约全部核实命令在 go1.27.3 darwin/arm64 上执行。
+4. CLI 命令面（`pair session status lock unlock sync list get exec server mcp`，与 `cli/cmd/keyref/main.go` 的 dispatch 一致）与退出码（10–18）按 design §7.6/§12.2 原样执行，本文不重复定义；`--pty`/`--reply` 已随审批路径实现（§6.19–§6.21、§7.1），不再是接口预留。
 5. 官方托管 origin 仍是占位 `https://sync.example`（design §14.12）；编译进 CLI 的默认 origin 在域名敲定后只改一处常量。
 6. `keyref-server` 在无 `KEYREF_DOMAIN` 时监听纯 HTTP 的行为（§10.3）是本文为实现「本地调试听 127.0.0.1」（design §10.4）与 e2e 拍板的具体化。

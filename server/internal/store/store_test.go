@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -420,5 +421,112 @@ sign_alg, sign_public_key, label, created_at, revoked_at) VALUES (?,?,?,?,?,?,?,
 	}
 	if len(toks) != 1 || toks[0] != "eeff" {
 		t.Fatalf("push tokens after clear = %v, want [eeff]", toks)
+	}
+}
+
+// insertAuditEvent writes an audit row with an explicit created_at so
+// trim tests can age rows independently of the wall clock.
+func insertAuditEvent(t *testing.T, s *Store, seq int64, createdAt int64) {
+	t.Helper()
+	_, err := s.db.Exec(`INSERT INTO audit_events (vault_id, seq, device_id, created_at, ciphertext)
+VALUES (?,?,?,?,?)`, tvVault, seq, tvDevice, createdAt, []byte("ct"))
+	if err != nil {
+		t.Fatalf("insert audit event: %v", err)
+	}
+}
+
+func auditSeqs(t *testing.T, s *Store) map[int64]bool {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT seq FROM audit_events WHERE vault_id = ?`, tvVault)
+	if err != nil {
+		t.Fatalf("select audit seqs: %v", err)
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			t.Fatal(err)
+		}
+		out[seq] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestTrimAuditEventsAgeRuleAppliesInsideCountCap(t *testing.T) {
+	// design §7.7: retention is "keep N days AND at most M events" — two
+	// independent rules. Old rows must be dropped even while they sit in
+	// the newest keepMax; before the fix the age rule was a strict subset
+	// of the count rule and could never fire on them.
+	s := openTestStore(t, filepath.Join(t.TempDir(), DBFileName))
+	ctx := context.Background()
+	cutoff := time.Now().Add(-24 * time.Hour).UnixMilli()
+
+	insertAuditEvent(t, s, 1, cutoff-10_000) // old, newest-3 member → must go
+	insertAuditEvent(t, s, 2, cutoff-5_000)  // old → must go
+	insertAuditEvent(t, s, 3, cutoff+5_000)  // fresh → stays
+	insertAuditEvent(t, s, 4, cutoff+9_000)  // fresh → stays
+
+	if err := s.TrimAuditEvents(ctx, tvVault, 3, cutoff); err != nil {
+		t.Fatalf("TrimAuditEvents: %v", err)
+	}
+	got := auditSeqs(t, s)
+	if got[1] || got[2] {
+		t.Fatalf("aged events survived inside the count cap: %v", got)
+	}
+	if !got[3] || !got[4] {
+		t.Fatalf("fresh events were dropped: %v", got)
+	}
+
+	// olderThanMs = 0 (no retention configured, audit.go caller) deletes nothing.
+	if err := s.TrimAuditEvents(ctx, tvVault, 3, 0); err != nil {
+		t.Fatalf("TrimAuditEvents zero cutoff: %v", err)
+	}
+	if len(auditSeqs(t, s)) != 2 {
+		t.Fatal("zero cutoff must not delete anything")
+	}
+
+	// The count rule still caps independently.
+	if err := s.TrimAuditEvents(ctx, tvVault, 1, 0); err != nil {
+		t.Fatalf("TrimAuditEvents by count: %v", err)
+	}
+	got = auditSeqs(t, s)
+	if len(got) != 1 || !got[4] {
+		t.Fatalf("count cap left %v, want only seq 4", got)
+	}
+}
+
+func TestCompletePairingConsumedExactlyOnce(t *testing.T) {
+	// Two concurrent completes with the same nonce: the pre-check runs
+	// outside the transaction, so the authoritative consume must reject
+	// the loser with the ErrPairConsumed sentinel (mapped to pair_expired,
+	// §6.18) — never a generic error.
+	s := openTestStore(t, filepath.Join(t.TempDir(), DBFileName))
+	ctx := context.Background()
+	nonceHash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if err := s.PutPairSession(ctx, &PairSession{
+		NonceHash: nonceHash, HPKEPublicKey: []byte("hpke"), SignPublicKey: []byte("sign"),
+		ProposedName: "cli", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("PutPairSession: %v", err)
+	}
+	device := &Device{
+		ID: tvDevice, VaultID: tvVault, Kind: "cli", Status: "active",
+		HPKEKEM: "x25519", HPKEPublicKey: []byte("hpke"), SignAlg: "ed25519",
+		SignPublicKey: []byte("sign"), Label: "cli", CreatedAt: 1,
+	}
+	grants := []Grant{{
+		VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem, Kind: "view",
+		HPKEEnc: []byte("enc"), WrappedKey: []byte("wk"), Revision: 1, Signature: []byte("sig"),
+	}}
+	if err := s.CompletePairing(ctx, device, grants, nonceHash, "{}", 1); err != nil {
+		t.Fatalf("first CompletePairing: %v", err)
+	}
+	err := s.CompletePairing(ctx, device, grants, nonceHash, "{}", 2)
+	if !errors.Is(err, ErrPairConsumed) {
+		t.Fatalf("second CompletePairing err = %v, want ErrPairConsumed", err)
 	}
 }

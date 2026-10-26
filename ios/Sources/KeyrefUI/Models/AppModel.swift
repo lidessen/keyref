@@ -88,10 +88,16 @@ public final class AppModel {
 
     /// Refresh every store after unlock. Called once per unlock.
     public func refreshAfterUnlock() async {
+        // §8.4 授权续期：先把 7 天内到期的授予顺延，再刷新设备页的到期展示。
+        await backend.renewExpiringGrants()
         await items.refresh()
         await devices.refresh()
         await settings.refreshAccount()
         await approvals.refresh()
+        // §8.4 90 天轮换提醒（开启时一次性 toast）。
+        settings.consumeRotationReminder()
+        // §6.7：解锁后合并一次 iCloud 副本（有脏标记才上传；失败静默）。
+        await backend.uploadSnapshotIfDirty()
     }
 
     // MARK: unlock (S2 → S3/S4)
@@ -140,6 +146,11 @@ public final class AppModel {
         case .background:
             backgroundedAt = now
             approvals.setActive(false)   // 轮询只在 App 活跃时进行（§8.3）
+            // §6.7：退后台去抖上传 iCloud 副本（仅解锁态；失败静默保留脏标记，
+            // 绝不阻塞本地功能）。
+            if phase == .unlocked {
+                Task { await backend.uploadSnapshotIfDirty() }
+            }
         case .active:
             if let backgroundedAt, phase == .unlocked {
                 if now.timeIntervalSince(backgroundedAt) >= settings.autoLock.seconds {

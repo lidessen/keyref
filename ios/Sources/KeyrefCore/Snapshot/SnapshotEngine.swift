@@ -31,17 +31,38 @@ public enum SnapshotEngineError: Error, Equatable {
 
 public enum SnapshotEngine {
 
+    /// LWW merge of the per-item snapshot override (§6.7 每条目覆盖). The
+    /// exclusion set rides INSIDE the shared snapshot file, so both devices
+    /// converge: a later decision (by timestamp) wins per item — one device
+    /// excluding an entry cannot be silently flipped by the other's upload,
+    /// and a re-include propagates the same way.
+    public static func mergeExclusions(_ a: [SnapshotExclusion],
+                                       _ b: [SnapshotExclusion]) -> [SnapshotExclusion] {
+        var byID: [String: SnapshotExclusion] = [:]
+        for e in a + b {
+            if let old = byID[e.itemID], old.atMillis >= e.atMillis { continue }
+            byID[e.itemID] = e
+        }
+        return byID.values.sorted { $0.itemID < $1.itemID }
+    }
+
     // MARK: build
 
     /// Builds the snapshot file from local state: every live row without a
     /// server-side secret (仅本机 rows, `StorageClass.of(_:)`) whose secret
-    /// ciphertext + vault_wrapped_item_key exist in the local secret store.
-    /// Returns nil when there is nothing to snapshot.
+    /// ciphertext + vault_wrapped_item_key exist in the local secret store,
+    /// minus the merged per-item overrides (§6.7 全局开关 + 每条目覆盖，
+    /// 默认开). Returns nil when there is neither an entry nor an override
+    /// to write (an all-excluded vault still uploads — the exclusion markers
+    /// must propagate to the other devices).
     public static func build(vaultID: String, snapshotRevision: UInt64,
                              rows: [ItemData], secrets: LocalSecretStore,
+                             exclusions: [SnapshotExclusion] = [],
                              signer: TranscriptSigner) throws -> SnapshotBuildResult? {
+        let excluded = Set(exclusions.filter(\.excluded).map(\.itemID))
         var entries: [SnapshotEntry] = []
         for row in rows where StorageClass.of(row) == .localOnly {
+            guard !excluded.contains(row.itemID) else { continue }
             guard let record = try secrets.record(itemID: row.itemID) else { continue }
             guard !record.secretCiphertext.isEmpty,
                   !record.vaultWrappedItemKey.isEmpty else { continue }
@@ -54,10 +75,10 @@ public enum SnapshotEngine {
                 vaultWrappedItemKey: record.vaultWrappedItemKey,
                 writerDeviceID: row.writerDeviceID))
         }
-        guard !entries.isEmpty else { return nil }
+        guard !entries.isEmpty || !exclusions.isEmpty else { return nil }
         let manifest = SnapshotManifest(vaultID: vaultID,
                                         snapshotRevision: max(snapshotRevision, 1),
-                                        entries: entries)
+                                        entries: entries, exclusions: exclusions)
         return SnapshotBuildResult(data: try SnapshotCodec.build(manifest, signer: signer),
                                    manifest: manifest)
     }
@@ -73,11 +94,13 @@ public enum SnapshotEngine {
     /// uploaded, or nil when there is nothing to upload (no 仅本机 entries).
     public static func uploadMerged(vaultID: String, rows: [ItemData],
                                     state: SyncStateStore, secrets: LocalSecretStore,
+                                    exclusions: [SnapshotExclusion] = [],
                                     signer: TranscriptSigner, store: SnapshotStore,
                                     trustedOwnerKeys: [Data]) async throws -> SnapshotManifest? {
         var byID: [String: ItemData] = [:]
         for row in rows { byID[row.itemID] = row }
         var cloudRevision: UInt64 = 0
+        var cloudExclusions: [SnapshotExclusion] = []
         if let cloudData = try await store.download(vaultID: vaultID) {
             if let cloudManifest = try? SnapshotCodec.verify(cloudData, ownerSignPublicKeys: trustedOwnerKeys),
                cloudManifest.vaultID == vaultID {
@@ -85,12 +108,16 @@ public enum SnapshotEngine {
                                                        state: state, secrets: secrets)
                 for row in appliedRows { byID[row.itemID] = row }
                 cloudRevision = outcome.snapshotRevision
+                cloudExclusions = cloudManifest.exclusions
             }
         }
+        // 排除集随快照分发：云端已有决策与本机决策按 LWW 合并后再上传。
+        let mergedExclusions = mergeExclusions(cloudExclusions, exclusions)
         let localRevision = (try? secrets.snapshotRevision()) ?? 0
         guard let result = try build(vaultID: vaultID,
                                      snapshotRevision: max(localRevision, cloudRevision) + 1,
                                      rows: Array(byID.values), secrets: secrets,
+                                     exclusions: mergedExclusions,
                                      signer: signer) else {
             return nil
         }

@@ -517,6 +517,11 @@ struct ItemEditView: View {
                     Label("仅本机条目：密文不上服务器，每次使用需手机批准。", systemImage: "iphone")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    // §6.7 每条目覆盖：这条仅本机条目是否进 iCloud 副本
+                    //（保存时随编辑一起提交）。
+                    Toggle("包含在 iCloud 副本中", isOn: Binding(
+                        get: { !model.snapshotExcluded },
+                        set: { model.snapshotExcluded = !$0 }))
                 }
             }
             if model.isCreate && model.storageClass == .localOnly {

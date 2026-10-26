@@ -24,6 +24,9 @@ struct CloudBackupView: View {
                     get: { settings.cloudBackupOn },
                     set: { newValue in
                         settings.cloudBackupOn = newValue
+                        // 开关必须真的控制上传（§6.7）：只写偏好不调 backend
+                        // 时，关掉后照样上传、状态仍报 ready。
+                        app.backend.setCloudBackupEnabled(newValue)
                         Task { await refresh() }
                     }))
             } header: {
@@ -150,7 +153,12 @@ struct ItemKeyRotationView: View {
                 await MainActor.run {
                     summary = s
                     running = false
-                    settings.toast = "已轮换 \(s.rotatedCount) 条"
+                    if s.failedCount == 0 {
+                        settings.markRotationCompleted()   // 90 天提醒的基准（§8.4）
+                        settings.toast = "已轮换 \(s.rotatedCount) 条"
+                    } else {
+                        settings.toast = "已轮换 \(s.rotatedCount) 条，\(s.failedCount) 条失败"
+                    }
                 }
             } catch {
                 await MainActor.run {

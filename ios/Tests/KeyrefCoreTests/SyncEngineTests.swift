@@ -144,15 +144,18 @@ final class SyncEngineTests: XCTestCase {
 
     // MARK: grants
 
-    func testGrantApplyDeleteAndForeignIgnored() throws {
+    func testGrantApplyForeignVerifiedAndKept() throws {
         let engine = SyncEngine(api: makeAPI())
-        // Grant for another device: ignored even before verification.
+        // Grant for another device: owner devices keep it (verified) — they
+        // need other devices' rows for §8.4 renewal and the grant lists.
         let foreign = try signedGrant(revision: 1, device: "11112222333344441111222233334444")
         var outcome = try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
             change(seq: 1, entity: "grant", entityID: try EntityID.grant(deviceID: foreign.deviceID, itemID: itemID, kind: "use"),
                    data: try WireJSON.encoder.encode(foreign)),
         ]), store: store)
-        XCTAssertEqual(outcome.applied, 0)
+        XCTAssertEqual(outcome.applied, 1)
+        XCTAssertEqual(try store.grants().count, 1)
+        XCTAssertEqual(try store.grants().first?.deviceID, foreign.deviceID)
 
         // Own grant applies.
         let grant = try signedGrant(revision: 1)
@@ -161,7 +164,7 @@ final class SyncEngineTests: XCTestCase {
                    data: try WireJSON.encoder.encode(grant)),
         ]), store: store)
         XCTAssertEqual(outcome.applied, 1)
-        XCTAssertEqual(try store.grants().count, 1)
+        XCTAssertEqual(try store.grants().count, 2)
 
         // Tampered grant fails closed.
         var bad = try signedGrant(revision: 2)
@@ -171,14 +174,16 @@ final class SyncEngineTests: XCTestCase {
                    data: try WireJSON.encoder.encode(bad)),
         ]), store: store))
 
-        // Deletion form clears the local row (合成 grant 变更).
+        // Deletion form clears the local row (合成 grant 变更) — only the
+        // deleted device's row; the foreign row stays.
         let del = try signedGrant(revision: 3, deleted: true)
         outcome = try engine.apply(response: SyncResponse(cursor: 3, hasMore: false, changes: [
             change(seq: 3, entity: "grant", entityID: try EntityID.grant(deviceID: cliDev, itemID: itemID, kind: "use"),
                    data: try WireJSON.encoder.encode(del)),
         ]), store: store)
         XCTAssertEqual(outcome.deleted, 1)
-        XCTAssertTrue(try store.grants().isEmpty)
+        XCTAssertEqual(try store.grants().count, 1)
+        XCTAssertEqual(try store.grants().first?.deviceID, foreign.deviceID)
     }
 
     // MARK: revocation delivery (§8.4)

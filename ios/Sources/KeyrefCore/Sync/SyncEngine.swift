@@ -28,7 +28,10 @@ public protocol SyncStateStore: AnyObject, Sendable {
 
     func upsertGrant(_ grant: GrantData) throws
     func grants() throws -> [GrantData]
-    func deleteGrant(itemID: String, kind: String) throws
+    /// Keyed by (device, item, kind): an owner device keeps OTHER devices'
+    /// grant rows too (§8.4 renewal, grant lists) — several devices can hold
+    /// a grant on the same item without colliding.
+    func deleteGrant(deviceID: String, itemID: String, kind: String) throws
 
     func storeDirectory(_ directory: DirectoryData) throws
     func directory() throws -> DirectoryData?
@@ -163,17 +166,18 @@ public final class SyncEngine: Sendable {
     }
 
     /// Applies a grant change; deletions clear the local row and wrap.
+    /// Rows for OTHER devices are verified and kept too: the owner device
+    /// needs them for §8.4 renewal and the grant lists (the server's sync
+    /// feed only carries all-vault grants to owner devices — CLI feeds are
+    /// filtered to the device's own rows server-side, sync.go isOwner).
+    /// A foreign row that fails verification still fails the whole batch.
     private func applyGrant(_ row: GrantData, store: SyncStateStore) throws -> ChangeResult {
         let vaultID = try vaultIDOf(store)
         if row.deleted || (row.hpkeEnc.isEmpty && row.wrappedKey.isEmpty) {
             // Grant revoked (pointing at ourselves) or item tombstone
             // cascade: clear the local row and wrap (design §6.3, §6.5).
-            try store.deleteGrant(itemID: row.itemID, kind: row.kind)
+            try store.deleteGrant(deviceID: row.deviceID, itemID: row.itemID, kind: row.kind)
             return .deleted
-        }
-        guard let own = try store.ownDeviceID(), row.deviceID == own else {
-            // Rows for other devices are not delivered to us; ignore.
-            return .skipped
         }
         let ownerKey = try ownerKeyOf(store)
         do {
@@ -221,7 +225,7 @@ public final class SyncEngine: Sendable {
     private func cleanupRevoked(_ store: SyncStateStore) throws {
         try store.clearSessionCaches()
         for g in try store.grants() {
-            try store.deleteGrant(itemID: g.itemID, kind: g.kind)
+            try store.deleteGrant(deviceID: g.deviceID, itemID: g.itemID, kind: g.kind)
         }
     }
 
@@ -266,7 +270,7 @@ public final class SyncEngine: Sendable {
             for g in local where !selfResp.grants.contains(where: {
                 $0.itemID == g.itemID && $0.kind == g.kind
             }) {
-                try store.deleteGrant(itemID: g.itemID, kind: g.kind)
+                try store.deleteGrant(deviceID: g.deviceID, itemID: g.itemID, kind: g.kind)
             }
         }
     }

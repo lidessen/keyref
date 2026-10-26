@@ -137,16 +137,26 @@ func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map
 	// the master readable forever (the child got its own session via
 	// Setsid, so the group id is its pid).
 	kill()
+	// Unblock the pump before waiting for it: with a grandchild still
+	// holding the slave, p.master.Read would stay blocked even after the
+	// kill. Closing the master makes that pending read return at once
+	// (the fd is pollable; the read fails with "file already closed"),
+	// so pump always terminates and can never outlive this function —
+	// run()'s deferred stdoutRed.Destroy would otherwise race its
+	// in-flight p.red.Write against wiped needle memory.
+	master.Close()
 	select {
 	case <-pumpDone:
 	case <-time.After(2 * time.Second):
+		// Fallback only; on the supported platforms the closed master
+		// always wakes the pump.
 	}
+	// Pump is done: no red.Write can be in flight while we flush, and
+	// every byte the child produced has been fed through the redactor.
 	if ferr := stdoutRed.Flush(); ferr != nil {
 		fmt.Fprintln(req.Stderr, "keyref: redaction failed; output discarded")
-		master.Close()
 		return deny(14, "redaction")
 	}
-	master.Close()
 
 	childExit := 0
 	if werr != nil {

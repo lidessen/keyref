@@ -545,7 +545,7 @@ struct GrantSelectionView: View {
             } header: {
                 Text("选择要授予的条目")
             } footer: {
-                Text("勾选的条目将被授予查看与使用权限，默认 30 天有效、自动续期。现在什么都没有授予——勾选并确认之后才算。")
+                Text("勾选的条目将被授予查看与使用权限，默认 30 天有效，每次打开 keyref 解锁时自动顺延即将到期的授权。现在什么都没有授予——勾选并确认之后才算。")
             }
             Section {
                 Button {
@@ -811,7 +811,7 @@ struct GrantAddSheet: View {
                         .buttonStyle(.plain)
                     }
                 } footer: {
-                    Text("默认全不选。授予后默认 30 天有效、自动续期。")
+                    Text("默认全不选。授予后默认 30 天有效，每次解锁自动顺延（§8.4）。")
                 }
                 Section {
                     Button {

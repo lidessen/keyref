@@ -196,6 +196,7 @@ public final class ItemEditorModel {
             name = row.name
             itemDescription = row.itemDescription
             storageClass = row.storageClass
+            snapshotExcluded = row.snapshotExcluded
             denyShells = row.policy.commandPolicy == "deny-shells"
             allowCommandsText = row.policy.allowCommands.joined(separator: ", ")
             allowedHostsText = row.policy.allowedHosts.joined(separator: ", ")
@@ -363,6 +364,9 @@ public final class ItemEditorModel {
     /// v0.7 §6.6：存储类别仅创建时可选（规格：创建时二选一，编辑不改）。
     public var storageClass: StorageClass = .synced
 
+    /// v0.7 §6.7 每条目覆盖：仅本机条目可排除出 iCloud 副本（编辑页开关）。
+    public var snapshotExcluded: Bool = false
+
     public var createDraft: ItemDraft {
         ItemDraft(ref: ref.lowercased(), name: name,
                   itemDescription: itemDescription, type: type,
@@ -402,6 +406,10 @@ public final class ItemEditorModel {
                 try await backend.createItem(createDraft)
             case .edit(let row):
                 try await backend.updateItem(id: row.id, editDraft)
+                // §6.7 每条目覆盖：开关有变化才落（仅本机条目）。
+                if row.snapshotExcluded != snapshotExcluded {
+                    backend.setSnapshotExcluded(itemID: row.id, excluded: snapshotExcluded)
+                }
             }
             return .saved
         } catch let e as APIError {

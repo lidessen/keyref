@@ -21,6 +21,13 @@ var ErrNotFound = errors.New("store: row not found")
 // transaction, so concurrent writers can never both win.
 var ErrRevisionConflict = errors.New("store: revision conflict")
 
+// ErrPairConsumed is returned by CompletePairing when another writer
+// consumed the pair session first (the pre-check runs outside the
+// transaction, so concurrent completes race here). Callers must map it
+// to pair_expired: consumed, expired and unknown nonces are
+// indistinguishable to the client (protocol §6.18).
+var ErrPairConsumed = errors.New("store: pair session already consumed")
+
 // WithTx runs fn inside one transaction. Composed operations below build
 // on it so that row writes and change-log appends commit atomically
 // (design §6.3: a grant write and its synthetic item change must land
@@ -848,17 +855,23 @@ func (s *Store) CountAuditEvents(ctx context.Context, vaultID string) (int64, er
 	return n, nil
 }
 
-// TrimAuditEvents enforces retention (design §10.5): keep at most keepMax
-// newest events and drop events older than olderThanMs.
+// TrimAuditEvents enforces retention (design §7.7: free keeps 7 days
+// and at most 100 events, Plus 30 days and 5,000 — two independent
+// rules): drop every event older than olderThanMs, then keep at most
+// keepMax newest. The age rule applies regardless of the count cap —
+// otherwise a low-frequency vault would hold its oldest ciphertexts
+// forever and they would keep counting against VaultStorageBytes
+// (§10.5). An olderThanMs of 0 (no retention configured) deletes
+// nothing, and a keepMax beyond the row count deletes nothing.
 func (s *Store) TrimAuditEvents(ctx context.Context, vaultID string, keepMax int64, olderThanMs int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM audit_events WHERE vault_id = ? AND created_at < ? AND seq NOT IN
-(SELECT seq FROM audit_events WHERE vault_id = ? ORDER BY seq DESC LIMIT ?)`,
-		vaultID, olderThanMs, vaultID, keepMax)
-	if err != nil {
-		return fmt.Errorf("store: trim audit: %w", err)
+	if olderThanMs > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM audit_events WHERE vault_id = ? AND created_at < ?`,
+			vaultID, olderThanMs); err != nil {
+			return fmt.Errorf("store: trim audit: %w", err)
+		}
 	}
-	_, err = s.db.ExecContext(ctx,
+	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM audit_events WHERE vault_id = ? AND seq NOT IN
 (SELECT seq FROM audit_events WHERE vault_id = ? ORDER BY seq DESC LIMIT ?)`,
 		vaultID, vaultID, keepMax)
@@ -1107,6 +1120,24 @@ FROM pair_sessions WHERE nonce_hash = ?`, nonceHash).Scan(
 // the pair session with its §6.18 result JSON — atomically.
 func (s *Store) CompletePairing(ctx context.Context, device *Device, grants []Grant, nonceHash, resultJSON string, now int64) error {
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		// Consume FIRST, inside the transaction: the session-level write
+		// lock (_txlock=immediate) serializes concurrent completes, so the
+		// loser — whatever device id its request carries — finds
+		// consumed_at set and fails with ErrPairConsumed before inserting
+		// any row. A failed tx rolls the consume back with the rest.
+		res, err := tx.ExecContext(ctx,
+			`UPDATE pair_sessions SET consumed_at = ?, result_json = ? WHERE nonce_hash = ? AND consumed_at IS NULL`,
+			now, resultJSON, nonceHash)
+		if err != nil {
+			return fmt.Errorf("store: consume pair session: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrPairConsumed
+		}
 		if err := txInsertDevice(ctx, tx, device); err != nil {
 			return err
 		}
@@ -1128,19 +1159,6 @@ func (s *Store) CompletePairing(ctx context.Context, device *Device, grants []Gr
 		}
 		if err := txAppendDeviceChange(ctx, tx, device.VaultID, device.ID, now); err != nil {
 			return err
-		}
-		res, err := tx.ExecContext(ctx,
-			`UPDATE pair_sessions SET consumed_at = ?, result_json = ? WHERE nonce_hash = ? AND consumed_at IS NULL`,
-			now, resultJSON, nonceHash)
-		if err != nil {
-			return fmt.Errorf("store: consume pair session: %w", err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return fmt.Errorf("store: pair session already consumed")
 		}
 		return nil
 	})

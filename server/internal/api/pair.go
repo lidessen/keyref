@@ -268,6 +268,12 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.st.CompletePairing(r.Context(), device, storeGrants,
 		ps.NonceHash, string(resultJSON), now.UnixMilli()); err != nil {
+		if errors.Is(err, store.ErrPairConsumed) {
+			// Lost the consume race against a concurrent complete with the
+			// same nonce: indistinguishable from expired (§6.18).
+			writeError(w, "pair_expired")
+			return
+		}
 		writeError(w, "internal")
 		return
 	}

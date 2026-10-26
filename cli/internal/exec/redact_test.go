@@ -169,3 +169,42 @@ func TestWindowBasis(t *testing.T) {
 		t.Fatalf("window %d < %d (design.md §7.4)", r.window, want)
 	}
 }
+
+func TestRedactorEmptySecretDoesNotHang(t *testing.T) {
+	// An empty value is a legal plaintext (jsonscan.go: empty string
+	// value). Before the skip in NewRedactor it produced a zero-length
+	// needle and emit spun on it forever, growing the buffer without
+	// bound (OOM). This test must simply terminate.
+	secrets := map[string][]byte{"empty": {}, "real": []byte("sk-empty-case-42")}
+	var buf bytes.Buffer
+	r := NewRedactor(secrets)
+	defer r.Destroy()
+	r.Attach(&buf)
+	if _, err := r.Write([]byte("out: sk-empty-case-42 end")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := r.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if got := buf.String(); got != "out: <redacted:real> end" {
+		t.Fatalf("stream rendered as %q, want real secret redacted and empty one inert", got)
+	}
+	if r.Count() != 1 {
+		t.Fatalf("replacement count %d, want 1", r.Count())
+	}
+
+	// Only-empty map: nothing to match, stream passes through untouched.
+	only := NewRedactor(map[string][]byte{"blank": {}})
+	defer only.Destroy()
+	var pass bytes.Buffer
+	only.Attach(&pass)
+	if _, err := only.Write([]byte("plain text")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := only.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if pass.String() != "plain text" {
+		t.Fatalf("pass-through broken: %q", pass.String())
+	}
+}

@@ -123,10 +123,29 @@ struct KeyrefApp: App {
     }
 
     init() {
+        // §6.6：仅本机条目的 secret 密文落 SQLite（Application Support 下，
+        // 内容全部是密文）；打不开时退回内存实现（本次运行内有效，见
+        // LocalSecretStore.swift 的降级说明）——绝不阻塞启动。
+        let localSecrets: LocalSecretStore
+        do {
+            let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                   in: .userDomainMask)[0]
+                .appendingPathComponent("Keyref", isDirectory: true)
+            localSecrets = try SQLiteLocalSecretStore(
+                fileURL: support.appendingPathComponent("local-secrets.sqlite"))
+        } catch {
+            localSecrets = InMemoryLocalSecretStore()
+        }
         let backend = LiveBackend(
             keyStore: KeychainKeyStore(service: "app.keyref.ios"),
             stateStore: UIStateStore(),
-            origin: URL(string: "https://sync.keyref.app")!)
+            origin: URL(string: "https://sync.keyref.app")!,
+            localSecrets: localSecrets,
+            // §6.7：iCloud 整文件副本（CloudKit；无 iCloud 账号时按设计
+            // 降级为「副本不可用」，本地功能不受影响）。
+            snapshotStore: CloudKitSnapshotStore(),
+            // §8.4 到期预警通知（7 天 / 1 天前）。
+            notifications: LiveNotificationScheduler())
         _app = State(initialValue: AppModel(
             backend: backend,
             authenticator: LiveBiometricAuthenticator(),

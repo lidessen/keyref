@@ -39,11 +39,14 @@ public struct ItemRow: Identifiable, Equatable, Sendable {
     public var ciphertextBytes: Int
     /// 存储类别（v0.7 §6.6）：同步 / 仅本机。派生自 meta 的 sensitivity。
     public var storageClass: StorageClass
+    /// §6.7 每条目覆盖：是否已被排除出 iCloud 副本（仅本机条目才有意义）。
+    public var snapshotExcluded: Bool
 
     public init(id: String, ref: String, name: String, itemDescription: String,
                 type: String, masked: String, policy: ItemPolicy, injectable: Bool,
                 createdAt: Int64, updatedAt: Int64, grants: [GrantSummary],
-                ciphertextBytes: Int = 0, storageClass: StorageClass = .synced) {
+                ciphertextBytes: Int = 0, storageClass: StorageClass = .synced,
+                snapshotExcluded: Bool = false) {
         self.id = id
         self.ref = ref
         self.name = name
@@ -57,6 +60,7 @@ public struct ItemRow: Identifiable, Equatable, Sendable {
         self.grants = grants
         self.ciphertextBytes = ciphertextBytes
         self.storageClass = storageClass
+        self.snapshotExcluded = snapshotExcluded
     }
 }
 

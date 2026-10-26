@@ -87,6 +87,10 @@ public protocol AppBackend: AnyObject {
                         progress: @Sendable @escaping (RevokeStep) async -> Void) async throws -> RevokeSummary
     /// Whether a rotation for this device is mid-flight and resumable.
     func hasPendingRotation(deviceID: String) -> Bool
+    /// §8.4 授权续期（解锁后调用）：把 7 天内到期的 use/view 授予重包顺延
+    /// （expiresAt 顺延 30 天、revision + 1、PUT /v1/grants）。返回顺延条数。
+    @discardableResult
+    func renewExpiringGrants() async -> Int
 
     // MARK: audit (§2.11)
 
@@ -168,6 +172,8 @@ public protocol AppBackend: AnyObject {
     func uploadSnapshotIfDirty() async
     /// 「副本」状态（设置页显示；绝不阻塞本地功能，§6.7 降级）。
     func cloudBackupStatus() async -> CloudBackupStatus
+    /// §6.7 每条目覆盖：把一条仅本机条目排除出 / 放回 iCloud 副本。
+    func setSnapshotExcluded(itemID: String, excluded: Bool)
     /// 恢复接管 / 双机加入完成后：拉取云端快照、验签、按 revision 合并入库
     /// （§6.7 恢复路径）。云端没有快照或验签不过时抛错/返回 0。
     @discardableResult

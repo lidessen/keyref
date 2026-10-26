@@ -5,7 +5,7 @@
 设计见 [docs/design.md](../docs/design.md) 的「存储、部署与费用」和「服务端 API」两节；线格式以 [docs/protocol.md](../docs/protocol.md) 为准。
 
 - 一份 Go 二进制 `keyref-server`，内嵌 SQLite（纯 Go 驱动，`CGO_ENABLED=0`）。Docker 镜像里就是这个二进制。
-- 端点：设计 §11 的全部 26 个——vault、配对三步、会话挑战、sync（`cursor=0` 现状引导、合成变更、revoked 可见性）、items/grants/directory、审批（CLI 签名验证、10 条待处理上限、2 秒轮询下限且不计配额）、恢复接管、审计、healthz、删除保险库。
+- 端点：设计 §11 的全部 27 个——vault、配对三步、会话挑战、sync（`cursor=0` 现状引导、合成变更、revoked 可见性）、items/grants/directory、审批（CLI 签名验证、10 条待处理上限、2 秒轮询下限且不计配额）、恢复接管、审计、healthz、删除保险库、APNs 令牌登记（审批落库后 best-effort 扇出；未配置凭据则跳过推送）。
 - 只校验信封的形状、签名是否存在、设备是否有效、体积和配额是否超限。不要在服务器里实现解密。
 - CLI 身份的设备不能写入或删除条目。
 - 鉴权令牌只代表「这个设备可以来同步」，不是解密密钥。数据库里存令牌的哈希。

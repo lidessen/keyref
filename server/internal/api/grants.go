@@ -2,7 +2,6 @@ package api
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -231,14 +230,4 @@ func expiresWire(n sql.NullInt64) int64 {
 		return 0
 	}
 	return n.Int64
-}
-
-// marshalGrantData is used by sync to embed a rendered grant into a
-// change's raw data field.
-func marshalGrantData(g *store.Grant) json.RawMessage {
-	b, err := json.Marshal(grantWireData(g))
-	if err != nil {
-		return json.RawMessage(`{}`)
-	}
-	return b
 }

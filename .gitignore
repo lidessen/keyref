@@ -41,3 +41,6 @@ __pycache__/
 *.log
 core
 core.*
+
+# local workflow outputs
+out/

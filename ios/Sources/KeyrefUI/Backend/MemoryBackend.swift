@@ -76,6 +76,8 @@ public final class MemoryBackend: AppBackend {
     public var snapshotRestoreError: Error?
     public private(set) var snapshotUploadCount = 0
     public private(set) var snapshotRestoreCount = 0
+    /// §6.7 每条目覆盖（setSnapshotExcluded 写入；loadItems 回读）。
+    public var snapshotExcludedItems: Set<String> = []
 
     public init(origin: URL = URL(string: "https://sync.keyref.app")!) {
         self.origin = origin
@@ -306,6 +308,8 @@ public final class MemoryBackend: AppBackend {
         pendingRotation[deviceID] != nil
     }
 
+    public func renewExpiringGrants() async -> Int { 0 }
+
     public func resumeRotation(deviceID: String,
                                progress: @Sendable @escaping (RevokeStep) async -> Void) async throws -> RevokeSummary {
         rotationResumed.append(deviceID)
@@ -486,6 +490,14 @@ public final class MemoryBackend: AppBackend {
 
     public func cloudBackupStatus() async -> CloudBackupStatus {
         cloudBackupEnabled ? cloudBackupStatusResult : .disabled
+    }
+
+    public func setSnapshotExcluded(itemID: String, excluded: Bool) {
+        if excluded {
+            snapshotExcludedItems.insert(itemID)
+        } else {
+            snapshotExcludedItems.remove(itemID)
+        }
     }
 
     @discardableResult

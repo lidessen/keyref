@@ -54,9 +54,49 @@ public final class SettingsStore {
     public private(set) var newRecoveryCode: String?
     public private(set) var rotating = false
 
-    // v0.7（§6.7、§8.4）：iCloud 副本开关与轮换提醒。
-    public var cloudBackupOn = true
-    public var rotationReminderOn = false
+    // v0.7（§6.7、§8.4）：iCloud 副本开关与轮换提醒。两个都是用户偏好
+    // （不是密钥材料），UserDefaults 持久化——否则重启后开关回到默认值，
+    // 与 backend 实际行为脱节。
+    public var cloudBackupOn = UserDefaults.standard.object(
+        forKey: SettingsStore.PrefKeys.cloudBackupOn) as? Bool ?? true {
+        didSet { UserDefaults.standard.set(cloudBackupOn, forKey: SettingsStore.PrefKeys.cloudBackupOn) }
+    }
+    public var rotationReminderOn = UserDefaults.standard.object(
+        forKey: SettingsStore.PrefKeys.rotationReminderOn) as? Bool ?? false {
+        didSet {
+            UserDefaults.standard.set(rotationReminderOn, forKey: SettingsStore.PrefKeys.rotationReminderOn)
+            if rotationReminderOn, !oldValue {
+                UserDefaults.standard.set(Self.nowMillis(), forKey: SettingsStore.PrefKeys.rotationEnabledAt)
+            }
+        }
+    }
+
+    enum PrefKeys {
+        static let cloudBackupOn = "settings.cloudBackupOn"
+        static let rotationReminderOn = "settings.rotationReminderOn"
+        static let lastRotationAt = "settings.lastRotationAt"
+        static let rotationEnabledAt = "settings.rotationEnabledAt"
+    }
+
+    public static func nowMillis() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+    /// §8.4：一轮轮换（条目密钥或恢复码全套）成功完成后记录时间——90 天
+    /// 提醒与 RotationPolicy.due 的基准。
+    public func markRotationCompleted() {
+        UserDefaults.standard.set(Self.nowMillis(), forKey: PrefKeys.lastRotationAt)
+    }
+
+    /// §8.4 90 天提醒：解锁时检查一次。开了提醒且到期 → toast 提示并把
+    /// 基准推进到当前（下一次提醒在 90 天后）。
+    public func consumeRotationReminder(now: Int64 = SettingsStore.nowMillis()) {
+        guard rotationReminderOn else { return }
+        let last = UserDefaults.standard.object(forKey: PrefKeys.lastRotationAt) as? Int64
+        let enabledAt = UserDefaults.standard.object(forKey: PrefKeys.rotationEnabledAt) as? Int64
+        guard RotationPolicy.due(lastRotationAtMillis: last, enabledAtMillis: enabledAt,
+                                 nowMillis: now) else { return }
+        toast = "同步条目的密钥已超过 90 天未轮换，建议去「设置 → 轮换条目密钥」。"
+        UserDefaults.standard.set(now, forKey: PrefKeys.lastRotationAt)
+    }
 
     public init(backend: any AppBackend, haptics: any Haptics,
                 autoLock: AutoLockInterval = .oneMinute) {
@@ -157,6 +197,9 @@ public final class SettingsStore {
                             : try await backend.rotateVMKAndRecovery()
             newRecoveryCode = code
             haptics.fire(.success)
+            // B5 轮换了全部条目密钥——90 天提醒的基准从现在起算。只换包裹
+            // 层（VMK）不动条目密钥，不计入。
+            if full { markRotationCompleted() }
             return true
         } catch {
             haptics.fire(.error)

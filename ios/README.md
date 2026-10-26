@@ -24,6 +24,6 @@ ios/
 └── Keyref/                  # @main 入口与 Info.plist
 ```
 
-构建：`xcodebuild -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`。
+构建：`scripts/dev/xcodebuild.sh -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`。脚本把 `DEVELOPER_DIR` 指到 `/Applications/Xcode.app/Contents/Developer`——xcode-select 指向 CommandLineTools 的机器上直接跑 `xcodebuild` 会报 "tool 'xcodebuild' requires Xcode"；已把 xcode-select 切到完整 Xcode 的机器可以直接用 `xcodebuild` 本体。
 
 界面规格见 [docs/ios-ui.md](../docs/ios-ui.md)。已实现：四 Tab、创建/恢复/接管/配对/撤销/审计/设置、审批收件箱（前台轮询 + Face ID 批准）、allowCommands/allowedHosts 精细编辑、第二台 iPhone 在线配对。推送（APNs）与 Plus 内购需要 Apple 开发者凭据，另行接入。
