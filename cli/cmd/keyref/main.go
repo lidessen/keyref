@@ -698,15 +698,48 @@ func approvalResultOf(policyState string, approvalUsed bool) string {
 }
 
 // resolveViaApproval runs the §8.3 approval round for one ref and
-// decrypts its secret with the one-time item key. The key is destroyed
-// immediately after use — it never reaches the keyring or the cache
-// (design.md §15).
+// produces the guarded secret value. The wrap payload follows the
+// storage class (design §6.6, v0.7): a synced item's decision carries
+// the one-time item key, which decrypts the cached secret ciphertext; a
+// LOCAL item (cache row with an empty secret_ciphertext) receives the
+// secret value itself, which goes straight to the injection path. Key
+// and value are destroyed by exec.Run after the single exec — neither
+// reaches the keyring or the cache (design.md §15).
 func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
 	auditRecips []audit.OwnerRecipient, opts execOptions, rr *exec.ResolvedRef, itemID string, approvalUsed *bool) (*secret.Plaintext, int, string) {
 	*approvalUsed = true
+	it, ok, err := st.GetItem(itemID)
+	if err != nil || !ok {
+		fmt.Fprintln(opts.Stderr, "keyref: item missing from cache; run keyref sync")
+		return nil, 1, "internal"
+	}
 	var replySpecs []string
 	for _, rp := range opts.Replies {
 		replySpecs = append(replySpecs, rp.Pattern+"="+rp.Ref)
+	}
+	// Local item: the unwrap result IS the secret value (guarded); it is
+	// used once and wiped by exec.Run (design §6.6: 解开即用、即清).
+	if len(it.SecretCiphertext) == 0 {
+		value, code, state := approval.RequestSecret(&approval.Options{
+			VaultID:   vaultID,
+			DeviceID:  deviceID,
+			Identity:  id,
+			Owners:    auditRecips,
+			ItemID:    itemID,
+			Ref:       rr.Ref,
+			Argv:      opts.Argv,
+			Refs:      refsOf(opts),
+			Injection: injectionModes(opts),
+			Hosts:     rr.Meta.Policy.AllowedHosts,
+			Reply:     replySpecs,
+			Timeout:   opts.Timeout,
+			Client:    cl,
+			Stderr:    opts.Stderr,
+		})
+		if value == nil {
+			return nil, code, state
+		}
+		return value, 0, ""
 	}
 	key, code, state := approval.RequestItemKey(&approval.Options{
 		VaultID:   vaultID,
@@ -728,11 +761,6 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 		return nil, code, state
 	}
 	defer key.Destroy()
-	it, ok, err := st.GetItem(itemID)
-	if err != nil || !ok {
-		fmt.Fprintln(opts.Stderr, "keyref: item missing from cache; run keyref sync")
-		return nil, 1, "internal"
-	}
 	value, err := itemcrypt.DecryptSecretValue(key, it.SecretCiphertext, vaultID, itemID)
 	if err != nil {
 		fmt.Fprintf(opts.Stderr, "keyref: cannot decrypt secret for %s\n", rr.Ref)

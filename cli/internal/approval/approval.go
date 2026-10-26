@@ -8,8 +8,14 @@
 // polled at a floor of 2 seconds (polling never counts against the
 // daily request quota). The owner's one-time wrap — bound by HPKE info
 // to the item, the approval id and the request digest — is unwrapped
-// into guarded memory and the ephemeral private key is wiped: the item
-// key exists only for this single exec.
+// into guarded memory and the ephemeral private key is wiped.
+//
+// The wrap carries one of two payloads, chosen by the caller from the
+// local cache (design §6.6, v0.7): for SYNCED approval items the 32-byte
+// one-time item key (RequestItemKey), for LOCAL items (server row has
+// secret_ciphertext NULL, so the CLI cache holds none) the secret value
+// itself, up to 64 KiB (RequestSecret). The server is a blind relay for
+// either; both unwrap under the same D4 info binding.
 package approval
 
 import (
@@ -84,11 +90,70 @@ type Options struct {
 	Stderr    io.Writer // progress notices, never secrets
 }
 
-// RequestItemKey runs one approval round and returns the unwrapped item
-// key in guarded memory. The caller must Destroy the key after the
-// single exec (design §8.3 step 5). The returned exit code and deny
-// state follow the exec convention (13 for denied/expired/timeout).
+// Result is the payload an approved decision delivered: exactly one
+// field is set, depending on the unwrap the caller asked for.
+type Result struct {
+	Key    *secret.Key       // synced approval items: the one-time item key
+	Secret *secret.Plaintext // local items: the secret value itself
+}
+
+// unwrapFunc opens the approved one-time wrap while the ephemeral
+// private key is still alive; it must not retain the key material.
+type unwrapFunc func(vaultID, deviceID, itemID, approvalID string,
+	requestCiphertext, enc, wrapped, ephPrivate []byte) (*Result, error)
+
+// RequestItemKey runs one approval round for a SYNCED approval item and
+// returns the unwrapped item key in guarded memory. The caller must
+// Destroy the key after the single exec (design §8.3 step 5). The
+// returned exit code and deny state follow the exec convention (13 for
+// denied/expired/timeout).
 func RequestItemKey(opts *Options) (key *secret.Key, exitCode int, state string) {
+	res, code, st := run(opts, unwrapItemKey)
+	if res == nil {
+		return nil, code, st
+	}
+	return res.Key, code, st
+}
+
+// RequestSecret runs one approval round for a LOCAL item (design §6.6,
+// v0.7): the approved decision carries the secret value itself,
+// HPKE-sealed to the request's ephemeral public key under the same
+// one-time binding. The value lands in guarded memory; the caller must
+// Destroy it right after the injection — it never reaches the cache or
+// the keyring (design §15).
+func RequestSecret(opts *Options) (value *secret.Plaintext, exitCode int, state string) {
+	res, code, st := run(opts, unwrapSecret)
+	if res == nil {
+		return nil, code, st
+	}
+	return res.Secret, code, st
+}
+
+// unwrapItemKey opens a one-time ITEM KEY wrap (synced approval items).
+func unwrapItemKey(vaultID, deviceID, itemID, approvalID string,
+	requestCiphertext, enc, wrapped, ephPrivate []byte) (*Result, error) {
+	key, err := itemcrypt.UnwrapOneTimeItemKey(vaultID, deviceID, itemID, approvalID,
+		requestCiphertext, enc, wrapped, ephPrivate)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Key: key}, nil
+}
+
+// unwrapSecret opens a one-time SECRET wrap (local items).
+func unwrapSecret(vaultID, deviceID, itemID, approvalID string,
+	requestCiphertext, enc, wrapped, ephPrivate []byte) (*Result, error) {
+	value, err := itemcrypt.UnwrapOneTimeSecret(vaultID, deviceID, itemID, approvalID,
+		requestCiphertext, enc, wrapped, ephPrivate)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Secret: value}, nil
+}
+
+// run executes one approval round: request build, submission, polling
+// and the caller-chosen unwrap of the approved wrap.
+func run(opts *Options, unwrap unwrapFunc) (*Result, int, string) {
 	if len(opts.Owners) == 0 {
 		fmt.Fprintln(opts.Stderr, "keyref: approval needs an active owner device; run keyref sync")
 		return nil, 1, "internal"
@@ -168,13 +233,13 @@ func RequestItemKey(opts *Options) (key *secret.Key, exitCode int, state string)
 	}
 	fmt.Fprintf(opts.Stderr, "keyref: approval requested for %s (waiting up to %s)\n", opts.Ref, timeout.Truncate(time.Second))
 
-	return pollAndWait(opts, created.ApprovalID, requestCiphertext, ephPrivate, timeout)
+	return pollAndWait(opts, created.ApprovalID, requestCiphertext, ephPrivate, timeout, unwrap)
 }
 
 // pollAndWait polls the approval at the 2-second floor until the wrap
 // arrives, the owner denies, the request expires or the caller's
 // deadline passes (exit 13 on all of those, design §7.6).
-func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate []byte, timeout time.Duration) (*secret.Key, int, string) {
+func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate []byte, timeout time.Duration, unwrap unwrapFunc) (*Result, int, string) {
 	deadline := time.Now().Add(timeout)
 	// The first poll may run immediately; every later poll waits out the
 	// server's 2-second floor.
@@ -218,14 +283,13 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 			fmt.Fprintln(opts.Stderr, "keyref: approval wrap already consumed")
 			return nil, 13, "approval-consumed"
 		case wire.ApprovalStatusApproved:
-			key, err := itemcrypt.UnwrapOneTimeItemKey(
-				opts.VaultID, opts.DeviceID, opts.ItemID, approvalID,
+			res, err := unwrap(opts.VaultID, opts.DeviceID, opts.ItemID, approvalID,
 				requestCiphertext, resp.OneTimeEnc, resp.OneTimeWrappedKey, ephPrivate)
 			if err != nil {
 				fmt.Fprintln(opts.Stderr, "keyref: one-time wrap did not open (request or item mismatch)")
 				return nil, 13, "approval-unwrap"
 			}
-			return key, 0, ""
+			return res, 0, ""
 		default:
 			fmt.Fprintln(opts.Stderr, "keyref: unexpected approval status")
 			return nil, 1, "approval-status"

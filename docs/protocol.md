@@ -431,6 +431,8 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 
 服务器要求 `revision == 已存值 + 1` 且签名通过，否则 `409 revision_conflict` / `403 bad_signature`。响应 `200 {"revision":4,"updated_at":1790000000000}`。条目更新追加一条 `item:` 变更；**不**自动追加合成 grant 变更（grant 写入时才有合成 item 变更，design §6.3），CLI 靠本条 item 变更刷新本地行。错误信息不得回显密文字段。
 
+**仅本机条目**（design v0.7 §6.6）：`secret_ciphertext` 与 `vault_wrapped_item_key` 省略（或为零长度），行内只落 meta——密文只在 owner 手机本地。仅本机条目不得拥有 `use` 授予：`PUT /v1/grants` 对该条目建/续 `use` → `400 local_item_grant_conflict`；带 `use` 授权的条目改为本地 → 同错误。
+
 ### 6.11 `DELETE /v1/items/:item_id` — tombstone（owner）
 
 请求 `{"revision":5,"signature":"<b64 §3.1 誊本，密文字段为零长度>"}` → `204`。服务器置 tombstone、**删除该条全部 grants**、逐设备追加 `grant:` 删除变更与 `item:` 变更（design §6.3）。
@@ -524,8 +526,10 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
 
 ### 6.21 `POST /v1/approvals/:approval_id/decision`（owner）
 
-同意：`{"decision":"approved","one_time_enc":"<b64 32B>","one_time_wrapped_key":"<b64 ct‖tag>"}`。
-包裹 = HPKE(X25519, recipient=请求里的 `ephemeral_public_key`, info=§3.7 一次性模板, AAD 空) 包 32 字节 item key；服务器置 `expires_at = now + 60000`。拒绝：`{"decision":"denied"}`。→ `204`。错误：`approval_not_pending`、`bad_signature`（缺 CLI 签名的旧行）。
+同意：`{"decision":"approved","one_time_enc":"<b64>","one_time_wrapped_key":"<b64 ct‖tag>"}`。
+包裹 = HPKE(X25519, recipient=请求里的 `ephemeral_public_key`, info=§3.7 一次性模板, AAD 空)；服务器置 `expires_at = now + 60000`。拒绝：`{"decision":"denied"}`。→ `204`。错误：`approval_not_pending`、`bad_signature`（缺 CLI 签名的旧行）。
+
+**载荷两种**（design v0.7 §6.6）：同步条目照旧包 32 字节 item key；**仅本机条目**（`items.secret_ciphertext` 为 NULL，design §6.6）包该条目的 secret **密文字节**（明文的既有 wire 密文，≤64 KiB）。decision 端点正文上限相应为 **96 KiB**（审批请求仍 8 KiB）。CLI 按本地缓存中该条目是否缺 `secret_ciphertext` 区分两种投递。仅本机条目不得拥有 `use` 授权（服务器互斥校验，错误码 `local_item_grant_conflict`）。
 
 ### 6.22 `GET /v1/approvals/:approval_id`（发起 CLI 轮询）
 

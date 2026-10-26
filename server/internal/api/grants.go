@@ -65,6 +65,13 @@ func (s *Server) handlePutGrants(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "internal")
 			return
 		}
+		// Storage-class invariant (design §6.6, v0.7): local items (SQL
+		// NULL secret_ciphertext) take view grants only — a use grant
+		// would promise an item key the server row does not back.
+		if g.Kind == wire.GrantKindUse && len(item.SecretCiphertext) == 0 {
+			writeError(w, "local_item_grant_conflict")
+			return
+		}
 		if err := g.VerifyOwnerSignature(ac.vault.ID, ac.device.SignPublicKey); err != nil {
 			writeError(w, "bad_signature")
 			return

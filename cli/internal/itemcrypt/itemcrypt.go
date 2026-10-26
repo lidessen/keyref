@@ -78,7 +78,7 @@ func UnwrapGrantKey(vaultID string, grant *wire.GrantData, hpkePrivate, ownerSig
 // The device uses a fresh ephemeral X25519 key per request
 // (design §8.3); hpkePrivate is that key.
 func UnwrapOneTimeItemKey(vaultID, deviceID, itemID, approvalID string, requestCiphertext, enc, wrappedKey, hpkePrivate []byte) (*secret.Key, error) {
-	info, err := crypto.OneTimeItemKeyInfo(vaultID, deviceID, itemID, approvalID, requestCiphertext)
+	info, err := oneTimeInfo(vaultID, deviceID, itemID, approvalID, requestCiphertext)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
 	}
@@ -92,6 +92,37 @@ func UnwrapOneTimeItemKey(vaultID, deviceID, itemID, approvalID string, requestC
 		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
 	}
 	return key, nil
+}
+
+// UnwrapOneTimeSecret unwraps the decision payload of a LOCAL item
+// (design §6.6, v0.7): the owner HPKE-sealed the secret value itself —
+// not an item key — to the request's ephemeral public key, under the
+// SAME one-time info binding (purpose=one-time-item-key + item, approval
+// and request digest). The plaintext lands directly in guarded memory
+// and the HPKE intermediate is wiped: the value exists for this single
+// exec only, never in the cache or the keyring (design §15).
+func UnwrapOneTimeSecret(vaultID, deviceID, itemID, approvalID string, requestCiphertext, enc, wrappedKey, hpkePrivate []byte) (*secret.Plaintext, error) {
+	info, err := oneTimeInfo(vaultID, deviceID, itemID, approvalID, requestCiphertext)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	pt, err := crypto.UnwrapKey(wire.KEMX25519, hpkePrivate, info, enc, wrappedKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	value, err := secret.NewPlaintextFromBytes(pt)
+	if err != nil {
+		secret.Wipe(pt)
+		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	return value, nil
+}
+
+// oneTimeInfo builds the D4 one-time wrap info shared by both payload
+// kinds (item key for synced approval items, the secret itself for
+// local items — the server cannot tell them apart).
+func oneTimeInfo(vaultID, deviceID, itemID, approvalID string, requestCiphertext []byte) ([]byte, error) {
+	return crypto.OneTimeItemKeyInfo(vaultID, deviceID, itemID, approvalID, requestCiphertext)
 }
 
 // Meta is the decrypted meta plaintext of an item (design.md §6.1).

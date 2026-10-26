@@ -46,7 +46,12 @@ type fakeOwner struct {
 	failNext        bool    // transient network error on next poll
 	wrapWithWrongID bool    // bind the one-time wrap to another approval id
 	itemKey         []byte
-	approvalID      string
+	// deliverSecret switches the fake owner to the LOCAL-item payload
+	// (design §6.6, v0.7): the decision wraps secretPayload — the secret
+	// value itself — instead of the 32-byte item key.
+	deliverSecret bool
+	secretPayload []byte
+	approvalID    string
 }
 
 func newFakeOwner(t *testing.T, decision string) *fakeOwner {
@@ -126,9 +131,10 @@ func (o *fakeOwner) handlePoll(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(wire.ApprovalPollResponse{ApprovalID: o.approvalID, Status: wire.ApprovalStatusDenied})
 		return
 	}
-	// Approved: wrap the item key to the request's ephemeral public key
-	// with the D4 one-time info binding. wrapWithWrongID breaks the
-	// binding on purpose (negative test).
+	// Approved: wrap the payload to the request's ephemeral public key
+	// with the D4 one-time info binding — the 32-byte item key for
+	// synced items, the secret value itself for local items (§6.6).
+	// wrapWithWrongID breaks the binding on purpose (negative test).
 	bindID := o.approvalID
 	if o.wrapWithWrongID {
 		bindID = randHex(o.t)
@@ -137,7 +143,11 @@ func (o *fakeOwner) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		o.t.Fatal(err)
 	}
-	enc, wrapped, err := crypto.WrapKey(wire.KEMX25519, o.lastReq.EphemeralPublicKey, info, o.itemKey)
+	payload := o.itemKey
+	if o.deliverSecret {
+		payload = o.secretPayload
+	}
+	enc, wrapped, err := crypto.WrapKey(wire.KEMX25519, o.lastReq.EphemeralPublicKey, info, payload)
 	if err != nil {
 		o.t.Fatal(err)
 	}
@@ -324,6 +334,78 @@ func TestRequestItemKeyZeroizeOnDeny(t *testing.T) {
 	}
 	if out := errBuf.String(); strings.Contains(out, itemKeyString(o.itemKey)) {
 		t.Fatalf("stderr echoed key material: %s", out)
+	}
+}
+
+// TestRequestSecretLocalItem drives the local-item branch of design
+// §6.6 (v0.7): the owner's decision wraps the secret VALUE itself, and
+// RequestSecret delivers it in guarded memory — destroy wipes it.
+func TestRequestSecretLocalItem(t *testing.T) {
+	oldInterval := PollInterval
+	PollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { PollInterval = oldInterval })
+
+	o := newFakeOwner(t, "approved")
+	payload := bytes.Repeat([]byte{0x7c}, 4096) // a "TOTP seed"-sized secret
+	o.mu.Lock()
+	o.deliverSecret = true
+	o.secretPayload = payload
+	o.mu.Unlock()
+
+	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)))
+	if value == nil {
+		t.Fatalf("RequestSecret failed: code %d state %s", code, state)
+	}
+	if !value.EqualTo(payload) {
+		t.Fatal("unwrapped secret does not match the payload the owner sealed")
+	}
+	value.Destroy()
+	if len(value.Bytes()) != 0 {
+		t.Fatal("secret plaintext not wiped by Destroy")
+	}
+
+	// The request transcript is identical to the synced-item flow — the
+	// server and the transcript never learn which payload kind follows.
+	if o.lastReq.ItemID != testItemID || o.lastReq.CLIDeviceID != testDeviceID {
+		t.Fatalf("local-item request identity: %+v", o.lastReq)
+	}
+}
+
+// TestRequestSecretBinding pins the D4 binding on the local-item path:
+// a wrap bound to another approval id must not open into a value.
+func TestRequestSecretBinding(t *testing.T) {
+	oldInterval := PollInterval
+	PollInterval = time.Millisecond
+	t.Cleanup(func() { PollInterval = oldInterval })
+
+	o := newFakeOwner(t, "approved")
+	o.mu.Lock()
+	o.deliverSecret = true
+	o.secretPayload = []byte("sk-local-secret")
+	o.wrapWithWrongID = true
+	o.mu.Unlock()
+
+	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)))
+	if value != nil || code != 13 || state != "approval-unwrap" {
+		t.Fatalf("misbound secret opened: value=%v code=%d state=%s", value != nil, code, state)
+	}
+}
+
+// TestRequestSecretDenied mirrors the deny path for local items.
+func TestRequestSecretDenied(t *testing.T) {
+	oldInterval := PollInterval
+	PollInterval = time.Millisecond
+	t.Cleanup(func() { PollInterval = oldInterval })
+
+	o := newFakeOwner(t, "denied")
+	o.mu.Lock()
+	o.deliverSecret = true
+	o.secretPayload = []byte("sk-local-secret")
+	o.mu.Unlock()
+
+	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)))
+	if value != nil || code != 13 || state != "approval-denied" {
+		t.Fatalf("denied local flow: value=%v code=%d state=%s", value != nil, code, state)
 	}
 }
 

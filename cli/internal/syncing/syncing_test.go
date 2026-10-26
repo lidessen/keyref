@@ -171,6 +171,57 @@ func TestSyncAppliesItemsGrantsDirectory(t *testing.T) {
 	}
 }
 
+// TestSyncAppliesLocalItemRow pins the v0.7 local-item sync semantics
+// (design §6.6): a row with an empty secret_ciphertext (the wire form of
+// SQL NULL) applies like any other — the absence is NOT corruption. The
+// cached row keeps the empty secret so exec branches to the
+// approval-delivers-secret path.
+func TestSyncAppliesLocalItemRow(t *testing.T) {
+	owner := testowner.New(t, tvVault, tvOwner)
+	id := newIdentity(t)
+	st := newStore(t, owner)
+
+	item := owner.SealItem(tvItem, tvOwner, "totp-seed", "n", "abcd****", "v")
+	// Turn the sealed row into its local-item form: no secret and no
+	// vault-wrapped item key, resigned over the §3.1 transcript.
+	local := item.Data
+	local.SecretCiphertext = nil
+	local.VaultWrappedItemKey = nil
+	tb, err := wire.BuildItemTranscript(wire.ItemTranscript{
+		VaultID: tvVault, ItemID: tvItem, Revision: 1,
+		MetaCiphertext: local.MetaCiphertext, SecretCiphertext: nil,
+		VaultWrappedMetaKey: local.VaultWrappedMetaKey, VaultWrappedItemKey: nil,
+		WriterDeviceID: tvOwner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local.Signature = owner.Sign(tb)
+
+	view := owner.WrapGrant(id.HPKEPublic, tvDevice, tvItem, wire.GrantKindView, 1, 0, item.MetaKey)
+	ss := newSyncServer(t, []wire.SyncChange{
+		change(wire.EntityItem, "item:"+tvItem, local),
+		change(wire.EntityGrant, "grant:", view),
+	})
+	res, err := Run(st, client.New(ss.URL, tokn()), tvDevice)
+	if err != nil {
+		t.Fatalf("sync rejected the NULL-secret row: %v", err)
+	}
+	if res.Applied != 2 {
+		t.Fatalf("applied %d, want 2", res.Applied)
+	}
+	it, ok, err := st.GetItem(tvItem)
+	if err != nil || !ok {
+		t.Fatalf("local item not cached: ok=%v err=%v", ok, err)
+	}
+	if len(it.SecretCiphertext) != 0 {
+		t.Fatalf("cached secret must stay empty for a local item, got %d bytes", len(it.SecretCiphertext))
+	}
+	if len(it.MetaCiphertext) == 0 {
+		t.Fatal("meta ciphertext lost")
+	}
+}
+
 func TestSyncTombstoneAndGrantDeletionClearCache(t *testing.T) {
 	owner := testowner.New(t, tvVault, tvOwner)
 	id := newIdentity(t)

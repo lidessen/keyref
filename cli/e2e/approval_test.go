@@ -99,11 +99,18 @@ const (
 	decideDeny
 )
 
-// serveOneApproval polls the owner's pending queue until an approval
-// for the item appears, verifies the CLI signature, decrypts the
-// transcript, asserts its shape, and answers with the decision and a
-// correctly bound one-time wrap. It runs until the test ends.
+// serveOneApproval polls the owner's pending queue until an approval for
+// the default fixture item appears, verifies the CLI signature,
+// decrypts the transcript, asserts its shape, and answers with the
+// decision and a correctly bound one-time wrap. It runs until the test
+// ends.
 func (o *owner) serveOneApproval(t *testing.T, decision approvalDecision, wantReply []string) *sync.WaitGroup {
+	return o.serveOneApprovalFor(t, itemApproval, decision, wantReply)
+}
+
+// serveOneApprovalFor is serveOneApproval restricted to one item id (the
+// local-item flow answers a different item than the default fixture).
+func (o *owner) serveOneApprovalFor(t *testing.T, itemID string, decision approvalDecision, wantReply []string) *sync.WaitGroup {
 	t.Helper()
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -118,7 +125,7 @@ func (o *owner) serveOneApproval(t *testing.T, decision approvalDecision, wantRe
 				continue
 			}
 			for _, row := range list.Approvals {
-				if row.ItemID != itemApproval {
+				if row.ItemID != itemID {
 					continue
 				}
 				o.answerApproval(t, &row, decision, wantReply)
@@ -133,7 +140,12 @@ func (o *owner) serveOneApproval(t *testing.T, decision approvalDecision, wantRe
 
 // answerApproval plays the phone for one approval row: verify the CLI
 // signature FIRST (design §8.3 step 3), decrypt, assert the request
-// transcript, then approve with the one-time wrap or deny.
+// transcript, then approve with the one-time wrap or deny. The wrap
+// payload follows the storage class (design §6.6, v0.7): a synced
+// approval item wraps its item key; a LOCAL item delivers the secret
+// value taken from the owner's own local copy, HPKE-sealed to the
+// request's ephemeral key under the same D4 binding — the server is a
+// blind relay for either.
 func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision approvalDecision, wantReply []string) {
 	t.Helper()
 	// Signature over the raw ciphertext, before any decryption.
@@ -157,20 +169,24 @@ func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision app
 	if err := dec.Decode(&rq); err != nil {
 		t.Fatalf("owner: approval transcript decode: %v\npayload: %.200q", err, pt)
 	}
-	if rq.CLIDeviceID != o.cliDeviceID || rq.ItemID != itemApproval {
+	if rq.CLIDeviceID != o.cliDeviceID || rq.ItemID != row.ItemID {
 		t.Fatalf("approval transcript identity: %+v", rq)
 	}
 	if len(rq.Argv) == 0 || rq.Argv[0] != helperBin {
 		t.Fatalf("approval transcript argv must carry the original argv: %v", rq.Argv)
 	}
+	wantRef := refApproval
+	if row.ItemID == itemLocal {
+		wantRef = refLocal
+	}
 	foundRef := false
 	for _, r := range rq.Refs {
-		if r == refApproval {
+		if r == wantRef {
 			foundRef = true
 		}
 	}
 	if !foundRef {
-		t.Fatalf("approval transcript refs missing %q: %v", refApproval, rq.Refs)
+		t.Fatalf("approval transcript refs missing %q: %v", wantRef, rq.Refs)
 	}
 	if !strings.Contains(rq.Injection, "env") {
 		t.Fatalf("approval transcript injection: %q", rq.Injection)
@@ -190,11 +206,18 @@ func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision app
 	// The decision.
 	body := wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusDenied}
 	if decision == decideApprove {
-		wrapInfo, err := crypto.OneTimeItemKeyInfo(o.vaultID, o.cliDeviceID, itemApproval, row.ApprovalID, row.RequestCiphertext)
+		wrapInfo, err := crypto.OneTimeItemKeyInfo(o.vaultID, o.cliDeviceID, row.ItemID, row.ApprovalID, row.RequestCiphertext)
 		if err != nil {
 			t.Fatal(err)
 		}
-		oneEnc, wrapped, err := crypto.WrapKey(wire.KEMX25519, rq.EphemeralPublicKey, wrapInfo, o.itemKeys[itemApproval])
+		// Synced item: wrap the item key. Local item: deliver the secret
+		// VALUE from the owner's local copy — never an item key, which
+		// the CLI must not hold for a local item.
+		payload := o.itemKeys[row.ItemID]
+		if row.ItemID == itemLocal {
+			payload = o.localSecretValue(t, row.ItemID)
+		}
+		oneEnc, wrapped, err := crypto.WrapKey(wire.KEMX25519, rq.EphemeralPublicKey, wrapInfo, payload)
 		if err != nil {
 			t.Fatal(err)
 		}

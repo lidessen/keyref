@@ -303,6 +303,45 @@ func TestOneTimeWrapBinding(t *testing.T) {
 	}
 }
 
+// TestOneTimeSecretUnwrap covers the LOCAL-item decision payload
+// (design §6.6, v0.7): the same D4 info binding, but the sealed payload
+// is the secret value itself, delivered in guarded memory.
+func TestOneTimeSecretUnwrap(t *testing.T) {
+	ephPub, ephPriv, err := crypto.GenerateHPKEKeyPair(wire.KEMX25519)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCT := []byte("request ciphertext bytes")
+	info, err := crypto.OneTimeItemKeyInfo(fxVault, fxDevice, fxItem, fxOther, reqCT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0x3d}, 2048)
+	enc, wrapped, err := crypto.WrapKey(wire.KEMX25519, ephPub, info, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := UnwrapOneTimeSecret(fxVault, fxDevice, fxItem, fxOther, reqCT, enc, wrapped, ephPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !value.EqualTo(payload) {
+		t.Fatal("one-time secret mismatch")
+	}
+	value.Destroy()
+	if len(value.Bytes()) != 0 {
+		t.Fatal("one-time secret not wiped by Destroy")
+	}
+
+	// The binding is as strict as the item-key path.
+	if _, err := UnwrapOneTimeSecret(fxVault, fxDevice, fxItem, fxItem, reqCT, enc, wrapped, ephPriv); err == nil {
+		t.Fatal("one-time secret opened for a different approval id")
+	}
+	if _, err := UnwrapOneTimeSecret(fxVault, fxDevice, fxItem, fxOther, []byte("other request"), enc, wrapped, ephPriv); err == nil {
+		t.Fatal("one-time secret opened for a different request ciphertext")
+	}
+}
+
 // TestGrantKeyIsGuarded: the unwrapped key must live in guarded memory —
 // bytes are accessible but the buffer reports alive until destroyed.
 func TestGrantKeyIsGuarded(t *testing.T) {

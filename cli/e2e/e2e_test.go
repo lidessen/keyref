@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -147,18 +148,19 @@ func waitHealthy(origin string, timeout time.Duration) error {
 // ---- software owner (docs/protocol.md §11.2) ----
 
 type owner struct {
-	vaultID     string
-	deviceID    string // this vault's owner device id (devices PK is global)
-	signPriv    *ecdsa.PrivateKey
-	signPub     []byte
-	hpkePriv    []byte
-	hpkePub     []byte
-	token       string
-	itemKeys    map[string][]byte
-	metaKeys    map[string][]byte
-	cliDeviceID string // assigned at pair completion
-	cliHPKE     []byte // CLI HPKE public key, from the QR payload
-	cliSign     []byte // CLI Ed25519 public key, from the QR payload
+	vaultID      string
+	deviceID     string // this vault's owner device id (devices PK is global)
+	signPriv     *ecdsa.PrivateKey
+	signPub      []byte
+	hpkePriv     []byte
+	hpkePub      []byte
+	token        string
+	itemKeys     map[string][]byte
+	metaKeys     map[string][]byte
+	localSecrets map[string][]byte // local items: secret ciphertext of the owner's LOCAL copy (never uploaded)
+	cliDeviceID  string            // assigned at pair completion
+	cliHPKE      []byte            // CLI HPKE public key, from the QR payload
+	cliSign      []byte            // CLI Ed25519 public key, from the QR payload
 	// lastApprovalID is set by the approval responder for follow-up
 	// assertions (consumed status, polling floor).
 	lastApprovalID string
@@ -168,11 +170,12 @@ type owner struct {
 func newOwner(t *testing.T, vaultID string) *owner {
 	t.Helper()
 	o := &owner{
-		vaultID:  vaultID,
-		deviceID: newID(t),
-		itemKeys: map[string][]byte{},
-		metaKeys: map[string][]byte{},
-		hc:       &http.Client{Timeout: 10 * time.Second},
+		vaultID:      vaultID,
+		deviceID:     newID(t),
+		itemKeys:     map[string][]byte{},
+		metaKeys:     map[string][]byte{},
+		localSecrets: map[string][]byte{},
+		hc:           &http.Client{Timeout: 10 * time.Second},
 	}
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), nil)
 	if err != nil {
@@ -597,23 +600,81 @@ func runCLI(t *testing.T, args ...string) cliRun {
 type pairProc struct {
 	cmd    *exec.Cmd
 	stdout bytes.Buffer
+	stderr *errSink
 	done   chan error
 }
 
+// startPair runs `keyref pair --print-payload`. The whole suite shares
+// one server process, so successive tests can exhaust the per-IP pair
+// register limit (10/minute, design §10.5); a 429 there is expected
+// backpressure, and the pair command exits 1. Retry the whole pairing
+// with backoff until the window rolls over.
 func startPair(t *testing.T) *pairProc {
+	t.Helper()
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		pp, rateLimited := tryStartPair(t)
+		if !rateLimited {
+			return pp
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pair register still rate limited after 90s")
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func tryStartPair(t *testing.T) (*pairProc, bool) {
 	t.Helper()
 	cmd := exec.Command(cliBin, "pair", "--name", cliLabel, "--print-payload")
 	cmd.Env = cliEnv()
 	pp := &pairProc{cmd: cmd, done: make(chan error, 1)}
 	cmd.Stdout = &pp.stdout
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
+	pp.stderr = &errSink{b: &syncBuf{}}
+	cmd.Stderr = pp.stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	go func() { pp.done <- cmd.Wait() }()
-	return pp
+
+	// The register happens within the first seconds; if it comes back
+	// rate limited the process exits 1 quickly, before any QR polling.
+	select {
+	case err := <-pp.done:
+		if err != nil && strings.Contains(pp.stderr.String(), "429 rate_limited") {
+			return pp, true
+		}
+		t.Fatalf("pair exited early: %v\nstdout:\n%s\nstderr:\n%s", err, pp.stdout.String(), pp.stderr.String())
+	case <-time.After(8 * time.Second):
+		// Registered and past the limit; normal QR-polling flow.
+	}
+	return pp, false
 }
+
+// errSink and syncBuf keep pair stderr readable even when the test dies
+// holding a bytes.Buffer that the pair process still writes to.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+type errSink struct{ b *syncBuf }
+
+func (e *errSink) Write(p []byte) (int, error) { return e.b.Write(p) }
+
+func (e *errSink) String() string { return e.b.String() }
 
 func (pp *pairProc) waitPayloadLine(t *testing.T) (nonce, payload string) {
 	t.Helper()
@@ -624,7 +685,7 @@ func (pp *pairProc) waitPayloadLine(t *testing.T) (nonce, payload string) {
 		}
 		select {
 		case err := <-pp.done:
-			t.Fatalf("pair exited early: %v\nstdout:\n%s", err, pp.stdout.String())
+			t.Fatalf("pair exited early: %v\nstdout:\n%s\nstderr:\n%s", err, pp.stdout.String(), pp.stderr.String())
 		default:
 		}
 		time.Sleep(50 * time.Millisecond)

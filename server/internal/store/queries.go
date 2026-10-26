@@ -590,6 +590,20 @@ func (s *Store) CountLiveItems(ctx context.Context, vaultID string) (int64, erro
 	return n, nil
 }
 
+// CountActiveUseGrants counts the live (non-deletion-form) use grants
+// that exist for one item. The storage-class invariant of design §6.6
+// (v0.7) rests on it: a local item (secret_ciphertext NULL) must never
+// carry a use grant, in either direction of the mutual exclusion.
+func (s *Store) CountActiveUseGrants(ctx context.Context, vaultID, itemID string) (int64, error) {
+	var n int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM grants WHERE vault_id = ? AND item_id = ? AND kind = ? AND length(hpke_enc) > 0`,
+		vaultID, itemID, wire.GrantKindUse).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count use grants: %w", err)
+	}
+	return n, nil
+}
+
 // ---------------------------------------------------------------------------
 // grants
 
@@ -1139,11 +1153,17 @@ func (s *Store) CompletePairing(ctx context.Context, device *Device, grants []Gr
 // VaultStorageBytes sums the metered ciphertext bytes of a vault: item
 // ciphertexts, audit ciphertexts and PENDING approval request
 // ciphertexts (design §10.5: all three count against the quota).
+//
+// Local items (design §6.6, v0.7) store NULL in secret_ciphertext and
+// vault_wrapped_item_key; every length() is therefore wrapped in
+// COALESCE so such a row still contributes its meta ciphertext bytes
+// (only the missing columns drop out of the sum — length(NULL) is NULL
+// and would otherwise void the whole row).
 func (s *Store) VaultStorageBytes(ctx context.Context, vaultID string) (int64, error) {
 	itemBytes, auditBytes, approvalBytes := int64(0), int64(0), int64(0)
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(length(meta_ciphertext) + length(secret_ciphertext) +
-length(vault_wrapped_meta_key) + length(vault_wrapped_item_key)), 0)
+		`SELECT COALESCE(SUM(COALESCE(length(meta_ciphertext), 0) + COALESCE(length(secret_ciphertext), 0) +
+COALESCE(length(vault_wrapped_meta_key), 0) + COALESCE(length(vault_wrapped_item_key), 0)), 0)
 FROM items WHERE vault_id = ?`, vaultID).Scan(&itemBytes); err != nil {
 		return 0, fmt.Errorf("store: item bytes: %w", err)
 	}

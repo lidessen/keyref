@@ -195,6 +195,13 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "internal")
 			return
 		}
+		// Storage-class invariant (design §6.6, v0.7): pairing grants
+		// obey the same mutual exclusion as PUT /v1/grants — a local item
+		// (SQL NULL secret_ciphertext) never takes a use grant.
+		if g.Kind == wire.GrantKindUse && len(item.SecretCiphertext) == 0 {
+			writeError(w, "local_item_grant_conflict")
+			return
+		}
 		if err := g.VerifyOwnerSignature(ac.vault.ID, ac.device.SignPublicKey); err != nil {
 			writeError(w, "bad_signature")
 			return

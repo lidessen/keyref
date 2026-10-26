@@ -173,6 +173,23 @@ func (s *Server) handlePutItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Storage-class invariant (design §6.6, v0.7): a local item — an
+	// empty secret_ciphertext on the wire, stored as SQL NULL — must not
+	// carry a use grant. An owner flipping a use-granted item to
+	// meta-only is rejected here; the grant-side direction lives in
+	// handlePutGrants and handlePairComplete.
+	if len(req.SecretCiphertext) == 0 && current != nil {
+		n, err := s.st.CountActiveUseGrants(r.Context(), ac.vault.ID, itemID)
+		if err != nil {
+			writeError(w, "internal")
+			return
+		}
+		if n > 0 {
+			writeError(w, "local_item_grant_conflict")
+			return
+		}
+	}
+
 	// Plan ceilings: live item count and metered storage bytes
 	// (design §10.5) — hosted only.
 	if s.cfg.EnforceQuotas {

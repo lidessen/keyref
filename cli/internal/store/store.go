@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS items (
   revision          INTEGER NOT NULL,
   tombstone         INTEGER NOT NULL DEFAULT 0,
   meta_ciphertext   BLOB NOT NULL,
-  secret_ciphertext BLOB NOT NULL,
+  secret_ciphertext BLOB,
   writer_device_id  TEXT NOT NULL,
   signature         BLOB NOT NULL,
   updated_at        INTEGER NOT NULL

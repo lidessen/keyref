@@ -33,7 +33,13 @@ const (
 	MaxItemBodyBytes  = 256 << 10 // 256 KiB
 	MaxAuditBodyBytes = 4 << 10   // 4 KiB
 	MaxApprovalBytes  = 8 << 10   // 8 KiB
-	MaxDefaultBody    = 1 << 20   // 1 MiB ceiling for every other endpoint
+	// MaxDecisionBodyBytes is the decision-only ceiling (protocol §6.21,
+	// v0.7): approving a LOCAL item (design §6.6) delivers the secret
+	// itself HPKE-wrapped to the CLI's ephemeral key — up to 64 KiB of
+	// secret plus HPKE and base64 overhead. Approval REQUESTS keep the
+	// 8 KiB ceiling.
+	MaxDecisionBodyBytes = 96 << 10 // 96 KiB
+	MaxDefaultBody       = 1 << 20  // 1 MiB ceiling for every other endpoint
 )
 
 // Approval polling floor (protocol §1.3, §6.22): approval polls are the
@@ -204,6 +210,11 @@ func (s *Server) bodyLimit(r *http.Request) int64 {
 		return MaxItemBodyBytes
 	case p == "/v1/audit" && r.Method == http.MethodPost:
 		return MaxAuditBodyBytes
+	case r.Method == http.MethodPost && strings.HasPrefix(p, "/v1/approvals/") && strings.HasSuffix(p, "/decision"):
+		// Only the owner's decision widens: an approved decision for a
+		// local item carries the HPKE-wrapped secret (≤64 KiB) instead of
+		// a 32-byte item key (protocol §6.21, design §6.6 v0.7).
+		return MaxDecisionBodyBytes
 	case strings.HasPrefix(p, "/v1/approvals"):
 		return MaxApprovalBytes
 	default:
@@ -221,6 +232,7 @@ func redactPath(r *http.Request) string { return r.URL.Path }
 var errorStatus = map[string]int{
 	"invalid_json":              400,
 	"invalid_field":             400,
+	"local_item_grant_conflict": 400,
 	"unauthorized":              401,
 	"pow_required":              401,
 	"delete_challenge_required": 401,

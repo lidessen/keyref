@@ -146,6 +146,22 @@ func NewPlaintext(n int) (*memguard.LockedBuffer, error) {
 	return buf, nil
 }
 
+// NewPlaintextFromBytes moves value into a fresh guarded Plaintext and
+// wipes the source slice (memguard Move semantics: the bytes never
+// remain on the ordinary heap). The empty value yields the nil-buffer
+// Plaintext, matching ExtractStringField.
+func NewPlaintextFromBytes(value []byte) (*Plaintext, error) {
+	if len(value) == 0 {
+		return &Plaintext{}, nil
+	}
+	buf := memguard.NewBuffer(len(value))
+	if !buf.IsAlive() {
+		return nil, fmt.Errorf("secret: guarded allocation failed")
+	}
+	buf.Move(value)
+	return &Plaintext{buf: buf}, nil
+}
+
 // Wipe best-effort zeroes a heap slice that briefly held sensitive
 // material (for example the circl unwrap output before it is moved into
 // a guarded Key).
