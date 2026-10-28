@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/awnumar/memguard v0.23.0
-	github.com/lidessen/keyref/proto v0.0.0
+	github.com/lidessen/keyref/proto v0.0.0-20261028164217-13ead31f2d53
 	github.com/zalando/go-keyring v0.2.8
 	modernc.org/sqlite v1.61.0
 )
@@ -26,8 +26,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
-
-// The proto module is unpublished; resolve it to the sibling workspace
-// module so go mod tidy and standalone builds work (no vendoring,
-// docs/protocol.md §2.1).
-replace github.com/lidessen/keyref/proto => ../proto

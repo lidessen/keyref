@@ -100,6 +100,8 @@ func dispatch(cmd string, args []string) int {
 		return cmdUnlock()
 	case "exec":
 		return cmdExec(args)
+	case "local":
+		return cmdLocal(args)
 	case "mcp":
 		return cmdMCP(args)
 	case "help", "-h", "--help":
@@ -125,6 +127,7 @@ commands:
   status                    pairing, session and grant expiry status
   lock | unlock             block or restore key unwrapping
   exec [flags] -- <argv>    run a command with injected secrets
+  local <init|set|delete>    manage an independent local vault
   mcp                       serve list/get/exec over stdio as MCP JSON-RPC
 
 exec flags:
