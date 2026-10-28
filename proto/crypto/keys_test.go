@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"testing"
 )
@@ -46,7 +47,7 @@ func TestGenerateOwnerKeys(t *testing.T) {
 		t.Fatal("owner hpke P-256 key shapes wrong")
 	}
 	digest := sha256.Sum256([]byte("owner transcript"))
-	sig, err := ecdsa.SignASN1(nil, signPriv, digest[:])
+	sig, err := ecdsa.SignASN1(rand.Reader, signPriv, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"fmt"
 
@@ -51,7 +52,7 @@ func GenerateDeviceKeys() (*DeviceKeys, error) {
 // and the e2e software owner (docs/protocol.md §11.2). Production owners
 // keep the signing key inside the Secure Enclave (design §9.2).
 func GenerateOwnerKeys() (signPrivate *ecdsa.PrivateKey, signPublicSEC1 []byte, hpkePrivate []byte, hpkePublic []byte, err error) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), nil)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("crypto: p256 keygen failed: %w", err)
 	}
