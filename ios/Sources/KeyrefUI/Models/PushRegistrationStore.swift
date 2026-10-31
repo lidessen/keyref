@@ -99,6 +99,9 @@ public final class PushRegistrationStore {
     /// （requesting）与已上传（uploaded）不重复；denied / failed / idle
     /// （重新）走注册流程。欢迎页（未配对）永远不会走到弹权限这一步。
     public func unlockDidComplete(paired: Bool) async {
+        #if DEBUG
+        if KeyrefUITestHooks.skipPushRegistration { return }
+        #endif
         guard paired else {
             state = .idle   // 未配对：不注册
             return

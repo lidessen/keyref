@@ -124,6 +124,15 @@ struct KeyrefApp: App {
     }
 
     init() {
+        #if DEBUG
+        Self.applyDebugResetIfRequested()
+        KeyrefUITestHooks.assumePrerequisitesSatisfied =
+            ProcessInfo.processInfo.arguments.contains("-keyref-assume-prerequisites")
+        KeyrefUITestHooks.skipPushRegistration =
+            ProcessInfo.processInfo.arguments.contains("-keyref-skip-push")
+        KeyrefUITestHooks.forceNoCamera =
+            ProcessInfo.processInfo.arguments.contains("-keyref-force-no-camera")
+        #endif
         // §6.6：仅本机条目的 secret 密文落 SQLite（Application Support 下，
         // 内容全部是密文）；打不开时退回内存实现（本次运行内有效，见
         // LocalSecretStore.swift 的降级说明）——绝不阻塞启动。降级必须
@@ -140,25 +149,51 @@ struct KeyrefApp: App {
                    String(describing: error))
             localSecrets = InMemoryLocalSecretStore()
         }
+        var origin = URL(string: "https://sync.keyref.app")!
+        #if DEBUG
+        // UI-test / local-development override (release builds ignore it):
+        // `-keyref-origin http://127.0.0.1:<port>` points the app at a
+        // local self-hosted server. ATS allows loopback cleartext.
+        if let override = Self.debugOriginOverride() { origin = override }
+        #endif
         let backend = LiveBackend(
             keyStore: KeychainKeyStore(service: "app.keyref.ios"),
             stateStore: UIStateStore(),
-            origin: URL(string: "https://sync.keyref.app")!,
+            origin: origin,
             localSecrets: localSecrets,
             // §6.7：iCloud 整文件副本（CloudKit；无 iCloud 账号时按设计
             // 降级为「副本不可用」，本地功能不受影响）。
             snapshotStore: CloudKitSnapshotStore(),
             // §8.4 到期预警通知（7 天 / 1 天前）。
             notifications: LiveNotificationScheduler())
-        _app = State(initialValue: AppModel(
+        var authenticator: any BiometricAuthenticator = LiveBiometricAuthenticator()
+        #if DEBUG
+        // UI-test hook: the simulator has no enrolled Face ID, so pairing /
+        // revocation / unlock would block on the system dialog. Compiled out
+        // of release builds.
+        if ProcessInfo.processInfo.arguments.contains("-keyref-auto-auth") {
+            authenticator = UITestAuthenticator()
+        }
+        #endif
+        let model = AppModel(
             backend: backend,
-            authenticator: LiveBiometricAuthenticator(),
+            authenticator: authenticator,
             haptics: LiveHaptics(),
             clipboard: LiveClipboard(),
             systemOpener: LiveSystemOpener(),
             pushDriver: LivePushRegistrationDriver(),
-            pushEnv: Self.pushEnv))
-        AppDelegate.wire(model: app)
+            pushEnv: Self.pushEnv)
+        #if DEBUG
+        // UI-test hook: start on a given tab (the floating glass tab bar
+        // does not accept XCUITest taps in the simulator).
+        let args = ProcessInfo.processInfo.arguments
+        if let idx = args.firstIndex(of: "-keyref-initial-tab"), idx + 1 < args.count,
+           let tab = Int(args[idx + 1]), (0...3).contains(tab) {
+            model.selectedTab = tab
+        }
+        #endif
+        _app = State(initialValue: model)
+        AppDelegate.wire(model: model)
     }
 
     var body: some Scene {
@@ -167,4 +202,37 @@ struct KeyrefApp: App {
                 .tint(.orange)
         }
     }
+
+    #if DEBUG
+    /// UI-test hooks, compiled out of release builds.
+    /// `-keyref-reset` clears every Keychain slot, the app's UserDefaults
+    /// and the local secret database so a test starts at the welcome
+    /// screen. `-keyref-origin <url>` points the app at a local server.
+    private static func applyDebugResetIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-keyref-reset") else { return }
+        try? KeychainKeyStore(service: "app.keyref.ios").removeAll()
+        if let bundle = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundle)
+        }
+        if let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                  in: .userDomainMask).first {
+            try? FileManager.default.removeItem(
+                at: support.appendingPathComponent("Keyref", isDirectory: true))
+        }
+    }
+
+    /// DEBUG-only authenticator for UI automation (no system dialog).
+    private struct UITestAuthenticator: BiometricAuthenticator {
+        func availability() -> BiometryAvailability { .available }
+        func authenticate(reason: String) async -> Result<Void, BiometricError> { .success(()) }
+    }
+
+    private static func debugOriginOverride() -> URL? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let idx = args.firstIndex(of: "-keyref-origin"), idx + 1 < args.count,
+              let url = URL(string: args[idx + 1]),
+              url.scheme == "http" || url.scheme == "https" else { return nil }
+        return url
+    }
+    #endif
 }

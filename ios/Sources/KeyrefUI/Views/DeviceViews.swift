@@ -63,6 +63,13 @@ struct DeviceListView: View {
             .fullScreenCover(isPresented: $showPairing) {
                 PairingFlowView(app: app)
             }
+            // 配对完成回到列表时必须刷新：新 CLI 只有在签名目录落库后
+            // 才可见（loadDevices 读目录），不刷新会显示陈旧的空列表。
+            .onChange(of: showPairing) { _, shown in
+                if !shown {
+                    Task { await devices.refresh() }
+                }
+            }
             .fullScreenCover(isPresented: $showSecondDevice) {
                 NavigationStack {
                     SecondDeviceFlowView(app: app, role: .oldPhone)
@@ -333,6 +340,19 @@ struct ScanPairingView: View {
 
     @ViewBuilder
     var cameraLayer: some View {
+        #if DEBUG && targetEnvironment(simulator)
+        if KeyrefUITestHooks.forceNoCamera {
+            NoCameraView(app: app, model: model)
+        } else {
+            scannerLayer
+        }
+        #else
+        scannerLayer
+        #endif
+    }
+
+    @ViewBuilder
+    var scannerLayer: some View {
         if let scanner {
             switch scanner.state {
             case .running, .idle:

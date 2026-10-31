@@ -275,6 +275,10 @@ struct RecoveryCodeDisplay: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("恢复码，共 \(groups.count) 组")
+        // The full code in one value lets VoiceOver read it without
+        // horizontal scrolling and gives UI tests a deterministic source
+        // (the lazy horizontal stack only materializes visible groups).
+        .accessibilityValue(groups.joined(separator: " "))
     }
 }
 

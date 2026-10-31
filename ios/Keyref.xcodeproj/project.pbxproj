@@ -34,7 +34,8 @@
 		D51100000000000000000025 /* SecondDeviceFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000025 /* SecondDeviceFlowTests.swift */; };
 		D51100000000000000000026 /* PushTokenAPITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000026 /* PushTokenAPITests.swift */; };
 		D51100000000000000000027 /* PushFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D51200000000000000000027 /* PushFlowTests.swift */; };
-/* End PBXBuildFile section */
+/* End PBXBuildFile section */		D52F00000000000000000001 /* KeyrefFlowUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D52F00000000000000000002 /* KeyrefFlowUITests.swift */; };
+
 
 /* Begin PBXContainerItemProxy section */
 		D50D00000000000000000001 /* PBXContainerItemProxy */ = {
@@ -51,11 +52,19 @@
 			remoteGlobalIDString = D50600000000000000000001;
 			remoteInfo = Keyref;
 		};
-/* End PBXContainerItemProxy section */
+/* End PBXContainerItemProxy section */		D50D00000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D50900000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D50600000000000000000001;
+			remoteInfo = Keyref;
+		};
+
 
 /* Begin PBXFileReference section */
 		D50200000000000000000001 /* KeyrefApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyrefApp.swift; sourceTree = "<group>"; };
 		D50200000000000000000002 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		D50200000000000000000008 /* Info-Debug.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Info-Debug.plist"; sourceTree = "<group>"; };
 		D50200000000000000000003 /* keyref.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = keyref.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D50200000000000000000004 /* KeyrefCoreTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KeyrefCoreTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D50200000000000000000005 /* KeyrefUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KeyrefUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -80,7 +89,9 @@
 		D51200000000000000000026 /* PushTokenAPITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushTokenAPITests.swift; sourceTree = "<group>"; };
 		D51200000000000000000027 /* PushFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushFlowTests.swift; sourceTree = "<group>"; };
 		D50200000000000000000006 /* Keyref.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Keyref.entitlements; sourceTree = "<group>"; };
-/* End PBXFileReference section */
+/* End PBXFileReference section */		D50200000000000000000007 /* KeyrefUIAutomationTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KeyrefUIAutomationTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D52F00000000000000000002 /* KeyrefFlowUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyrefFlowUITests.swift; sourceTree = "<group>"; };
+
 
 /* Begin PBXFrameworksBuildPhase section */
 		D50300000000000000000001 /* Frameworks */ = {
@@ -109,7 +120,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXFrameworksBuildPhase section */
+/* End PBXFrameworksBuildPhase section */		D50300000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 
 /* Begin PBXGroup section */
 		D50500000000000000000000 /* ios */ = {
@@ -127,6 +145,7 @@
 				D50200000000000000000001 /* KeyrefApp.swift */,
 				D50200000000000000000006 /* Keyref.entitlements */,
 				D50200000000000000000002 /* Info.plist */,
+				D50200000000000000000008 /* Info-Debug.plist */,
 			);
 			path = Keyref;
 			sourceTree = "<group>";
@@ -137,6 +156,7 @@
 				D50500000000000000000002 /* KeyrefCoreTests */,
 				D50500000000000000000004 /* KeyrefUITests */,
 				D50500000000000000000005 /* XcodeHostShims */,
+				D50500000000000000000008 /* KeyrefUIAutomationTests */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -188,11 +208,20 @@
 				D50200000000000000000003 /* keyref.app */,
 				D50200000000000000000004 /* KeyrefCoreTests.xctest */,
 				D50200000000000000000005 /* KeyrefUITests.xctest */,
+				D50200000000000000000007 /* KeyrefUIAutomationTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
-/* End PBXGroup section */
+/* End PBXGroup section */		D50500000000000000000008 /* KeyrefUIAutomationTests */ = {
+			isa = PBXGroup;
+			children = (
+				D52F00000000000000000002 /* KeyrefFlowUITests.swift */,
+			);
+			path = KeyrefUIAutomationTests;
+			sourceTree = "<group>";
+		};
+
 
 /* Begin PBXNativeTarget section */
 		D50600000000000000000001 /* Keyref */ = {
@@ -258,7 +287,24 @@
 			productReference = D50200000000000000000005 /* KeyrefUITests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-/* End PBXNativeTarget section */
+/* End PBXNativeTarget section */		D50600000000000000000004 /* KeyrefUIAutomationTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D50700000000000000000005 /* Build configuration list for PBXNativeTarget "KeyrefUIAutomationTests" */;
+			buildPhases = (
+				D50F00000000000000000006 /* Sources */,
+				D50300000000000000000004 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D50E00000000000000000003 /* PBXTargetDependency */,
+			);
+			name = KeyrefUIAutomationTests;
+			productName = KeyrefUIAutomationTests;
+			productReference = D50200000000000000000007 /* KeyrefUIAutomationTests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+
 
 /* Begin PBXProject section */
 		D50900000000000000000001 /* Project object */ = {
@@ -276,6 +322,10 @@
 						TestTargetID = D50600000000000000000001;
 					};
 					D50600000000000000000003 = {
+						CreatedOnToolsVersion = 27.1;
+						TestTargetID = D50600000000000000000001;
+					};
+					D50600000000000000000004 = {
 						CreatedOnToolsVersion = 27.1;
 						TestTargetID = D50600000000000000000001;
 					};
@@ -302,6 +352,7 @@
 				D50600000000000000000001 /* Keyref */,
 				D50600000000000000000002 /* KeyrefCoreTests */,
 				D50600000000000000000003 /* KeyrefUITests */,
+				D50600000000000000000004 /* KeyrefUIAutomationTests */,
 			);
 		};
 /* End PBXProject section */
@@ -367,7 +418,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-/* End PBXSourcesBuildPhase section */
+/* End PBXSourcesBuildPhase section */		D50F00000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D52F00000000000000000001 /* KeyrefFlowUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
 
 /* Begin PBXTargetDependency section */
 		D50E00000000000000000001 /* PBXTargetDependency */ = {
@@ -380,7 +439,12 @@
 			target = D50600000000000000000001 /* Keyref */;
 			targetProxy = D50D00000000000000000002 /* PBXContainerItemProxy */;
 		};
-/* End PBXTargetDependency section */
+/* End PBXTargetDependency section */		D50E00000000000000000003 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D50600000000000000000001 /* Keyref */;
+			targetProxy = D50D00000000000000000003 /* PBXContainerItemProxy */;
+		};
+
 
 /* Begin XCBuildConfiguration section */
 		D50B00000000000000000001 /* Debug */ = {
@@ -450,7 +514,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = Keyref/Info.plist;
+				INFOPLIST_FILE = Keyref/Info-Debug.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -564,7 +628,39 @@
 			};
 			name = Release;
 		};
-/* End XCBuildConfiguration section */
+/* End XCBuildConfiguration section */		D50B00000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Keyref;
+			};
+			name = Debug;
+		};
+		D50B0000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyref.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Keyref;
+			};
+			name = Release;
+		};
+
 
 /* Begin XCConfigurationList section */
 		D50700000000000000000001 /* Build configuration list for PBXProject "Keyref" */ = {
@@ -603,7 +699,16 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-/* End XCConfigurationList section */
+/* End XCConfigurationList section */		D50700000000000000000005 /* Build configuration list for PBXNativeTarget "KeyrefUIAutomationTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D50B00000000000000000009 /* Debug */,
+				D50B0000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+
 
 /* Begin XCLocalSwiftPackageReference section */
 		D50A00000000000000000001 /* XCLocalSwiftPackageReference "Package.swift" */ = {

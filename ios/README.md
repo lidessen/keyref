@@ -26,4 +26,24 @@ ios/
 
 构建：`scripts/dev/xcodebuild.sh -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`。脚本把 `DEVELOPER_DIR` 指到 `/Applications/Xcode.app/Contents/Developer`——xcode-select 指向 CommandLineTools 的机器上直接跑 `xcodebuild` 会报 "tool 'xcodebuild' requires Xcode"；已把 xcode-select 切到完整 Xcode 的机器可以直接用 `xcodebuild` 本体。
 
+### 模拟器 UI 端到端（可选）
+
+```sh
+scripts/dev/ui-test.sh
+```
+
+起一个真实的 `keyref-server`（`KEYREF_ENFORCE_QUOTAS=1`，建库走 PoW），然后在 iPhone 17
+模拟器里驱动真实 App：创建保险库（含恢复码回填）→ 添加条目 → 冷启动解锁 → 通过模拟器的
+粘贴入口配对 CLI（测试进程扮演 CLI，并校验 pair/status 与授权）。需要本机 `go`；只在 macOS
+上运行。
+
+- 单元/流程测试仍走默认 scheme（`KeyrefCoreTests` + `KeyrefUITests`）；UI 自动化在独立的
+  `KeyrefUIAutomation` scheme，不会拖慢默认门禁。
+- DEBUG 构建用 `Info-Debug.plist` 放行 `127.0.0.1` 的明文回环（`NSAllowsLocalNetworking`），
+  Release 继续用 `Info.plist`，不放开 ATS。UI 测试的启动参数（`-keyref-reset`、
+  `-keyref-origin`、`-keyref-assume-prerequisites`、`-keyref-skip-push`、
+  `-keyref-auto-auth`、`-keyref-initial-tab`）都编译在 `#if DEBUG` 里，Release 构建忽略。
+- 模拟器的相机不可用，配对走 `NoCameraView` 的粘贴入口；iOS 26/27 的浮动玻璃 Tab 栏在
+  XCUITest 下不接受点击，测试用 `-keyref-initial-tab` 冷启动到目标 Tab。
+
 界面规格见 [docs/ios-ui.md](../docs/ios-ui.md)。已实现：四 Tab、创建/恢复/接管/配对/撤销/审计/设置、审批收件箱（前台轮询 + Face ID 批准）、allowCommands/allowedHosts 精细编辑、第二台 iPhone 在线配对。推送（APNs）与 Plus 内购需要 Apple 开发者凭据，另行接入。

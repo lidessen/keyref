@@ -263,6 +263,17 @@ public final class LiveBackend: AppBackend {
     // MARK: - creation (§2.2, §9.3)
 
     public func checkPrerequisites() -> [Prerequisite] {
+        #if DEBUG
+        // UI-test hook (see KeyrefUITestHooks): simulators have no
+        // passcode/biometry enrolled, which would block the creation UI
+        // before any crypto runs. Never compiled into release builds.
+        if KeyrefUITestHooks.assumePrerequisitesSatisfied {
+            return [
+                Prerequisite(id: "passcode", title: "设备密码已设置", satisfied: true),
+                Prerequisite(id: "biometry", title: "Face ID 已录入", satisfied: true),
+            ]
+        }
+        #endif
         let ctx = LAContext()
         var err: NSError?
         if ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err) {
