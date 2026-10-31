@@ -43,6 +43,10 @@ public enum KeyStoreSlot: String, CaseIterable, Sendable, Codable {
     /// reuses this VMK instead of generating a fresh one). Removed when the
     /// rotation completes.
     case pendingVMKWrap
+    /// The sync server origin (absolute URL string, §2.15). Not secret;
+    /// persisted so a restart keeps pointing at the user's chosen server
+    /// instead of silently falling back to the compiled-in default.
+    case serverOrigin
 }
 
 /// Access policy for stored items, mapped onto Keychain accessibility

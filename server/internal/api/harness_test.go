@@ -9,6 +9,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -152,6 +153,17 @@ func randBytes(t *testing.T, n int) []byte {
 	return b
 }
 
+// powChallengeRaw decodes the base64 challenge of a 401 pow_required
+// body into the raw 32 bytes the wire Blob carries (protocol §10.1).
+func powChallengeRaw(t *testing.T, challengeB64 string) []byte {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(challengeB64)
+	if err != nil || len(raw) != 32 {
+		t.Fatalf("bad pow challenge %q", challengeB64)
+	}
+	return raw
+}
+
 // recoveryKeys derives the recovery authority exactly as protocol §3.8
 // defines it (stdlib HKDF; no circl dependency needed in tests).
 func recoveryKeys(t *testing.T, seed []byte) (ed25519.PrivateKey, []byte) {
@@ -264,7 +276,7 @@ func (e *testEnv) createVaultStatus(t *testing.T) (*testOwner, int, []byte) {
 		}
 		vaultRaw, _ := hex.DecodeString(o.vaultID)
 		req.PoW = &wire.PoWSolution{
-			Challenge: []byte(first.Challenge),
+			Challenge: powChallengeRaw(t, first.Challenge),
 			Nonce:     pow.Solve(first.Challenge, vaultRaw),
 		}
 	}

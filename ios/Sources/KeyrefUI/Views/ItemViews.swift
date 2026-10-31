@@ -199,6 +199,14 @@ struct ItemDetailView: View {
     @State private var confirmDelete = false
 
     var body: some View {
+        // 明文展示状态随锁定清除（§9.5）：锁定后视图重建，解锁后的
+        // eye 按钮必须再走一次 Face ID，不能直接重放旧明文。
+        content
+            .id(app.phase)
+    }
+
+    @ViewBuilder
+    private var content: some View {
         List {
             Section {
                 InfoRow(label: "ref", value: row.ref, mono: true)

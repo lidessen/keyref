@@ -37,12 +37,24 @@ type mcpRequest struct {
 }
 
 // mcpResponse is one message back to the client. Exactly one of result
-// and error is set.
+// and error is set. JSONRPC is filled by reply() — every response MUST
+// carry "jsonrpc":"2.0" (JSON-RPC 2.0 §6.1; strict MCP clients reject
+// messages without it).
 type mcpResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
 	Result  any             `json:"result,omitempty"`
 	Error   *mcpError       `json:"error,omitempty"`
+}
+
+// reply builds a successful response for the given request id.
+func reply(id json.RawMessage, result any) *mcpResponse {
+	return &mcpResponse{JSONRPC: "2.0", ID: id, Result: result}
+}
+
+// replyError builds an error response for the given request id.
+func replyError(id json.RawMessage, rpcErr *mcpError) *mcpResponse {
+	return &mcpResponse{JSONRPC: "2.0", ID: id, Error: rpcErr}
 }
 
 // mcpError is a JSON-RPC error object.
@@ -137,10 +149,10 @@ func serveMCP(in io.Reader, out io.Writer) {
 func (s *mcpServer) handle(line []byte) *mcpResponse {
 	var req mcpRequest
 	if err := json.Unmarshal(line, &req); err != nil {
-		return &mcpResponse{ID: json.RawMessage("null"), Error: &mcpError{Code: errParse, Message: "parse error"}}
+		return replyError(json.RawMessage("null"), &mcpError{Code: errParse, Message: "parse error"})
 	}
 	if req.JSONRPC != "2.0" || req.Method == "" {
-		return &mcpResponse{ID: req.ID, Error: &mcpError{Code: errInvalidReq, Message: "invalid request"}}
+		return replyError(req.ID, &mcpError{Code: errInvalidReq, Message: "invalid request"})
 	}
 	if len(req.ID) == 0 {
 		// Notification (e.g. notifications/initialized): acknowledge by
@@ -149,9 +161,9 @@ func (s *mcpServer) handle(line []byte) *mcpResponse {
 	}
 	result, rpcErr := s.dispatch(req.Method, req.Params)
 	if rpcErr != nil {
-		return &mcpResponse{ID: req.ID, Error: rpcErr}
+		return replyError(req.ID, rpcErr)
 	}
-	return &mcpResponse{ID: req.ID, Result: result}
+	return reply(req.ID, result)
 }
 
 // dispatch routes one method. Tool-level failures never reach here as

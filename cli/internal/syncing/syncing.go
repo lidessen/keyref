@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lidessen/keyref/proto/wire"
@@ -100,7 +101,9 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 		}
 		if it.Tombstone {
 			// Tombstone: drop the row, its grants and any local wraps
-			// (design.md §6.3, §6.5).
+			// (design.md §6.3, §6.5). The revision floor survives in the
+			// store, so a later replay of a lower-revision row (or of a
+			// second tombstone at a lower revision) is rejected.
 			if err := st.DeleteItem(it.ItemID); err != nil {
 				return 0, 0, err
 			}
@@ -108,6 +111,14 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 		}
 		if old, ok, _ := st.GetItem(it.ItemID); ok && old.Revision >= it.Revision {
 			// Reject revisions smaller than what has already been seen (design §6.2)
+			return 0, 0, nil
+		}
+		// Tombstone-rollback replay guard: after a tombstone the row is
+		// gone, so the live-row check above misses; the per-item floor
+		// survives deletion and rejects anything not strictly newer.
+		// A replayed stale row is dropped silently (same semantics as an
+		// expired grant, §8.4).
+		if floor, ok, _ := st.ItemRevisionFloor(vaultID, it.ItemID); ok && it.Revision <= floor {
 			return 0, 0, nil
 		}
 		if err := st.PutItem(&it); err != nil {
@@ -121,7 +132,17 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 			return 0, 0, fmt.Errorf("sync: grant decode: %w", err)
 		}
 		if g.Deleted || (len(g.HPKEEnc) == 0 && len(g.WrappedKey) == 0) {
-			// Grant revoked (pointing at ourselves) or item deletion cascade: clear local wrap
+			// Grant revoked (pointing at ourselves) or item deletion cascade: clear local wrap.
+			// The revision floor survives (PutGrant on the deletion form raises it), so a
+			// replayed live row at or below the deletion revision cannot resurrect the grant.
+			if err := st.PutGrant(&g); err != nil {
+				// The deletion form must never be rejected by the floor
+				// (floor <= this revision is fine — we only refuse to
+				// move backwards). Surface real storage errors.
+				if !strings.Contains(err.Error(), "not above floor") {
+					return 0, 0, err
+				}
+			}
 			if err := st.DeleteGrant(g.ItemID, g.Kind); err != nil {
 				return 0, 0, err
 			}
@@ -133,6 +154,13 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 		}
 		if err := g.VerifyOwnerSignature(vaultID, ownerPub); err != nil {
 			return 0, 0, fmt.Errorf("%w: grant %s", ErrTampered, g.ItemID)
+		}
+		// Anti-resurrection replay guard: a correctly signed but stale
+		// live row (revision at or below the deletion watermark) is
+		// dropped silently, matching the semantics of an already-expired
+		// grant (design.md §8.4: 撤销的送达不依赖行删除).
+		if floor, ok, _ := st.GrantRevisionFloor(vaultID, g.ItemID, g.Kind); ok && g.Revision <= floor {
+			return 0, 0, nil
 		}
 		if err := st.PutGrant(&g); err != nil {
 			return 0, 0, err
@@ -146,6 +174,14 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 		}
 		if err := wire.VerifyOwnerSignature(d.Signed, d.Signature, ownerPub); err != nil {
 			return 0, 0, fmt.Errorf("%w: directory", ErrTampered)
+		}
+		// Revision monotonicity: a correctly signed but stale directory
+		// (e.g. replayed by a malicious server to hide a revocation) is
+		// dropped; only strictly newer revisions are applied.
+		if prev, ok, _ := st.GetKV(pair.KVDirectoryRev); ok {
+			if prevRev, perr := strconv.ParseUint(string(prev), 10, 64); perr == nil && d.DirectoryRevision <= prevRev {
+				return 0, 0, nil
+			}
 		}
 		if err := st.SetKV(pair.KVDirectorySigned, d.Signed); err != nil {
 			return 0, 0, err

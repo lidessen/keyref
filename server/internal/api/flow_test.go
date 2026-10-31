@@ -424,11 +424,20 @@ func TestHealthz(t *testing.T) {
 		TLS        struct {
 			Mode string `json:"mode"`
 		} `json:"tls"`
+		Reasons []string `json:"reasons"`
 	}
 	if err := json.Unmarshal(raw, &h); err != nil {
 		t.Fatal(err)
 	}
-	if h.Status != "ok" || !h.DBWritable || h.Version != "test" || h.TLS.Mode != "plain" {
+	// The disk ≥ 50% degraded reason is environment-dependent (the test
+	// volume may legitimately be past the watermark); every other reason
+	// is a regression.
+	for _, r := range h.Reasons {
+		if r != "disk_usage" {
+			t.Fatalf("unexpected healthz reason %q: %s", r, raw)
+		}
+	}
+	if !h.DBWritable || h.Version != "test" || h.TLS.Mode != "plain" {
 		t.Fatalf("healthz payload: %s", raw)
 	}
 }

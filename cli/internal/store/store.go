@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO-free (protocol §2.3)
 
@@ -111,10 +112,14 @@ func (s *Store) Path() string { return s.path }
 
 // PutItem upserts an item row. Caller-checked revision monotonicity: the
 // sync layer refuses to apply rows older than what it has seen
-// (design.md §6.2).
+// (design.md §6.2). The per-item floor is raised here so it survives
+// later tombstone deletion.
 func (s *Store) PutItem(it *wire.ItemData) error {
 	if err := it.Validate(); err != nil {
 		return err
+	}
+	if floor, ok, _ := s.ItemRevisionFloor(it.VaultID, it.ItemID); ok && it.Revision <= floor {
+		return fmt.Errorf("store: put item: revision %d not above floor %d", it.Revision, floor)
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO items (item_id, revision, tombstone, meta_ciphertext, secret_ciphertext, writer_device_id, signature, updated_at)
@@ -132,6 +137,11 @@ func (s *Store) PutItem(it *wire.ItemData) error {
 		it.Signature, it.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: put item: %w", err)
+	}
+	if floor, ok, _ := s.ItemRevisionFloor(it.VaultID, it.ItemID); !ok || it.Revision > floor {
+		if err := s.setItemRevisionFloor(it.VaultID, it.ItemID, it.Revision); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -175,6 +185,9 @@ func (s *Store) ItemIDs() ([]string, error) {
 
 // DeleteItem removes an item row and its grants — the local effect of a
 // tombstone change (design.md §6.3: item tombstone deletes all grants).
+// The revision stays behind as a per-item high-water mark (see
+// ItemRevisionFloor), so a malicious server cannot roll an item back by
+// replaying a tombstone followed by a lower-revision row.
 func (s *Store) DeleteItem(itemID string) error {
 	if _, err := s.db.Exec(`DELETE FROM items WHERE item_id = ?`, itemID); err != nil {
 		return fmt.Errorf("store: delete item: %w", err)
@@ -185,11 +198,37 @@ func (s *Store) DeleteItem(itemID string) error {
 	return nil
 }
 
+// ItemRevisionFloor returns the highest revision ever seen for itemID,
+// surviving tombstone deletion. ok is false for never-seen items.
+// Floors are keyed per vault id: re-pairing into a new vault must not
+// inherit the old vault's floors (item ids can repeat across vaults).
+func (s *Store) ItemRevisionFloor(vaultID, itemID string) (floor uint64, ok bool, err error) {
+	var v []byte
+	v, found, err := s.GetKV("item-floor:" + vaultID + ":" + itemID)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	floor, err = strconv.ParseUint(string(v), 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("store: item floor: %w", err)
+	}
+	return floor, true, nil
+}
+
+// setItemRevisionFloor records the highest revision seen for itemID.
+func (s *Store) setItemRevisionFloor(vaultID, itemID string, revision uint64) error {
+	return s.SetKV("item-floor:"+vaultID+":"+itemID, []byte(strconv.FormatUint(revision, 10)))
+}
+
 // PutGrant upserts a grant row for this device (the cache is
 // single-device, so device_id is stored for transcript rebuilds only).
+// Revision monotonicity is caller-checked (see GrantRevisionFloor).
 func (s *Store) PutGrant(g *wire.GrantData) error {
 	if err := g.Validate(); err != nil {
 		return err
+	}
+	if floor, ok, _ := s.GrantRevisionFloor(s.grantVaultNS(), g.ItemID, g.Kind); ok && g.Revision < floor {
+		return fmt.Errorf("store: put grant: revision %d not above floor %d", g.Revision, floor)
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO grants (item_id, kind, device_id, hpke_enc, wrapped_key, expires_at, revision, signature)
@@ -205,7 +244,43 @@ func (s *Store) PutGrant(g *wire.GrantData) error {
 	if err != nil {
 		return fmt.Errorf("store: put grant: %w", err)
 	}
+	if floor, ok, _ := s.GrantRevisionFloor(s.grantVaultNS(), g.ItemID, g.Kind); !ok || g.Revision > floor {
+		if err := s.setGrantRevisionFloor(s.grantVaultNS(), g.ItemID, g.Kind, g.Revision); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// grantVaultNS resolves the floor namespace: the vault id stashed in kv
+// by the pairing flow (the literal kv key used by the session package).
+// Grants belong to exactly one vault at a time (re-pairing clears the
+// rows); floors must follow that vault.
+func (s *Store) grantVaultNS() string {
+	v, _, _ := s.GetKV("vault_id")
+	return string(v)
+}
+
+// GrantRevisionFloor returns the highest revision ever seen for
+// (vaultID, itemID, kind), surviving deletion. ok is false for
+// never-seen grants. The floor is what stops a malicious server from
+// resurrecting a revoked grant by replaying a lower-revision, correctly
+// signed row. Floors are keyed per vault id (see ItemRevisionFloor).
+func (s *Store) GrantRevisionFloor(vaultID, itemID, kind string) (floor uint64, ok bool, err error) {
+	var v []byte
+	v, found, err := s.GetKV("grant-floor:" + vaultID + ":" + itemID + ":" + kind)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	floor, err = strconv.ParseUint(string(v), 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("store: grant floor: %w", err)
+	}
+	return floor, true, nil
+}
+
+func (s *Store) setGrantRevisionFloor(vaultID, itemID, kind string, revision uint64) error {
+	return s.SetKV("grant-floor:"+vaultID+":"+itemID+":"+kind, []byte(strconv.FormatUint(revision, 10)))
 }
 
 // DeleteGrant removes a grant row — the local effect of a grant deletion

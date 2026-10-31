@@ -273,6 +273,128 @@ func TestSyncTombstoneAndGrantDeletionClearCache(t *testing.T) {
 	}
 }
 
+// TestSyncRejectsTombstoneRollback pins the revision-floor replay guard
+// (design §6.2): after a tombstone, a malicious server replaying the
+// older live row must not resurrect the old (possibly rolled-back)
+// secret. The stale row is dropped silently.
+func TestSyncRejectsTombstoneRollback(t *testing.T) {
+	owner := testowner.New(t, tvVault, tvOwner)
+	st := newStore(t, owner)
+
+	item := owner.SealItem(tvItem, tvOwner, "openai-prod", "n", "***", "v")
+	ss := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "item:"+tvItem, item.Data)})
+	if _, err := Run(st, client.New(ss.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tombstone at revision 2 deletes the row.
+	ss2 := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "item:"+tvItem,
+		wire.ItemData{VaultID: tvVault, ItemID: tvItem, Revision: 2, Tombstone: true, WriterDeviceID: tvOwner})})
+	if _, err := Run(st, client.New(ss2.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.GetItem(tvItem); ok {
+		t.Fatal("tombstone did not delete item")
+	}
+
+	// Replay of the stale revision-1 row must be rejected, not applied.
+	ss3 := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "item:"+tvItem, item.Data)})
+	if _, err := Run(st, client.New(ss3.URL, tokn()), tvDevice); err != nil {
+		t.Fatalf("stale replay must be dropped silently, got error: %v", err)
+	}
+	if _, ok, _ := st.GetItem(tvItem); ok {
+		t.Fatal("tombstone rollback resurrected the item")
+	}
+}
+
+// TestSyncRejectsGrantResurrection pins the grant replay guard
+// (design §8.4): after a revocation, a replayed lower-revision,
+// correctly signed live grant must not resurrect the grant.
+func TestSyncRejectsGrantResurrection(t *testing.T) {
+	owner := testowner.New(t, tvVault, tvOwner)
+	id := newIdentity(t)
+	st := newStore(t, owner)
+
+	item := owner.SealItem(tvItem, tvOwner, "openai-prod", "n", "***", "v")
+	view := owner.WrapGrant(id.HPKEPublic, tvDevice, tvItem, wire.GrantKindView, 1, 0, item.MetaKey)
+	ss := newSyncServer(t, []wire.SyncChange{
+		change(wire.EntityItem, "item:"+tvItem, item.Data),
+		change(wire.EntityGrant, "g", view),
+	})
+	if _, err := Run(st, client.New(ss.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+
+	// Revoke the grant (deletion form, revision 2).
+	del := wire.GrantData{DeviceID: tvDevice, ItemID: tvItem, Kind: wire.GrantKindView,
+		Deleted: true, Revision: 2}
+	ss2 := newSyncServer(t, []wire.SyncChange{change(wire.EntityGrant, "g", del)})
+	if _, err := Run(st, client.New(ss2.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+	if grants, _ := st.Grants(); len(grants) != 0 {
+		t.Fatal("deletion did not clear grant")
+	}
+
+	// Replay the correctly signed revision-1 live grant: must be dropped.
+	ss3 := newSyncServer(t, []wire.SyncChange{change(wire.EntityGrant, "g", view)})
+	if _, err := Run(st, client.New(ss3.URL, tokn()), tvDevice); err != nil {
+		t.Fatalf("stale grant replay must be dropped silently, got error: %v", err)
+	}
+	if grants, _ := st.Grants(); len(grants) != 0 {
+		t.Fatal("revoked grant was resurrected by replay")
+	}
+}
+
+// TestSyncRejectsStaleDirectory pins directory revision monotonicity:
+// a correctly signed but older directory must not overwrite a newer one
+// (a malicious server could otherwise replay a pre-revocation directory
+// and suppress revocation delivery).
+func TestSyncRejectsStaleDirectory(t *testing.T) {
+	owner := testowner.New(t, tvVault, tvOwner)
+	id := newIdentity(t)
+	st := newStore(t, owner)
+
+	buildDir := func(rev uint64) wire.DirectoryData {
+		digest, err := wire.GrantsDigest(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signed, err := wire.BuildDirectoryTranscript(wire.DirectoryTranscript{
+			VaultID: tvVault, DirectoryRevision: rev,
+			Devices: []wire.DirectoryDevice{{
+				DeviceID: tvDevice, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
+				HPKEKEM: wire.KEMX25519, HPKEPublicKey: id.HPKEPublic,
+				SignAlg: wire.SignAlgEd25519, SignPublicKey: id.SignPublic,
+				GrantsDigest: digest,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wire.DirectoryData{DirectoryRevision: rev, Signed: signed, Signature: owner.Sign(signed)}
+	}
+
+	ss := newSyncServer(t, []wire.SyncChange{change(wire.EntityDirectory, "d", buildDir(3))})
+	if _, err := Run(st, client.New(ss.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+	storedRev, ok, _ := st.GetKV(pair.KVDirectoryRev)
+	if !ok || string(storedRev) != "3" {
+		t.Fatalf("directory revision 3 not stored: %s", storedRev)
+	}
+
+	// A replayed revision-2 directory must be ignored.
+	ss2 := newSyncServer(t, []wire.SyncChange{change(wire.EntityDirectory, "d", buildDir(2))})
+	if _, err := Run(st, client.New(ss2.URL, tokn()), tvDevice); err != nil {
+		t.Fatalf("stale directory replay must be dropped silently, got error: %v", err)
+	}
+	storedRev, _, _ = st.GetKV(pair.KVDirectoryRev)
+	if string(storedRev) != "3" {
+		t.Fatalf("stale directory overwrote revision: %s", storedRev)
+	}
+}
+
 func TestSyncDetectsRevocationAndCleansUp(t *testing.T) {
 	owner := testowner.New(t, tvVault, tvOwner)
 	id := newIdentity(t)

@@ -404,6 +404,11 @@ public struct PoWSolution: Codable, Equatable, Sendable {
     public var challenge: Data
     public var nonce: Data  // 8 bytes, u64be
 
+    public init(challenge: Data, nonce: Data) {
+        self.challenge = challenge
+        self.nonce = nonce
+    }
+
     enum CodingKeys: String, CodingKey {
         case challenge
         case nonce

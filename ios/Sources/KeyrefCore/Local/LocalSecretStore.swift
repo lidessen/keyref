@@ -124,7 +124,7 @@ public final class SQLiteLocalSecretStore: LocalSecretStore, @unchecked Sendable
             throw LocalSecretStoreError.sqlite("open failed rc=\(rc)")
         }
         db = handle
-        #if os(iOS) && !targetEnvironment(simulator) || os(iOS)
+        #if os(iOS)
         // Data protection: the file is unreadable while the device is locked
         // (the bytes are inert ciphertext anyway — this is defense in depth).
         try? FileManager.default.setAttributes(

@@ -23,6 +23,9 @@ func mcpRoundTrip(t *testing.T, srv *mcpServer, line string) (mcpResponse, strin
 	if err := json.Unmarshal([]byte(lines[0]), &resp); err != nil {
 		t.Fatalf("decode response %q: %v", lines[0], err)
 	}
+	if resp.JSONRPC != "2.0" {
+		t.Fatalf("response %q missing \"jsonrpc\":\"2.0\" (JSON-RPC 2.0 §6.1)", lines[0])
+	}
 	return resp, out.String()
 }
 

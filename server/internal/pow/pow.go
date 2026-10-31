@@ -54,26 +54,24 @@ func (i *Issuer) Issue() (challenge string, expiresAt int64) {
 	return b64, exp.UnixMilli()
 }
 
-// Verify checks a solution for the given vault id. The nonce is the
-// 8-byte big-endian u64 from the request. Unknown or expired challenges
-// fail; a solved challenge stays valid for retries against the same
-// vault until it expires (§10.1).
-func (i *Issuer) Verify(challengeB64 string, nonce []byte, vaultID []byte) bool {
-	if len(nonce) != 8 || len(vaultID) != 16 {
+// Verify checks a solution for the given vault id. The challenge comes
+// off the wire as a Blob (the raw 32 bytes; the JSON layer base64-decodes
+// it) and the nonce is the 8-byte big-endian u64 from the request.
+// Unknown or expired challenges fail; a solved challenge stays valid for
+// retries against the same vault until it expires (§10.1).
+func (i *Issuer) Verify(challengeRaw, nonce []byte, vaultID []byte) bool {
+	if len(nonce) != 8 || len(vaultID) != 16 || len(challengeRaw) != 32 {
 		return false
 	}
+	challengeB64 := base64.StdEncoding.EncodeToString(challengeRaw)
 	i.mu.Lock()
 	exp, ok := i.challenges[challengeB64]
 	i.mu.Unlock()
 	if !ok || i.now().After(exp) {
 		return false
 	}
-	challenge, err := base64.StdEncoding.DecodeString(challengeB64)
-	if err != nil || len(challenge) != 32 {
-		return false
-	}
 	h := sha256.New()
-	h.Write(challenge)
+	h.Write(challengeRaw)
 	h.Write(vaultID)
 	h.Write(nonce)
 	return leadingZeros(h.Sum(nil)) >= leadingZeroBits

@@ -539,7 +539,7 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
 同意：`{"decision":"approved","one_time_enc":"<b64>","one_time_wrapped_key":"<b64 ct‖tag>"}`。
 包裹 = HPKE(X25519, recipient=请求里的 `ephemeral_public_key`, info=§3.7 一次性模板, AAD 空)；服务器置 `expires_at = now + 60000`。拒绝：`{"decision":"denied"}`。→ `204`。错误：`approval_not_pending`、`bad_signature`（缺 CLI 签名的旧行）。
 
-**载荷两种**（design v0.7 §6.6）：同步条目照旧包 32 字节 item key；**仅本机条目**（`items.secret_ciphertext` 为 NULL，design §6.6）包该条目的 secret **密文字节**（明文的既有 wire 密文，≤64 KiB）。decision 端点正文上限相应为 **96 KiB**（审批请求仍 8 KiB）。CLI 按本地缓存中该条目是否缺 `secret_ciphertext` 区分两种投递。仅本机条目不得拥有 `use` 授权（服务器互斥校验，错误码 `local_item_grant_conflict`）。
+**载荷两种**（design v0.7 §6.6）：同步条目照旧包 32 字节 item key；**仅本机条目**（`items.secret_ciphertext` 为 NULL，design §6.6）包该条目的 secret **值本身**——owner 解开本地包裹后的明文字节（UTF-8 的 value 字符串，≤64 KiB；不是 §3.7 的 secret JSON 包装，也不是密文）。CLI 的 unwrap 结果直接作为注入值。decision 端点正文上限相应为 **96 KiB**（审批请求仍 8 KiB）。CLI 按本地缓存中该条目是否缺 `secret_ciphertext` 区分两种投递。仅本机条目不得拥有 `use` 授权（服务器互斥校验，错误码 `local_item_grant_conflict`）。
 
 ### 6.22 `GET /v1/approvals/:approval_id`（发起 CLI 轮询）
 

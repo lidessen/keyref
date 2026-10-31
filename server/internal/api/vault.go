@@ -42,7 +42,7 @@ func (s *Server) handleCreateVault(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid_field")
 			return
 		}
-		if !s.pow.Verify(string(req.PoW.Challenge), req.PoW.Nonce, vaultRaw) {
+		if !s.pow.Verify(req.PoW.Challenge, req.PoW.Nonce, vaultRaw) {
 			writeError(w, "invalid_field")
 			return
 		}

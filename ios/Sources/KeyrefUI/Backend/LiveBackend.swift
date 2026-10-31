@@ -119,11 +119,28 @@ public final class LiveBackend: AppBackend {
                 notifications: NotificationScheduler = NoNotificationScheduler()) {
         self.keyStore = keyStore
         self.stateStore = stateStore
-        self.origin = origin
         self.urlSession = urlSession
         self.localSecrets = localSecrets
         self.snapshotStore = snapshotStore
         self.notifications = notifications
+        // A previously chosen origin (Settings → 服务器, §2.15) wins over
+        // the compiled-in default — otherwise every restart silently
+        // points back at the default origin.
+        if let stored = try? keyStore.retrieve(.serverOrigin),
+           let text = String(data: stored, encoding: .utf8),
+           let url = URL(string: text), url.scheme == "https" || url.scheme == "http" {
+            self.origin = url
+        } else {
+            self.origin = origin
+        }
+    }
+
+    /// Switches the sync server origin and persists it (§2.15). Callers
+    /// handle the migration ritual; this only records the choice.
+    public func setOrigin(_ url: URL) {
+        guard url.scheme == "https" || url.scheme == "http" else { return }
+        origin = url
+        try? keyStore.store(.serverOrigin, Data(url.absoluteString.utf8))
     }
 
     var api: APIClient {
@@ -162,7 +179,13 @@ public final class LiveBackend: AppBackend {
         }
         if (try? stateStore.cursor()) == 0, let stored = try? keyStore.retrieve(.syncCursor),
            !stored.isEmpty, let text = String(data: stored, encoding: .utf8),
-           let saved = Int64(text), saved > 0 {
+           let saved = Int64(text), saved > 0,
+           // The rows themselves live only in memory (UIStateStore, Phase 1):
+           // restoring a non-zero cursor without a directory would skip the
+           // bootstrap and leave the list empty until the next full re-pull
+           // (§10.6: only cursor=0 bootstraps). When the in-memory state is
+           // cold (no directory), re-bootstrap instead.
+           (try? stateStore.currentDirectory()) != nil {
             try? stateStore.setCursor(saved)
         }
         cachedItemCount = stateStore.allItems().count
@@ -208,6 +231,11 @@ public final class LiveBackend: AppBackend {
             // Re-enrolled biometry invalidated the enclave wrap (§9.5): S4.
             throw LockError.wrapInvalid
         }
+        // Session renewal (§8.2): the token never survives a process
+        // restart, so the first unlock after a cold start re-runs the
+        // two-step challenge — otherwise every server call would 401
+        // until something else happened to mint a token.
+        await renewSessionIfNeeded()
     }
 
     func loadOwnerKeys() -> OwnerKeys? {
@@ -215,6 +243,17 @@ public final class LiveBackend: AppBackend {
             return keys
         }
         return try? OwnerKeys.load(from: keyStore, enclaveBacked: false)
+    }
+
+    /// Test hook: adopts an unlocked state without the biometrics
+    /// roundtrip (LiveBackend's crypto paths are exercised against
+    /// MockURLProtocol in the KeyrefCoreTests suite).
+    func adoptForTesting(vaultID: String, owner: OwnerKeys, vmk: Data, ownDeviceID: String) {
+        self.vaultID = vaultID
+        self.owner = owner
+        self.vmk = vmk
+        self.ownDeviceID = ownDeviceID
+        self.hasVault = true
     }
 
     public func lock() {
@@ -300,10 +339,18 @@ public final class LiveBackend: AppBackend {
     }
 
     public func uploadCreatedVault(_ draft: CreatedVaultDraft) async throws {
-        guard let request = pendingCreation else {
+        guard var request = pendingCreation else {
             throw APIError.transport("no pending creation")
         }
-        _ = try await api.createVault(request)
+        // Hosted servers gate vault creation behind a small proof of work
+        // (protocol §10.1). Solve off the cooperative pool (tens of ms of
+        // CPU) and retry once with the solution.
+        do {
+            _ = try await api.createVault(request)
+        } catch APIError.powRequired(let challenge, _) {
+            request.pow = try await solvePoW(challenge: challenge, vaultID: request.vaultID)
+            _ = try await api.createVault(request)
+        }
         pendingCreation = nil
         if let owner, let deviceID = ownDeviceID {
             if let session = try? await SessionClient(api: api).start(deviceID: deviceID,
@@ -312,6 +359,14 @@ public final class LiveBackend: AppBackend {
             }
         }
         _ = try? await syncNow()
+    }
+
+    /// Runs PoW.solve off the cooperative pool (protocol §10.1).
+    func solvePoW(challenge: Data, vaultID: String) async throws -> PoWSolution {
+        let nonce = try await Task.detached(priority: .userInitiated) {
+            try PoW.solve(challenge: challenge, vaultID: vaultID)
+        }.value
+        return PoWSolution(challenge: challenge, nonce: nonce)
     }
 
     // MARK: - items (§2.4–§2.6)
@@ -725,6 +780,12 @@ public final class LiveBackend: AppBackend {
 
     @discardableResult
     public func syncNow() async throws -> SyncOutcomeInfo {
+        // Session renewal (§8.2): the token lives only in memory (12 h
+        // validity) — after a cold start or expiry every bearer call
+        // would 401. Re-run the two-step challenge when there is no
+        // live token before syncing; failures fall through to the sync
+        // error path so the UI keeps its existing failure surfaces.
+        await renewSessionIfNeeded()
         let engine = SyncEngine(api: api)
         do {
             let outcome = try await engine.run(store: stateStore)
@@ -736,6 +797,17 @@ public final class LiveBackend: AppBackend {
         } catch let e as APIError {
             if case .vaultFrozen = e { frozen = true }
             throw e
+        }
+    }
+
+    /// Re-establishes the bearer session when none is held (§8.2: renewal
+    /// is the same two-step path). No-op when unlocked state is absent or
+    /// a token is already set.
+    func renewSessionIfNeeded() async {
+        guard sessionBox.get() == nil, let owner, let deviceID = ownDeviceID else { return }
+        if let session = try? await SessionClient(api: api).start(deviceID: deviceID,
+                                                                  signer: owner.signer) {
+            sessionBox.set(session.token)
         }
     }
 
@@ -815,6 +887,23 @@ public final class LiveBackend: AppBackend {
         try await PairingClient(api: api).complete(vaultID: vaultID, nonce: offer.nonce,
                                                    device: device, grants: grants,
                                                    ownerSigner: owner.signer)
+        // The device's public keys are trusted exclusively from the
+        // signed directory (design §9.1): after the pair lands, re-sign
+        // the directory with the new CLI appended (revision + 1) and PUT
+        // it — the server upserts the device row from the directory.
+        // Skipping this leaves the CLI invisible to loadDevices, grant
+        // editing, revocation and approval validation.
+        let dirRevision = stateStore.currentDirectory()?.directoryRevision ?? 0
+        let newDevice = KeyrefDirectoryDevice(
+            deviceID: device.deviceID, kind: DeviceKind.cli, status: DeviceStatus.active,
+            hpkeKEM: device.hpkeKEM, hpkePublicKey: device.hpkePublicKey,
+            signAlg: device.signAlg, signPublicKey: device.signPublicKey,
+            renewalSignPublicKey: device.renewalSignPublicKey,
+            grantsDigest: try grantsDigest(grants.map { $0.transcript(vaultID: vaultID) }))
+        var devices = directoryDevices() ?? []
+        devices.append(newDevice)
+        try await publishDirectory(devices, revision: dirRevision + 1,
+                                   owner: owner, vaultID: vaultID)
         scheduleGrantNotices(grants, vaultID: vaultID, vmk: vmk)
         stateStore.setDeviceInfo(UIStateStore.DeviceInfo(label: deviceLabel, createdAt: nowMillis()),
                                   for: device.deviceID)
@@ -853,7 +942,23 @@ public final class LiveBackend: AppBackend {
         }
         try await api.putGrants(PutGrantsRequest.make(grants: rows))
         for g in rows { try? stateStore.upsertGrant(g) }
+        // Keep the signed directory's per-device grants_digest fresh
+        // (§3.3): the CLI compares GET /v1/grants/self against it.
+        try? await refreshDeviceGrantsDigest(deviceID: deviceID, owner: owner, vaultID: vaultID)
         scheduleGrantNotices(rows, vaultID: vaultID, vmk: vmk)
+    }
+
+    /// Re-signs the directory after a device's grant set changed, so the
+    /// per-device grants_digest matches what GET /v1/grants/self returns.
+    /// Best effort: the digest is re-derived from local state; failures
+    /// leave the old digest and are reconciled on the next change.
+    func refreshDeviceGrantsDigest(deviceID: String, owner: OwnerKeys, vaultID: String) async throws {
+        guard var devices = directoryDevices(),
+              let idx = devices.firstIndex(where: { $0.deviceID == deviceID }) else { return }
+        let live = stateStore.allGrants().filter { $0.deviceID == deviceID && !$0.deleted }
+        devices[idx].grantsDigest = try grantsDigest(live.map { $0.transcript(vaultID: vaultID) })
+        let rev = stateStore.currentDirectory()?.directoryRevision ?? 0
+        try await publishDirectory(devices, revision: rev + 1, owner: owner, vaultID: vaultID)
     }
 
     /// §8.4 到期预警（S14）：授予落库后为每条非永久授权排 7 天/1 天前的
@@ -972,6 +1077,13 @@ public final class LiveBackend: AppBackend {
     public func revokeDevice(deviceID: String, rotate: Bool,
                              progress: @Sendable @escaping (RevokeStep) async -> Void) async throws -> RevokeSummary {
         let (_, owner, vaultID) = try guardUnlocked()
+        // 0. Snapshot the item ids the device could use BEFORE any grant
+        // is deleted (§8.4 step 3): rotation must cover exactly the items
+        // whose keys the revoked device held — deleting the grants first
+        // would leave the set empty and the rotation a no-op.
+        let revocableItemIDs = Set(stateStore.allGrants()
+            .filter { $0.deviceID == deviceID && $0.kind == GrantKind.use && !$0.deleted }
+            .map { $0.itemID })
         // 1. Sign a new directory with the device revoked (§8.4 step 1) —
         // lands locally first; the revoke itself is not reversible (§2.10).
         await progress(.directory)
@@ -983,12 +1095,11 @@ public final class LiveBackend: AppBackend {
         var rotated = 0
         if rotate {
             do {
-                rotated = try await rotateGrantedItems(deviceID: deviceID, progress: progress)
+                rotated = try await rotateItems(itemIDs: revocableItemIDs, progress: progress)
                 pendingRotation.removeValue(forKey: deviceID)
             } catch {
                 // 撤销已生效、轮换可重入（§2.10 失败态）：记录剩余数。
-                pendingRotation[deviceID] = pendingRotation[deviceID]
-                    ?? deviceUseGrantCount(deviceID: deviceID)
+                pendingRotation[deviceID] = pendingRotation[deviceID] ?? revocableItemIDs.count
                 throw error
             }
         }
@@ -1069,13 +1180,22 @@ public final class LiveBackend: AppBackend {
 
     /// Rotation of every item the device held a `use` grant on (§8.4).
     /// Resumable: directory + grant deletion landed first (§2.10 失败态).
+    /// The item set is snapshotted by the caller BEFORE the grants are
+    /// deleted — deriving it here would always be empty (§8.4 step 3).
     func rotateGrantedItems(deviceID: String,
                             progress: @Sendable @escaping (RevokeStep) async -> Void) async throws -> Int {
+        let itemIDs = Set(stateStore.allGrants()
+            .filter { $0.deviceID == deviceID && $0.kind == GrantKind.use && !$0.deleted }
+            .map { $0.itemID })
+        return try await rotateItems(itemIDs: itemIDs, progress: progress)
+    }
+
+    /// Re-encrypts each item in `itemIDs` under a fresh item key and
+    /// re-wraps grants for the remaining active devices (§8.4 step 3).
+    func rotateItems(itemIDs: Set<String>,
+                     progress: @Sendable @escaping (RevokeStep) async -> Void) async throws -> Int {
         let (vmk, owner, vaultID) = try guardUnlocked()
         let ownDevice = ownDeviceID ?? ""
-        let itemIDs = Set(stateStore.allGrants()
-            .filter { $0.deviceID == deviceID && $0.kind == "use" && !$0.deleted }
-            .map { $0.itemID })
         var remaining = itemIDs.count
         for itemID in itemIDs.sorted() {
             guard let row = stateStore.itemByID(itemID),
@@ -1155,7 +1275,7 @@ public final class LiveBackend: AppBackend {
                              progress: @Sendable @escaping (MigrationStep) async -> Void) async throws {
         // 空库：直接改，无确认页（§2.15）。
         guard hasVault, let owner, let vaultID else {
-            origin = newOrigin
+            setOrigin(newOrigin)
             return
         }
         let deviceID = ownDeviceID ?? ""
@@ -1180,14 +1300,23 @@ public final class LiveBackend: AppBackend {
         let transcript = DirectoryTranscript(vaultID: vaultID, directoryRevision: 1,
                                              devices: [ownerDevice])
         let dirBytes = try transcript.buildBytes()
-        let create = CreateVaultRequest.make(
+        var create = CreateVaultRequest.make(
             vaultID: vaultID, device: device,
             recoveryWrap: materials.recoveryWrap,
             recoveryKDFJSON: materials.recoveryKDFJSON,
             recoverySignPub: materials.recoverySignPub,
             directoryRevision: 1, directorySigned: dirBytes,
             signature: try owner.signer.sign(dirBytes), pow: nil)
-        _ = try await newAPI.createVault(create)
+        do {
+            _ = try await newAPI.createVault(create)
+        } catch APIError.powRequired(let challenge, _) {
+            // Hosted targets gate creation behind PoW (protocol §10.1).
+            let nonce = try await Task.detached(priority: .userInitiated) {
+                try PoW.solve(challenge: challenge, vaultID: vaultID)
+            }.value
+            create.pow = PoWSolution(challenge: challenge, nonce: nonce)
+            _ = try await newAPI.createVault(create)
+        }
 
         // Full upload. Per-item revision restarts at 1 on the fresh vault
         // (server contract: a new item's first PUT is revision 1), and the
@@ -1227,7 +1356,7 @@ public final class LiveBackend: AppBackend {
         await progress(.verify)
         try stateStore.setCursor(0)
         persistSyncCursor()
-        origin = newOrigin
+        setOrigin(newOrigin)
         if let session = try? await SessionClient(api: api).start(deviceID: deviceID,
                                                                   signer: owner.signer) {
             sessionBox.set(session.token)
@@ -1387,13 +1516,21 @@ public final class LiveBackend: AppBackend {
                                                            vaultID: vaultID, itemID: row.itemID)
                 }
                 if !layerOnly {
+                    // B5 (§8.4): the item key itself must rotate — reusing
+                    // it would leave every holder of the old key (e.g. a
+                    // leaked recovery code's derived item keys) able to
+                    // decrypt the "rotated" ciphertext.
                     let plain = try ItemCrypto.openSecret(key: itemKey, blob: row.secretCiphertext,
                                                           vaultID: vaultID, itemID: row.itemID)
-                    secretCT = try ItemCrypto.sealSecret(key: itemKey, secret: plain,
+                    let newItemKey = randomKey()
+                    secretCT = try ItemCrypto.sealSecret(key: newItemKey, secret: plain,
                                                          vaultID: vaultID, itemID: row.itemID)
+                    vwItem = try ItemCrypto.wrapItemKeyWithVMK(vmk: newVMK, itemKey: newItemKey,
+                                                               vaultID: vaultID, itemID: row.itemID)
+                } else {
+                    vwItem = try ItemCrypto.wrapItemKeyWithVMK(vmk: newVMK, itemKey: itemKey,
+                                                               vaultID: vaultID, itemID: row.itemID)
                 }
-                vwItem = try ItemCrypto.wrapItemKeyWithVMK(vmk: newVMK, itemKey: itemKey,
-                                                           vaultID: vaultID, itemID: row.itemID)
             }
             plans.append(RowPlan(
                 itemID: row.itemID, oldRow: row,
@@ -1736,19 +1873,14 @@ public final class LiveBackend: AppBackend {
             }
             if StorageClass.of(itemRow) == .localOnly {
                 // 仅本机条目（§6.6）：服务器上没有 secret_ciphertext，包裹
-                // 载荷换成 secret 密文本身（info 绑定不变）。
-                let record_ = try localSecrets.record(itemID: itemRow.itemID)
-                let secretCT: Data
-                if let localRecord = record_, !localRecord.secretCiphertext.isEmpty {
-                    secretCT = localRecord.secretCiphertext
-                } else if !itemRow.secretCiphertext.isEmpty {
-                    secretCT = itemRow.secretCiphertext
-                } else {
-                    throw KeyrefCryptoError.invalidBlob
-                }
+                // 载荷换成 secret **值本身**——先解开本地包裹得到明文，再
+                // HPKE 给请求的临时公钥；info 绑定不变。CLI 的 RequestSecret
+                // 把解开的结果直接当注入值，所以这里送明文字节、不是密文，
+                // 也不是 §3.7 的 secret JSON 包装（与 CLI e2e 契约一致）。
+                let secretValue = try decryptSecret(itemRow, vmk: vmkValue, vaultID: vaultID)
                 decision = try ApprovalFlows.approveSecretDeliveryDecision(
                     vaultID: vaultID, pending: record.row,
-                    plaintext: record.plaintext, secretCiphertext: secretCT)
+                    plaintext: record.plaintext, secretValueBytes: Data(secretValue.value.utf8))
             } else {
                 let itemKey = try ItemCrypto.unwrapItemKey(vmk: vmkValue,
                                                            blob: itemRow.vaultWrappedItemKey,

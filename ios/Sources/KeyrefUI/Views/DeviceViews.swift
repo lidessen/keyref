@@ -341,7 +341,15 @@ struct ScanPairingView: View {
             case .permissionDenied:
                 PermissionDeniedView(app: app)
             case .noCamera:
+                // NoCameraView (the manual-paste fallback) is
+                // simulator-only (§3.2: no manual input on real devices);
+                // a real device without a camera falls to the denied view,
+                // which deep-links to Settings.
+                #if targetEnvironment(simulator)
                 NoCameraView(app: app, model: model)
+                #else
+                PermissionDeniedView(app: app)
+                #endif
             }
         } else {
             Color.black.ignoresSafeArea()

@@ -132,8 +132,11 @@ func TestItemRoundtripAndDelete(t *testing.T) {
 	if _, ok, _ := s.GetItem(fxItem); ok {
 		t.Fatal("deleted item returned")
 	}
-	if err := s.PutItem(fixtureItem(1)); err != nil {
-		t.Fatal(err)
+	// The revision floor survives deletion: a stale row (revision 1
+	// after revision 2 was seen) must be rejected — this is the
+	// tombstone-rollback replay guard (design §6.2).
+	if err := s.PutItem(fixtureItem(1)); err == nil {
+		t.Fatal("stale item below revision floor accepted")
 	}
 	if err := s.PutItem(&wire.ItemData{VaultID: fxVault, ItemID: "bad", Revision: 1, WriterDeviceID: fxWriter}); err == nil {
 		t.Fatal("invalid item accepted")
@@ -185,6 +188,14 @@ func TestGrantRoundtripAndDelete(t *testing.T) {
 	grants, _ = s.Grants()
 	if len(grants) != 0 {
 		t.Fatal("deleted grant still present")
+	}
+	// The revision floor survives deletion: a stale live row (revision
+	// 1 after revision 2 was seen) must be rejected — the anti-
+	// resurrection replay guard (design §8.4).
+	stale := *g
+	stale.Revision = 1
+	if err := s.PutGrant(&stale); err == nil {
+		t.Fatal("stale grant below revision floor accepted")
 	}
 
 	// Item tombstone removes the item's grants too (design §6.3).

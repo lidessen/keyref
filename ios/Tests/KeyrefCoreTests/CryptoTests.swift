@@ -211,3 +211,37 @@ final class CryptoTests: XCTestCase {
         try verifyOwnerSignature(transcript: t2, signature: sig2, ownerSignPublicKey: signer.signPublicKey)
     }
 }
+
+// MARK: proof of work (protocol §10.1)
+
+final class PoWTests: XCTestCase {
+    /// The solved nonce must hash to ≥21 leading zero bits under the
+    /// §10.1 layout, and the solution must be verified byte-for-byte by
+    /// an independent reimplementation of the server check.
+    func testSolveMeetsDifficulty() throws {
+        let vaultID = "5f0cdeadbeefdeadbeefdeadbeef42aa"
+        let challenge = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        let nonce = try PoW.solve(challenge: challenge, vaultID: vaultID)
+        XCTAssertEqual(nonce.count, 8)
+        var vaultRaw = try KeyrefEncoding.hexDecode(vaultID)
+        XCTAssertEqual(vaultRaw.count, 16)
+        var hasher = SHA256()
+        hasher.update(data: challenge)
+        hasher.update(data: vaultRaw)
+        hasher.update(data: nonce)
+        let digest = hasher.finalize()
+        var bits = 0
+        for byte in digest {
+            if byte == 0 { bits += 8; continue }
+            var b = byte
+            while b & 0x80 == 0 { bits += 1; b <<= 1 }
+            break
+        }
+        XCTAssertGreaterThanOrEqual(bits, 21)
+    }
+
+    func testSolveRejectsShortChallenge() {
+        XCTAssertThrowsError(try PoW.solve(challenge: Data(repeating: 0, count: 31),
+                                           vaultID: String(repeating: "0", count: 32)))
+    }
+}

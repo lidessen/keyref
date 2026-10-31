@@ -7,6 +7,7 @@
 import SwiftUI
 import UIKit
 import UserNotifications
+import os.log
 import KeyrefCore
 import KeyrefUI
 
@@ -125,7 +126,8 @@ struct KeyrefApp: App {
     init() {
         // §6.6：仅本机条目的 secret 密文落 SQLite（Application Support 下，
         // 内容全部是密文）；打不开时退回内存实现（本次运行内有效，见
-        // LocalSecretStore.swift 的降级说明）——绝不阻塞启动。
+        // LocalSecretStore.swift 的降级说明）——绝不阻塞启动。降级必须
+        // 可观测：静默退回内存会让「以为已保存」的仅本机条目在退出后消失。
         let localSecrets: LocalSecretStore
         do {
             let support = FileManager.default.urls(for: .applicationSupportDirectory,
@@ -134,6 +136,8 @@ struct KeyrefApp: App {
             localSecrets = try SQLiteLocalSecretStore(
                 fileURL: support.appendingPathComponent("local-secrets.sqlite"))
         } catch {
+            os_log(.fault, "local secret store unavailable, falling back to in-memory (data will not persist this run): %{public}s",
+                   String(describing: error))
             localSecrets = InMemoryLocalSecretStore()
         }
         let backend = LiveBackend(
