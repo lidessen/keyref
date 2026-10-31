@@ -207,6 +207,25 @@ public struct GrantData: Codable, Equatable, Sendable {
     }
 }
 
+/// Tolerant decoding: older/hosted servers may omit `deleted` for live
+/// rows (Go's `omitempty` did exactly that). A missing field means "not
+/// deleted" — the alternative is failing the whole sync batch. Kept in an
+/// extension so the memberwise init stays available.
+extension GrantData {
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        deviceID = try c.decode(String.self, forKey: .deviceID)
+        itemID = try c.decode(String.self, forKey: .itemID)
+        kind = try c.decode(String.self, forKey: .kind)
+        hpkeEnc = try c.decode(Data.self, forKey: .hpkeEnc)
+        wrappedKey = try c.decode(Data.self, forKey: .wrappedKey)
+        expiresAt = try c.decode(Int64.self, forKey: .expiresAt)
+        revision = try c.decode(UInt64.self, forKey: .revision)
+        signature = try c.decode(Data.self, forKey: .signature)
+        deleted = try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false
+    }
+}
+
 /// Sync "device" entity data (§8.3): status summary, no key material.
 public struct DeviceData: Codable, Equatable, Sendable {
     public var deviceID: String

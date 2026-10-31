@@ -85,7 +85,7 @@ type GrantData struct {
 	ExpiresAt  int64  `json:"expires_at"` // unix milliseconds; 0 = never
 	Revision   uint64 `json:"revision"`
 	Signature  Blob   `json:"signature"`
-	Deleted    bool   `json:"deleted,omitempty"`
+	Deleted    bool   `json:"deleted"` // always present: a missing field is not the same as false
 }
 
 // Validate checks the identifier fields, kind and revision of a grant row.

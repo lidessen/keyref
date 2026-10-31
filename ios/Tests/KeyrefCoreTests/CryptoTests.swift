@@ -245,3 +245,23 @@ final class PoWTests: XCTestCase {
                                            vaultID: String(repeating: "0", count: 32)))
     }
 }
+
+// MARK: wire tolerance (cross-language regression)
+
+final class GrantWireDecodingTests: XCTestCase {
+    /// The Go server used to omit `deleted` for live rows (json
+    /// `omitempty`); a required non-optional Bool made the whole iOS sync
+    /// batch fail with invalidJSON. Missing must mean "not deleted".
+    func testGrantWithoutDeletedFieldDecodesAsLive() throws {
+        let json = #"""
+        {"device_id":"aaaabbbbccccddddeeeeffff00001111",
+         "item_id":"deadbeefdeadbeefdeadbeefdeadbeef",
+         "kind":"use",
+         "hpke_enc":"","wrapped_key":"","expires_at":0,
+         "revision":1,"signature":""}
+        """#
+        let g = try WireJSON.decoder.decode(GrantData.self, from: Data(json.utf8))
+        XCTAssertFalse(g.deleted)
+        XCTAssertEqual(g.revision, 1)
+    }
+}
