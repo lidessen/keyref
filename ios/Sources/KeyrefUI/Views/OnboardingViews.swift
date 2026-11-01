@@ -13,52 +13,63 @@ struct WelcomeView: View {
     @State private var showJoin = false
 
     var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
-            Image(systemName: "key.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.tint)
-            Text("keyref")
-                .font(.largeTitle.weight(.bold))
-            Text("你的秘密保险库。agent 只拿引用，拿不到明文。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Spacer()
-            Button {
-                showCreate = true
-            } label: {
-                Text("创建保险库")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
+        ZStack {
+            KeyrefBackdrop()
+            VStack(spacing: 0) {
+                Spacer()
+                BrandMark(size: 96)
+                Text("keyref")
+                    .font(.system(size: 40, weight: .bold, design: .monospaced))
+                    .tracking(-1.5)
+                    .foregroundStyle(KeyrefTheme.foreground)
+                    .padding(.top, 20)
+                Text("你的秘密保险库。agent 只拿引用，拿不到明文。")
+                    .font(.callout)
+                    .foregroundStyle(KeyrefTheme.muted)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 8)
+                Spacer()
+                VStack(spacing: 10) {
+                    Button {
+                        showCreate = true
+                    } label: {
+                        Text("创建保险库")
+                    }
+                    .buttonStyle(KeyrefPrimaryButtonStyle())
+                    Button {
+                        showRecovery = true
+                    } label: {
+                        Text("用恢复码恢复")
+                    }
+                    .buttonStyle(KeyrefSecondaryButtonStyle())
+                    // 第三级用纯文字按钮：整页只有一级实心块，多的都是文字。
+                    Button {
+                        showJoin = true
+                    } label: {
+                        Text("加入已有保险库")
+                    }
+                    .buttonStyle(.plain)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(KeyrefTheme.foreground)
+                }
+                KeyrefBlock(padding: 13) {
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.caption)
+                            .foregroundStyle(KeyrefTheme.accent)
+                            .padding(.top, 1)
+                        Text("主密钥只活在这台手机的安全隔区里。服务器只保存密文。没有账号，也没有客服重置。")
+                            .font(.footnote)
+                            .foregroundStyle(KeyrefTheme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.top, 20)
+                .padding(.bottom, 18)
             }
-            .buttonStyle(.glassProminent)
-            Button {
-                showRecovery = true
-            } label: {
-                Text("用恢复码恢复")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.glass)
-            Button {
-                showJoin = true
-            } label: {
-                Text("加入已有保险库")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.glass)
-            Text("主密钥只活在这台手机的安全隔区里。服务器只保存密文。没有账号，也没有客服重置。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.bottom, 16)
+            .padding(.horizontal, 28)
         }
-        .padding(.horizontal, 28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.keyrefBackground)
-        // §3.8：背景向上、向下延伸到状态栏与底部栏之下（S1 欢迎页）。
+        // §3.8：S1 欢迎页背景用 backgroundExtensionEffect 承接状态栏与底部。
         .backgroundExtensionEffect()
         .fullScreenCover(isPresented: $showCreate) {
             NavigationStack {
@@ -103,25 +114,29 @@ struct CreateVaultFlowView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            FlowStepBar(steps: Self.steps, currentIndex: currentIndex)
-                .padding(.horizontal, 24)
-                .padding(.top, 8)
-            switch model.step {
-            case .prerequisites:
-                PrerequisitesPage(model: model)
-            case .generating:
-                GeneratingPage(model: model)
-            case .recoveryCode:
-                RecoveryCodeShowOncePage(model: model)
-            case .backfill:
-                if let backfill = model.backfill {
-                    RecoveryBackfillPage(model: model, backfill: backfill)
-                }
-            case .done:
-                CreateDonePage(model: model) {
-                    Task { await app?.vaultBecameReady(unlock: true) }
-                    dismiss()
+        ZStack {
+            KeyrefBackdrop()
+            VStack(spacing: 0) {
+                FlowStepBar(steps: Self.steps, currentIndex: currentIndex)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 10)
+                    .padding(.bottom, 2)
+                switch model.step {
+                case .prerequisites:
+                    PrerequisitesPage(model: model)
+                case .generating:
+                    GeneratingPage(model: model)
+                case .recoveryCode:
+                    RecoveryCodeShowOncePage(model: model)
+                case .backfill:
+                    if let backfill = model.backfill {
+                        RecoveryBackfillPage(model: model, backfill: backfill)
+                    }
+                case .done:
+                    CreateDonePage(model: model) {
+                        Task { await app?.vaultBecameReady(unlock: true) }
+                        dismiss()
+                    }
                 }
             }
         }
@@ -142,15 +157,28 @@ struct PrerequisitesPage: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            ForEach(model.prerequisites) { item in
-                HStack(spacing: 12) {
-                    Image(systemName: item.satisfied ? "checkmark.circle.fill" : "xmark.circle")
-                        .foregroundStyle(item.satisfied ? .green : .red)
-                    Text(item.title)
-                    Spacer()
+            // 一块发丝线清单：行与行之间一条线，没有各自的卡片底。
+            KeyrefBlock(padding: 0) {
+                VStack(spacing: 0) {
+                    ForEach(Array(model.prerequisites.enumerated()), id: \.offset) { index, item in
+                        if index > 0 {
+                            Divider().overlay(KeyrefTheme.hairline)
+                        }
+                        HStack(spacing: 12) {
+                            IconGlyph(systemName: item.satisfied ? "checkmark" : "exclamationmark",
+                                      tint: item.satisfied ? KeyrefTheme.success : KeyrefTheme.danger,
+                                      size: 18)
+                            Text(item.title)
+                                .font(.callout.weight(.medium))
+                            Spacer()
+                            StatusText(text: item.satisfied ? "就绪" : "缺少",
+                                       tint: item.satisfied ? KeyrefTheme.success : KeyrefTheme.danger,
+                                       showDot: true)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                    }
                 }
-                .padding(16)
-                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
             }
             if !model.missingPrerequisites.isEmpty {
                 Label {
@@ -166,10 +194,8 @@ struct PrerequisitesPage: View {
                 Task { await model.startGeneration() }
             } label: {
                 Text("继续")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(KeyrefPrimaryButtonStyle())
             .disabled(!model.canProceedFromPrerequisites || model.generating)
         }
         .padding(24)
@@ -182,17 +208,33 @@ struct GeneratingPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("正在生成安全隔区密钥…")
-                .font(.headline)
-            VStack(alignment: .leading, spacing: 12) {
-                generationRow("安全隔区协定密钥与签名密钥")
-                generationRow("主密钥 VMK")
-                generationRow("恢复码")
-                generationRow("续期密钥对")
+            HStack(spacing: 14) {
+                BrandMark(size: 60)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("正在生成安全隔区密钥…")
+                        .font(.headline)
+                    Text("密钥只在这台手机上生成")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .padding(16)
-            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.top, 8)
+            KeyrefBlock(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    generationRow("安全隔区协定密钥与签名密钥")
+                    Divider().overlay(KeyrefTheme.hairline)
+                    generationRow("主密钥 VMK")
+                    Divider().overlay(KeyrefTheme.hairline)
+                    generationRow("恢复码")
+                    Divider().overlay(KeyrefTheme.hairline)
+                    generationRow("续期密钥对")
+                }
+            }
             ProgressView()
+                .controlSize(.large)
+                .tint(KeyrefTheme.tint)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 8)
             Spacer()
         }
         .padding(24)
@@ -201,11 +243,14 @@ struct GeneratingPage: View {
     func generationRow(_ label: String) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "circle.dotted")
-                .foregroundStyle(.tint)
+                .foregroundStyle(KeyrefTheme.foreground)
                 .symbolEffect(.pulse)
             Text(label)
                 .font(.callout)
+            Spacer()
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
     }
 }
 
@@ -220,12 +265,11 @@ struct RecoveryCodeShowOncePage: View {
                     .font(.title2.weight(.semibold))
                 Text("这是它唯一一次出现。恢复码等于全部数据：keyref 不保存它，设置里也没有再次查看的入口。抄在纸上，或放进另一个你信任的保险库。")
                     .font(.callout)
-                Label("手机和恢复码同时丢失＝数据永久丢失。", systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.orange)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(.secondary)
+                KeyrefNotice(systemName: "exclamationmark.triangle.fill",
+                             tint: KeyrefTheme.warning,
+                             text: "手机和恢复码同时丢失＝数据永久丢失。",
+                             emphasis: true)
                 if let groups = model.draft?.recoveryGroups {
                     RecoveryCodeDisplay(groups: groups)
                 }
@@ -236,10 +280,8 @@ struct RecoveryCodeShowOncePage: View {
                     model.beginBackfill()
                 } label: {
                     Text("我已抄写，开始校验")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .padding(.top, 8)
             }
             .padding(24)
@@ -266,13 +308,13 @@ struct RecoveryBackfillPage: View {
                 if let mismatch = backfill.firstMismatchIndex {
                     Text(backfill.errorMessage ?? "")
                         .font(.footnote.weight(.medium))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                         .accessibilityLabel("第 \(mismatch + 1) 组不一致。\(backfill.errorMessage ?? "")")
                 }
                 if backfill.allMatched {
-                    Text("全部匹配。")
+                    Label("全部匹配。", systemImage: "checkmark.circle.fill")
                         .font(.footnote.weight(.medium))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(KeyrefTheme.success)
                 }
                 Text("它防不了拍照——它不防「没抄」，只防「抄错」。")
                     .font(.caption)
@@ -281,10 +323,8 @@ struct RecoveryBackfillPage: View {
                     model.finishBackfill()
                 } label: {
                     Text("完成")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .disabled(!backfill.allMatched)
             }
             .padding(24)
@@ -299,32 +339,35 @@ struct CreateDonePage: View {
     let onEnter: () -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green)
-            Text("保险库已创建")
-                .font(.title2.weight(.semibold))
+            ResultHero(systemName: "checkmark.seal.fill",
+                       tint: KeyrefTheme.success,
+                       title: "保险库已创建")
             if model.uploadFailed {
                 VStack(spacing: 12) {
                     Text("保险库已在本机创建，但还没同步到服务器。")
                         .font(.callout)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(KeyrefTheme.warning)
                         .multilineTextAlignment(.center)
                     Button("重试上传") {
                         Task { await model.upload() }
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(KeyrefSecondaryButtonStyle())
                 }
+                .padding(.top, 18)
             } else if model.uploaded {
-                Text("已同步")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                StatusText(text: "已同步", tint: KeyrefTheme.success, showDot: true)
+                    .padding(.top, 18)
             } else {
-                Text("上传中")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("上传中")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 18)
             }
             Spacer()
             Text("恢复码是唯一的恢复方式。keyref 无法帮你重置。")
@@ -335,10 +378,9 @@ struct CreateDonePage: View {
                 onEnter()
             } label: {
                 Text("进入保险库")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(KeyrefPrimaryButtonStyle())
+            .padding(.top, 12)
         }
         .padding(24)
         .task {

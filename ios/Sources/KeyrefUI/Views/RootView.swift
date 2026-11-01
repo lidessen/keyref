@@ -34,6 +34,10 @@ public struct RootView: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: app.phase)
+        // 系统控件的 accent 跟着前景色走：链接、开关、Tab 选中都是近黑
+        // （浅色）/近白（深色），不染彩色。琥珀只留在自绘的信号位上——品牌
+        // 标记里的钥匙、步骤条上的当前步、待审批角标的小方点。
+        .tint(KeyrefTheme.tint)
         .environment(\.appModel, app)
         .task {
             await app.boot()
@@ -90,7 +94,7 @@ struct LockScreenView: View {
 
     var body: some View {
         ZStack {
-            Color.keyrefBackground.ignoresSafeArea()
+            KeyrefBackdrop()
             switch app.lockDisplay {
             case .waiting:
                 waitingFace
@@ -103,34 +107,38 @@ struct LockScreenView: View {
         }
     }
 
-    /// S2 正常态：标题、状态行（缓存的非敏感计数）、主按钮、底注。
+    /// S2 正常态：品牌门面、状态行（缓存的非敏感计数）、主按钮、底注。
     var waitingFace: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "lock.trianglebadge.exclamationmark.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
+            BrandMark(size: 112)
             Text("keyref 已锁定")
                 .font(.title2.weight(.semibold))
-            Text("\(app.backend.cachedItemCount) 条条目已就绪")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(KeyrefTheme.foreground)
+                .padding(.top, 22)
+            HStack(spacing: 7) {
+                Image(systemName: "tray.full.fill")
+                    .font(.caption2)
+                Text("\(app.backend.cachedItemCount) 条条目已就绪")
+                    .monospacedDigit()
+            }
+            .font(.footnote)
+            .foregroundStyle(KeyrefTheme.muted)
+            .padding(.top, 10)
             Spacer()
             Button {
                 Task { await app.attemptUnlock() }
             } label: {
                 Label("使用 Face ID 解锁", systemImage: "faceid")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
             }
-            .buttonStyle(.glassProminent)
-            .padding(.horizontal, 24)
+            .buttonStyle(KeyrefPrimaryButtonStyle())
             Text("解锁只发生在这台手机上。")
                 .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 24)
+                .foregroundStyle(KeyrefTheme.muted.opacity(0.8))
+                .padding(.top, 16)
+                .padding(.bottom, 28)
         }
+        .padding(.horizontal, 24)
     }
 
     /// S3 失败态一：包裹完好，重试即可。连续多次失败后追加提示。
@@ -139,14 +147,14 @@ struct LockScreenView: View {
         VStack(spacing: 8) {
             Text("Face ID 没有识别成功，再试一次即可。")
                 .font(.footnote.weight(.medium))
-                .foregroundStyle(.orange)
+                .foregroundStyle(KeyrefTheme.warning)
             if attempts >= 2 {
                 Text("先解锁手机，正对摄像头再回到 keyref。")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(KeyrefTheme.muted)
             }
         }
-        .padding(.bottom, 84)
+        .padding(.bottom, 100)
         .padding(.horizontal, 24)
     }
 }
@@ -157,34 +165,42 @@ struct WrapInvalidFace: View {
     @State private var showExplanation = false
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "lock.slash.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.red)
+            ZStack {
+                // 只有一圈发丝线，没有彩色圆底（没有图标瓦片底色）。
+                Circle()
+                    .strokeBorder(KeyrefTheme.danger.opacity(0.30), lineWidth: 1)
+                    .frame(width: 98, height: 98)
+                Image(systemName: "lock.slash.fill")
+                    .font(.system(size: 40, weight: .semibold))
+                    .foregroundStyle(KeyrefTheme.danger)
+            }
             Text("本机包裹已失效")
                 .font(.title2.weight(.semibold))
+                .foregroundStyle(KeyrefTheme.foreground)
+                .padding(.top, 20)
             Text("重录 Face ID、增删指纹或更改设备密码后，原来的加密包裹会永久作废——这是「新的生物特征集合不再被信任」的定义，不是故障。你的数据还在本机，没有被读取或删除。")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(KeyrefTheme.muted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
+                .padding(.top, 10)
             Spacer()
             Button {
                 app.showRecoveryFromLock = true  // → 2.13 本机重建流程
             } label: {
                 Text("用恢复码在本机重建")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
             }
-            .buttonStyle(.glassProminent)
-            Button("了解发生了什么") {
+            .buttonStyle(KeyrefPrimaryButtonStyle())
+            Button {
                 showExplanation = true
+            } label: {
+                Text("了解发生了什么")
             }
-            .buttonStyle(.glass)
-            .font(.callout)
-            .padding(.bottom, 24)
+            .buttonStyle(KeyrefSecondaryButtonStyle())
+            .padding(.top, 10)
+            .padding(.bottom, 28)
         }
         .padding(.horizontal, 24)
         .sheet(isPresented: $showExplanation) {
@@ -199,18 +215,22 @@ struct SecurityExplanationView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("重录面容、增删指纹或更改设备密码会使本机包裹失效，需要用恢复码重建。")
-                        .font(.body)
-                    Text("这不是故障：隔区私钥被绑定在「当前生物特征集合」上。集合一变，旧的包裹就不再被信任——数据没有丢，用恢复码即可在本机重建（重新解 VMK、在新隔区重新包裹）。")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    Text("keyref 不提供「用设备密码解锁保险库」：.biometryCurrentSet 下的隔区私钥在密码学上不接受口令。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+            ZStack {
+                KeyrefBackdrop()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        FaceIDExplanation()
+                        Text("重录面容、增删指纹或更改设备密码会使本机包裹失效，需要用恢复码重建。")
+                            .font(.body)
+                        Text("这不是故障：隔区私钥被绑定在「当前生物特征集合」上。集合一变，旧的包裹就不再被信任——数据没有丢，用恢复码即可在本机重建（重新解 VMK、在新隔区重新包裹）。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Text("keyref 不提供「用设备密码解锁保险库」：.biometryCurrentSet 下的隔区私钥在密码学上不接受口令。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(20)
                 }
-                .padding(20)
             }
             .navigationTitle("Face ID 与本机包裹")
             .navigationBarTitleDisplayMode(.inline)
@@ -220,5 +240,21 @@ struct SecurityExplanationView: View {
                 }
             }
         }
+    }
+}
+
+private struct FaceIDExplanation: View {
+    var body: some View {
+        HStack(spacing: 14) {
+            IconGlyph(systemName: "faceid", tint: KeyrefTheme.foreground, size: 44)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("隔区私钥绑定面容集合")
+                    .font(.subheadline.weight(.semibold))
+                Text("集合变化，旧包裹即失效")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.bottom, 4)
     }
 }

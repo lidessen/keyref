@@ -19,6 +19,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                vaultHeroSection
                 serverSection
                 quotaSection
                 securitySection
@@ -27,6 +28,7 @@ struct SettingsView: View {
                 aboutSection
             }
             .navigationTitle("设置")
+            .keyrefListSurface()
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
             .task { await settings.refreshAccount() }
             .sheet(isPresented: Binding(
@@ -48,17 +50,74 @@ struct SettingsView: View {
         }
     }
 
+    /// 保险库摘要：一眼看到服务器归属、条目/设备数量和档位。
+    var vaultHeroSection: some View {
+        Section {
+            KeyrefBlock(padding: 16) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 12) {
+                        BrandMark(size: 48)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("keyref 保险库")
+                                .font(.headline)
+                            Text(app.backend.origin.host ?? "")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        StatusText(text: settings.planLabel,
+                                   tint: KeyrefTheme.foreground)
+                    }
+                    Divider().overlay(KeyrefTheme.hairline)
+                    HStack(spacing: 0) {
+                        metric("条目", "\(app.items.rows.count)")
+                        metricDivider
+                        metric("CLI 设备", "\(app.devices.activeCLI.count)")
+                        metricDivider
+                        metric("部署", settings.hostedShortBadge)
+                    }
+                }
+            }
+            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 10, trailing: 16))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
+    }
+
+    func metric(_ label: String, _ value: String) -> some View {
+        VStack(spacing: 3) {
+            Text(value)
+                .font(.callout.weight(.semibold).monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    var metricDivider: some View {
+        Rectangle()
+            .fill(KeyrefTheme.hairline)
+            .frame(width: 1, height: 26)
+    }
+
     /// 服务器 origin（S10，一级信息）。
     var serverSection: some View {
         Section {
             NavigationLink {
                 ServerOriginView(app: app)
             } label: {
-                VStack(alignment: .leading, spacing: 4) {
-                    LabeledContent("同步服务器", value: app.backend.origin.host ?? "")
-                    Text(settings.hostedBadge)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    IconGlyph(systemName: "server.rack", size: 18)
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent("同步服务器", value: app.backend.origin.host ?? "")
+                        Text(settings.hostedBadge)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         } header: {
@@ -72,12 +131,15 @@ struct SettingsView: View {
             NavigationLink {
                 QuotaStatusView(app: app)
             } label: {
-                VStack(alignment: .leading, spacing: 4) {
-                    LabeledContent("档位", value: settings.planLabel)
-                    if let usage = settings.account?.usage, let limits = settings.account?.limits {
-                        Text("条目 \(usage.items)/\(limits.items ?? 0) · 存储 \(Format.bytes(usage.storageBytes))/\(Format.bytes(limits.storageBytes ?? 0)) · 今日请求 \(usage.requestsToday)/\(limits.requestsPerDay ?? 0)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    IconGlyph(systemName: "chart.bar.fill", size: 18)
+                    VStack(alignment: .leading, spacing: 4) {
+                        LabeledContent("档位", value: settings.planLabel)
+                        if let usage = settings.account?.usage, let limits = settings.account?.limits {
+                            Text("条目 \(usage.items)/\(limits.items ?? 0) · 存储 \(Format.bytes(usage.storageBytes))/\(Format.bytes(limits.storageBytes ?? 0)) · 今日请求 \(usage.requestsToday)/\(limits.requestsPerDay ?? 0)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -85,13 +147,13 @@ struct SettingsView: View {
                 Text("随内购上线。")
                     .foregroundStyle(.secondary)
             } label: {
-                Text("Plus（$6/月）")
+                Label("Plus（$6/月）", systemImage: "sparkles")
             }
             .disabled(true)
             NavigationLink {
                 CloudBackupView(app: app)
             } label: {
-                Text("iCloud 副本（仅本机条目）")
+                Label("iCloud 副本（仅本机条目）", systemImage: "icloud")
             }
         } header: {
             Text("保险库与配额")
@@ -109,22 +171,22 @@ struct SettingsView: View {
             NavigationLink {
                 SecurityExplanationView()
             } label: {
-                Text("Face ID 说明")
+                Label("Face ID 说明", systemImage: "faceid")
             }
             NavigationLink {
                 RotationEntryView(app: app, kind: .vmkLayer)
             } label: {
-                Text("轮换 VMK 与恢复码")
+                Label("轮换 VMK 与恢复码", systemImage: "arrow.triangle.2.circlepath")
             }
             NavigationLink {
                 RotationEntryView(app: app, kind: .recoveryLeak)
             } label: {
-                Text("怀疑恢复码泄露")
+                Label("怀疑恢复码泄露", systemImage: "exclamationmark.shield")
             }
             NavigationLink {
                 ItemKeyRotationView(app: app)
             } label: {
-                Text("轮换条目密钥")
+                Label("轮换条目密钥", systemImage: "key.fill")
             }
         } header: {
             Text("安全")
@@ -137,7 +199,7 @@ struct SettingsView: View {
             NavigationLink {
                 RecoveryFlowView(app: app, mode: .takeover)
             } label: {
-                Text("用恢复码接管")
+                Label("用恢复码接管", systemImage: "arrow.counterclockwise")
             }
         } header: {
             Text("恢复")
@@ -152,8 +214,8 @@ struct SettingsView: View {
             NavigationLink {
                 DeleteVaultView(app: app)
             } label: {
-                Text("删除保险库")
-                    .foregroundStyle(.red)
+                Label("删除保险库", systemImage: "trash")
+                    .foregroundStyle(KeyrefTheme.danger)
             }
         } header: {
             Text("危险区")
@@ -208,7 +270,7 @@ struct ServerOriginView: View {
                 if let error = settings.originInlineError {
                     Label(error, systemImage: "exclamationmark.circle")
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                 } else if !newOriginEmpty {
                     Label(settings.newOriginText.hasPrefix("https://sync.keyref.app")
                           ? "官方托管" : "自托管",
@@ -239,7 +301,7 @@ struct ServerOriginView: View {
                 if let failed = settings.migrationFailed {
                     Text(failed)
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                 }
                 if let step = settings.migrationStep {
                     LabeledContent("进行中", value: stepLabel(step))
@@ -249,6 +311,7 @@ struct ServerOriginView: View {
         }
         .navigationTitle("服务器")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
         .onAppear {
             settings.newOriginText = ""
@@ -298,6 +361,7 @@ struct QuotaStatusView: View {
         }
         .navigationTitle("保险库与配额")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
         .task { await settings.refreshAccount() }
     }
@@ -419,6 +483,7 @@ struct RotationEntryView: View {
         }
         .navigationTitle(kind.title)
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         // 新恢复码只显示一次（复用 2.2 的展示与回填，S9）。
         .sheet(isPresented: $showNewCode) {
             if let code = settings.newRecoveryCode {
@@ -441,7 +506,8 @@ struct RecoveryCodeReShowView: View {
     var groups: [String] { RecoveryCodeGroups.groups(of: code) }
 
     var body: some View {
-        Group {
+        ZStack {
+            KeyrefBackdrop()
             if let backfill {
                 backfillPage(backfill)
             } else {
@@ -465,21 +531,17 @@ struct RecoveryCodeReShowView: View {
                     .font(.title2.weight(.semibold))
                 Text("这是它唯一一次出现。旧恢复码从现在起解不开任何新密文。抄在纸上，或放进另一个你信任的保险库。")
                     .font(.callout)
-                Label("手机和恢复码同时丢失＝数据永久丢失。", systemImage: "exclamationmark.triangle.fill")
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.orange)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                KeyrefNotice(systemName: "exclamationmark.triangle.fill",
+                             tint: KeyrefTheme.warning,
+                             text: "手机和恢复码同时丢失＝数据永久丢失。",
+                             emphasis: true)
                 RecoveryCodeDisplay(groups: groups)
                 Button {
                     self.backfill = RecoveryBackfillModel(targetGroups: groups)
                 } label: {
                     Text("我已抄写，开始校验")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .padding(.top, 8)
             }
             .padding(24)
@@ -500,17 +562,15 @@ struct RecoveryCodeReShowView: View {
                 } else if let mismatch = backfill.firstMismatchIndex {
                     Text("有一组和屏幕上的不一致，请对照你抄写的那份修改。")
                         .font(.footnote.weight(.medium))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                         .accessibilityLabel("第 \(mismatch + 1) 组不一致")
                 }
                 Button {
                     dismiss()
                 } label: {
                     Text("完成")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .disabled(!backfill.allMatched)
             }
             .padding(24)
@@ -541,6 +601,7 @@ struct DeleteVaultView: View {
         }
         .navigationTitle("删除保险库")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 
@@ -550,7 +611,7 @@ struct DeleteVaultView: View {
             Section {
                 Text("删除整个保险库")
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(KeyrefTheme.danger)
                 consequence("服务器上全部密文、设备与授权记录立即级联清空。")
                 consequence("所有 agent 的引用立即失效。")
                 consequence("恢复码随之作废。")
@@ -563,7 +624,7 @@ struct DeleteVaultView: View {
                 if let failed = settings.deleteFailed {
                     Text(failed)
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                 }
                 Button(role: .destructive) {
                     Task {
@@ -592,16 +653,14 @@ struct DeleteVaultView: View {
 
     /// 失败态绝不假装成功（§2.16）。
     var donePage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green)
-            Text("保险库已删除")
-                .font(.title2.weight(.semibold))
+            ResultHero(systemName: "checkmark.seal.fill",
+                       tint: KeyrefTheme.success,
+                       title: "保险库已删除")
             Spacer()
             Button("返回") { dismiss() }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }

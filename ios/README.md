@@ -26,6 +26,32 @@ ios/
 
 构建：`scripts/dev/xcodebuild.sh -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`。脚本把 `DEVELOPER_DIR` 指到 `/Applications/Xcode.app/Contents/Developer`——xcode-select 指向 CommandLineTools 的机器上直接跑 `xcodebuild` 会报 "tool 'xcodebuild' requires Xcode"；已把 xcode-select 切到完整 Xcode 的机器可以直接用 `xcodebuild` 本体。
 
+### 视觉语言
+
+界面共用一套设计系统，在 `Sources/KeyrefUI/DesignSystem/`：
+
+- `Theme.swift` — 调色板。冷调编辑排版：整页近白（浅色）/ 近黑（深色），字近黑 /
+  近白，只有一条发丝线的分层色，另有一块「明文层」实面（浅色下近黑、深色下近白）
+  ——秘密在整页里是唯一的暗块，一眼能找到。琥珀是唯一的强调色，只作小面积信号
+  （品牌标记里的钥匙、步骤条的当前步、待审批角标的小方点）。自适应色一律走
+  `UIColor` 动态 provider，深浅两套是同一套逻辑（macOS 分支固定浅色——包在 macOS
+  上只做编译与测试）。
+- `DesignSystem.swift` — 通用件：页面底色、品牌标记、发丝线块、裸字形、字形圆圈、
+  分区标签、状态文字、结果英雄图、两个按钮样式、列表底纹。
+
+约定：**我们画的东西一律是平的**——没有渐变、光晕、阴影，没有卡片，没有图标瓦片
+底色；分层只靠发丝线和留白。主按钮 `KeyrefPrimaryButtonStyle`（前景色实心块 +
+页面色字）、次级 `KeyrefSecondaryButtonStyle`（同形描边）；其余控件（Toggle /
+Picker / SecureField / searchable / 导航栏 / Tab 栏 / 底部配件）是 SwiftUI 原样，
+accent 走 `.tint(KeyrefTheme.tint)`——跟着前景色走，不染彩色。
+
+系统给了材质的（导航栏、Tab 栏、底部配件）不自绘模仿；真正浮在内容之上的自绘控件
+（明文层的收起/拷贝按钮、同步胶囊、扫码页手电筒）用 `glassEffect` 而不是手画半透明
+——见 docs/ios-ui.md §3.8。恢复码与 argv 原文不是浮层，它们是实心明文块（slab）。
+
+`ref`、指纹、掩码、恢复码一律等宽字体；时间戳用紧凑写法 `2026-11-01 04:37`
+（中文长日期在标签—值行里放不下，会被截成「2026年11月1日 04:…」）。
+
 ### 模拟器 UI 端到端（可选）
 
 ```sh

@@ -87,40 +87,96 @@ struct ItemListView: View {
         }
     }
 
-    /// 空态（S5）。
+    /// 空态（S5）：同上，安静但有指引。
     var emptyState: some View {
-        ContentUnavailableView {
-            Label("还没有条目", systemImage: "key")
-        } description: {
-            Text("添加第一条密钥，配对时再把它授予 agent。")
-        } actions: {
-            Button("添加条目") { showAdd = true }
-                .buttonStyle(.glassProminent)
+        ZStack {
+            KeyrefBackdrop()
+            VStack(spacing: 16) {
+                KeyrefGlyphCircle(systemName: "key.fill")
+                Text("还没有条目")
+                    .font(.title3.weight(.semibold))
+                Text("添加第一条密钥，配对时再把它授予 agent。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("添加条目") { showAdd = true }
+                    .buttonStyle(KeyrefPrimaryButtonStyle())
+                    .padding(.top, 4)
+            }
+            .padding(28)
         }
     }
 
     /// 行：名称 + `ref` 与掩码（等宽、次要色）+ 类型徽标；按更新时间倒序。
+    /// 行不是卡片：一行字之间一条发丝线，类型用裸字形表达。
     var list: some View {
         List {
-            ForEach(items.filtered) { row in
-                NavigationLink {
-                    ItemDetailView(app: app, row: row)
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(row.name).font(.body.weight(.medium))
-                            Spacer()
-                            TypeBadge(type: row.type)
-                        }
-                        MaskText(row: row)
+            Section {
+                ForEach(items.filtered) { row in
+                    NavigationLink {
+                        ItemDetailView(app: app, row: row)
+                    } label: {
+                        ItemRowView(row: row)
                     }
-                    .padding(.vertical, 2)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 12))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparatorTint(KeyrefTheme.hairline)
                 }
+            } header: {
+                HStack {
+                    KeyrefSectionLabel(text: "全部条目")
+                    Spacer()
+                    Text("\(items.filtered.count)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(KeyrefTheme.muted)
+                }
+                .padding(.horizontal, 4)
+            } footer: {
+                Text("按修改时间排序 · 下拉同步")
+                    .font(.caption)
+                    .foregroundStyle(KeyrefTheme.muted)
+                    .padding(.top, 4)
             }
         }
         .listStyle(.plain)
+        .keyrefListSurface()
         // §3.8：滚动边缘柔和过渡，内容从导航栏与 Tab 栏下自然穿过。
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
+    }
+}
+
+/// One item row: type glyph, name, ref + mask, type badge, grant count.
+struct ItemRowView: View {
+    let row: ItemRow
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ItemTypeGlyph(type: row.type, size: 20)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(row.name)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    if row.storageClass == .localOnly {
+                        Image(systemName: "iphone")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(KeyrefTheme.muted)
+                            .accessibilityLabel("仅本机")
+                    }
+                }
+                MaskText(row: row)
+            }
+            Spacer(minLength: 6)
+            VStack(alignment: .trailing, spacing: 7) {
+                TypeBadge(type: row.type)
+                if !row.grants.isEmpty {
+                    Text("\(row.grants.count) 台")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(KeyrefTheme.muted)
+                }
+            }
+        }
+        .padding(.vertical, 12)
     }
 }
 
@@ -182,6 +238,7 @@ struct SyncFailureDetailView: View {
         }
         .navigationTitle("同步失败详情")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 }
@@ -209,14 +266,26 @@ struct ItemDetailView: View {
     private var content: some View {
         List {
             Section {
+                HStack(spacing: 14) {
+                    ItemTypeGlyph(type: row.type, size: 34)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(row.name)
+                            .font(.title3.weight(.semibold))
+                        MaskText(row: row)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 6)
+            }
+            Section {
                 InfoRow(label: "ref", value: row.ref, mono: true)
                 InfoRow(label: "类型", value: Format.typeBadge(row.type))
                 InfoRow(label: "掩码", value: row.masked, mono: true)
                 if !row.itemDescription.isEmpty {
                     InfoRow(label: "描述", value: row.itemDescription)
                 }
-                InfoRow(label: "创建时间", value: Format.dateTime(row.createdAt))
-                InfoRow(label: "修改时间", value: Format.dateTime(row.updatedAt))
+                InfoRow(label: "创建时间", value: Format.dateTime(row.createdAt), mono: true)
+                InfoRow(label: "修改时间", value: Format.dateTime(row.updatedAt), mono: true)
             } header: {
                 Text("基本信息")
             } footer: {
@@ -247,6 +316,7 @@ struct ItemDetailView: View {
         }
         .navigationTitle(row.name)
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -281,52 +351,74 @@ struct ItemDetailView: View {
     /// `glassEffect(.regular)` 胶囊，同屏两个玻璃元素包进 GlassEffectContainer。
     @ViewBuilder
     var plaintextSection: some View {
-        Section("明文") {
+        Section {
             if let plaintext {
-                HStack {
-                    Group {
-                        if plaintextHidden {
-                            Text(String(repeating: "•", count: 12))
-                                .textSelection(.disabled)
-                        } else {
-                            Text(plaintext)
-                                .textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top) {
+                        Group {
+                            if plaintextHidden {
+                                Text(String(repeating: "•", count: 12))
+                                    .textSelection(.disabled)
+                            } else {
+                                Text(plaintext)
+                                    .textSelection(.enabled)
+                            }
                         }
-                    }
-                    .font(.body.monospaced())
-                    .lineLimit(plaintextHidden ? 1 : 4)
-                    Spacer()
-                    if plaintextHidden {
-                        Button {
-                            plaintextHidden.toggle()
-                        } label: {
-                            Image(systemName: "eye")
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("显示明文")
-                    } else {
+                        .font(.body.monospaced())
+                        .foregroundStyle(KeyrefTheme.onSlab)
+                        .lineLimit(plaintextHidden ? 1 : 4)
+                        Spacer(minLength: 8)
+                        // 收起 / 拷贝是 §3.8 的自绘浮层：用系统玻璃 API，
+                        // 同屏两个玻璃元素包进 GlassEffectContainer。
                         GlassEffectContainer(spacing: 10) {
                             HStack(spacing: 10) {
-                                Button {
-                                    app.backendCopyPlaintext(plaintext)
-                                } label: {
-                                    Image(systemName: "doc.on.doc")
-                                        .padding(8)
+                                if plaintextHidden {
+                                    Button {
+                                        plaintextHidden.toggle()
+                                    } label: {
+                                        Image(systemName: "eye")
+                                            .font(.callout.weight(.semibold))
+                                            .padding(7)
+                                    }
+                                    .glassEffect(.regular, in: .circle)
+                                    .accessibilityLabel("显示明文")
+                                } else {
+                                    Button {
+                                        app.backendCopyPlaintext(plaintext)
+                                    } label: {
+                                        Image(systemName: "doc.on.doc")
+                                            .font(.callout.weight(.semibold))
+                                            .padding(7)
+                                    }
+                                    .glassEffect(.regular, in: .circle)
+                                    .accessibilityLabel("拷贝")
+                                    Button {
+                                        plaintextHidden.toggle()
+                                    } label: {
+                                        Image(systemName: "eye.slash")
+                                            .font(.callout.weight(.semibold))
+                                            .padding(7)
+                                    }
+                                    .glassEffect(.regular, in: .circle)
+                                    .accessibilityLabel("收起明文")
                                 }
-                                .glassEffect(.regular)
-                                .accessibilityLabel("拷贝")
-                                Button {
-                                    plaintextHidden.toggle()
-                                } label: {
-                                    Image(systemName: "eye.slash")
-                                        .padding(8)
-                                }
-                                .glassEffect(.regular)
-                                .accessibilityLabel("收起明文")
                             }
                         }
                     }
+                    if !plaintextHidden {
+                        Text("30 秒无操作后自动收起")
+                            .font(.caption2)
+                            .foregroundStyle(KeyrefTheme.muted.opacity(0.8))
+                    }
                 }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(KeyrefTheme.slab,
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(KeyrefTheme.onSlab.opacity(0.18), lineWidth: 1)
+                )
             } else {
                 Button {
                     Task {
@@ -341,7 +433,10 @@ struct ItemDetailView: View {
                 } label: {
                     Label("查看明文", systemImage: "faceid")
                 }
+                .buttonStyle(KeyrefPrimaryButtonStyle())
             }
+        } header: {
+            Text("明文")
         }
     }
 
@@ -401,6 +496,7 @@ struct RotateSheet: View {
                 }
             }
         }
+        .keyrefListSurface()
         .presentationDetents([.medium])
     }
 }
@@ -428,6 +524,7 @@ struct ItemEditView: View {
         }
         .navigationTitle(model.isCreate ? "新建条目" : "编辑条目")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("取消") { dismiss() }
@@ -497,12 +594,12 @@ struct ItemEditView: View {
                 if !model.refIsValid {
                     Label("ref 需要是小写字母开头的短横线串。", systemImage: "exclamationmark.circle")
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                 }
                 if let conflict = model.refConflictMessage {
                     Label(conflict, systemImage: "exclamationmark.circle")
                         .font(.footnote)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                 }
                 Picker("类型", selection: $model.type) {
                     Text("API key").tag("api_key")
@@ -536,7 +633,7 @@ struct ItemEditView: View {
                 Section {
                     Label("仅本机条目的密文不上传服务器。手机丢失时只能靠 iCloud 副本找回；每次使用都需要手机批准。", systemImage: "exclamationmark.shield")
                         .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(KeyrefTheme.warning)
                 } header: {
                     Text("仅本机")
                 }
@@ -609,7 +706,7 @@ struct ItemEditView: View {
                     if DefaultDeny.isDenied(command) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(KeyrefTheme.danger)
                             .accessibilityLabel("在默认拒绝名单上")
                     }
                     Spacer()
@@ -657,7 +754,7 @@ struct ItemEditView: View {
                         if DefaultDeny.isDenied(suggestion) {
                             Text("默认拒绝")
                                 .font(.caption2)
-                                .foregroundStyle(.red)
+                                .foregroundStyle(KeyrefTheme.danger)
                         }
                         Image(systemName: "plus.circle")
                     }

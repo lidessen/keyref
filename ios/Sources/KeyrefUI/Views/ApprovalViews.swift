@@ -41,10 +41,20 @@ struct ApprovalInboxView: View {
 
     /// S8（§5）：空态文案。
     var emptyState: some View {
-        ContentUnavailableView {
-            Label("没有待审批的请求", systemImage: "checkmark.shield.fill")
-        } description: {
-            Text("当 agent 发起需要批准的执行时，请求会出现在这里，2 分钟内有效。")
+        ZStack {
+            KeyrefBackdrop()
+            VStack(spacing: 14) {
+                KeyrefGlyphCircle(systemName: "checkmark.shield.fill",
+                                  tint: KeyrefTheme.success)
+                Text("没有待审批的请求")
+                    .font(.title3.weight(.semibold))
+                Text("当 agent 发起需要批准的执行时，请求会出现在这里，2 分钟内有效。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+            }
+            .padding(28)
         }
     }
 
@@ -57,12 +67,19 @@ struct ApprovalInboxView: View {
                     } label: {
                         ApprovalRowView(entry: entry)
                     }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 12))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparatorTint(KeyrefTheme.hairline)
                 } else {
                     invalidRow(entry)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 12))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparatorTint(KeyrefTheme.hairline)
                 }
             }
         }
         .listStyle(.plain)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 
@@ -91,22 +108,25 @@ struct ApprovalRowView: View {
     let entry: ApprovalInboxEntry
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(entry.itemName)
-                    .font(.body.weight(.medium))
-                Spacer()
-                ApprovalCountdown(expiresAt: entry.expiresAt)
+        HStack(alignment: .top, spacing: 12) {
+            IconGlyph(systemName: "checkmark.shield.fill", size: 20)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(entry.itemName)
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 4)
+                    ApprovalCountdown(expiresAt: entry.expiresAt)
+                }
+                Text(entry.argv.joined(separator: " "))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text("\(entry.cliDeviceLabel) · \(entry.injectionLabel)")
+                    .font(.caption2)
+                    .foregroundStyle(KeyrefTheme.muted)
             }
-            Text(entry.argv.joined(separator: " "))
-                .font(.footnote.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            Text("\(entry.cliDeviceLabel) · \(entry.injectionLabel)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 12)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(entry.itemName)，来自 \(entry.cliDeviceLabel)，\(entry.injectionLabel)")
     }
@@ -126,13 +146,11 @@ struct ApprovalCountdown: View {
         if expired {
             Text("已过期")
                 .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.15), in: Capsule())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(KeyrefTheme.muted)
         } else {
             Text(timerInterval: Date()...expiryDate, countsDown: true)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.orange)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(KeyrefTheme.warning)
                 .accessibilityLabel("剩余 \(Int(expiryDate.timeIntervalSinceNow / 60)) 分钟")
         }
     }
@@ -155,18 +173,30 @@ struct ApprovalDetailView: View {
         }
         .navigationTitle("审批请求")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 
     /// argv 原文：占位符形式，keyref 不记录替换后的秘密（§7.5）。
     var commandSection: some View {
         Section {
-            ForEach(Array(entry.argv.enumerated()), id: \.offset) { _, arg in
-                Text(arg)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-                    .accessibilityLabel(Format.argvSpokenForm(arg))
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(Array(entry.argv.enumerated()), id: \.offset) { _, arg in
+                    Text(arg)
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(KeyrefTheme.onSlab)
+                        .textSelection(.enabled)
+                        .accessibilityLabel(Format.argvSpokenForm(arg))
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(KeyrefTheme.slab,
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(KeyrefTheme.onSlab.opacity(0.18), lineWidth: 1)
+            )
         } header: {
             Text("命令原文")
         } footer: {
@@ -208,7 +238,7 @@ struct ApprovalDetailView: View {
                         .frame(maxWidth: .infinity)
                 }
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(KeyrefPrimaryButtonStyle())
             .disabled(expired || working)
             Button(role: .destructive) {
                 Task { await decide(false) }

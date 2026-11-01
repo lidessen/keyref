@@ -28,11 +28,15 @@ public enum ExpiryMark: Equatable, Sendable {
 }
 
 public enum Format {
+    /// 紧凑的本地时间戳（`2026-11-01 04:27`）。中文长日期
+    /// （`2026年11月1日 04:27`）在条目详情的标签—值行里放不下，会被截成
+    /// 「2026年11月1日 04:…」；紧凑写法单行放得下、和其它元数据一样等宽，
+    /// 字典序也就是时间序。§2.5 只要求「创建与修改时间」出现在条目详情里，
+    /// 没有钉死格式。
     static let isoFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        f.locale = Locale(identifier: "zh_CN")
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
         return f
     }()
 

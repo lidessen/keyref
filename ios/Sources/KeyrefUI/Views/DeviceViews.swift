@@ -31,6 +31,7 @@ struct DeviceListView: View {
                     deviceSections
                 }
             }
+            .keyrefListSurface()
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
             .navigationTitle("设备")
             .toolbar {
@@ -86,16 +87,22 @@ struct DeviceListView: View {
             NavigationLink {
                 ApprovalInboxView(app: app)
             } label: {
-                HStack {
-                    Label("待审批", systemImage: "checkmark.shield")
+                HStack(spacing: 12) {
+                    IconGlyph(systemName: "checkmark.shield.fill", size: 20)
+                    Text("待审批")
+                        .font(.body.weight(.medium))
                     Spacer()
                     if app.approvals.badgeCount > 0 {
-                        Text("\(app.approvals.badgeCount)")
-                            .font(.caption.weight(.bold))
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(Color.orange.opacity(0.2), in: Capsule())
-                            .foregroundStyle(.orange)
-                            .accessibilityLabel("\(app.approvals.badgeCount) 条待审批请求")
+                        // 角标是一粒琥珀小方点 + 数字：琥珀只在这里点一下。
+                        HStack(spacing: 5) {
+                            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                                .fill(KeyrefTheme.accent)
+                                .frame(width: 6, height: 6)
+                            Text("\(app.approvals.badgeCount)")
+                                .font(.caption.weight(.bold).monospacedDigit())
+                                .foregroundStyle(KeyrefTheme.foreground)
+                        }
+                        .accessibilityLabel("\(app.approvals.badgeCount) 条待审批请求")
                     }
                 }
             }
@@ -106,21 +113,21 @@ struct DeviceListView: View {
 
     var emptySection: some View {
         Section {
-            VStack(spacing: 10) {
-                Image(systemName: "laptopcomputer.and.iphone")
-                    .font(.system(size: 36))
-                    .foregroundStyle(.secondary)
+            VStack(spacing: 12) {
+                KeyrefGlyphCircle(systemName: "laptopcomputer.and.iphone", size: 88)
                 Text("还没有 agent 设备")
-                    .font(.body.weight(.medium))
+                    .font(.body.weight(.semibold))
                 Text("在 agent 的机器上运行 keyref pair，然后用这台手机扫终端上的二维码。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 Button("扫码配对") { showPairing = true }
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(KeyrefPrimaryButtonStyle())
+                    .padding(.top, 4)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 20)
+            .padding(.vertical, 24)
+            .listRowBackground(Color.clear)
         }
     }
 
@@ -133,15 +140,34 @@ struct DeviceListView: View {
                     } label: {
                         deviceRow(localDevice, subtitle: localDevice.isActive ? "正常" : "包裹已失效")
                     }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 12))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparatorTint(KeyrefTheme.hairline)
+                } header: {
+                    KeyrefSectionLabel(text: "本机")
                 }
             }
-            Section {
-                ForEach(devices.activeCLI) { device in
-                    NavigationLink {
-                        DeviceDetailView(app: app, device: device)
-                    } label: {
-                        deviceRow(device, subtitle: device.isPending ? "等待确认" : device.fingerprint)
+            if !devices.activeCLI.isEmpty {
+                Section {
+                    ForEach(devices.activeCLI) { device in
+                        NavigationLink {
+                            DeviceDetailView(app: app, device: device)
+                        } label: {
+                            deviceRow(device, subtitle: device.isPending ? "等待确认" : device.fingerprint)
+                        }
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 12))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparatorTint(KeyrefTheme.hairline)
                     }
+                } header: {
+                    HStack {
+                        KeyrefSectionLabel(text: "agent 设备")
+                        Spacer()
+                        Text("\(devices.activeCLI.count)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(KeyrefTheme.muted)
+                    }
+                    .padding(.horizontal, 4)
                 }
             }
             // Phase 2（§9.4 path 2）：旧手机在线添加第二台 iPhone。
@@ -174,46 +200,39 @@ struct DeviceListView: View {
     }
 
     func deviceRow(_ device: DeviceRow, subtitle: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(device.isCLI ? device.label : "这台 iPhone")
-                    .font(.body.weight(.medium))
-                Spacer()
-                statusBadge(device)
-            }
-            Text(subtitle)
-                .font(.footnote)
-                .monospaced()
-                .foregroundStyle(.secondary)
-            if !device.grants.isEmpty {
-                Text("已授权 \(device.grants.count) 条")
+        HStack(spacing: 12) {
+            IconGlyph(systemName: device.isCLI ? "terminal.fill" : "iphone", size: 20)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(device.isCLI ? device.label : "这台 iPhone")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 6)
+                    statusBadge(device)
+                }
+                Text(subtitle)
                     .font(.caption)
+                    .monospaced()
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !device.grants.isEmpty {
+                    Text("已授权 \(device.grants.count) 条")
+                        .font(.caption2)
+                        .foregroundStyle(KeyrefTheme.muted)
+                }
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 12)
     }
 
     @ViewBuilder
     func statusBadge(_ device: DeviceRow) -> some View {
         if device.isPending {
-            Text("等待确认")
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.orange.opacity(0.15), in: Capsule())
-                .foregroundStyle(.orange)
+            StatusText(text: "等待确认", tint: KeyrefTheme.warning, showDot: true)
         } else if device.isActive {
-            Text("活跃")
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.green.opacity(0.15), in: Capsule())
-                .foregroundStyle(.green)
+            StatusText(text: "活跃", tint: KeyrefTheme.success, showDot: true)
         } else {
-            Text("已撤销")
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.15), in: Capsule())
-                .foregroundStyle(.secondary)
+            StatusText(text: "已撤销", tint: KeyrefTheme.muted)
         }
     }
 }
@@ -385,9 +404,7 @@ struct PermissionDeniedView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "video.slash.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
+            KeyrefGlyphCircle(systemName: "video.slash.fill", tint: KeyrefTheme.muted)
             Text("相机权限已关闭")
                 .font(.title3.weight(.semibold))
             Text("配对码只能用相机扫描，keyref 不提供手动输入的替代路径。到系统设置里打开相机权限，回来继续。")
@@ -397,7 +414,7 @@ struct PermissionDeniedView: View {
             Button("打开设置") {
                 app.openSystemSettings()
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }
@@ -413,9 +430,7 @@ struct NoCameraView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            Image(systemName: "camera.on.rectangle.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.secondary)
+            KeyrefGlyphCircle(systemName: "camera.on.rectangle.fill", tint: KeyrefTheme.muted)
             Text("此设备没有可用相机")
                 .font(.title3.weight(.semibold))
             Text("把终端上出现的二维码对准取景框。配对码 10 分钟内有效。")
@@ -434,14 +449,14 @@ struct NoCameraView: View {
                 Button("解析配对码") {
                     model.handlePayload(manualPayload, items: app.items.rows)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .disabled(manualPayload.isEmpty)
             }
             .padding(.top, 8)
             Button("打开设置") {
                 app.openSystemSettings()
             }
-            .buttonStyle(.glass)
+            .buttonStyle(KeyrefSecondaryButtonStyle())
         }
         .padding(28)
     }
@@ -465,17 +480,30 @@ struct PairVerifyView: View {
 
     var body: some View {
         Form {
-            Section("设备") {
-                LabeledContent("名称", value: offer.label)
-                VStack(alignment: .leading, spacing: 6) {
+            Section {
+                HStack(spacing: 12) {
+                    IconGlyph(systemName: "terminal.fill", size: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("名称")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(offer.label)
+                            .font(.headline)
+                    }
+                    Spacer(minLength: 0)
+                }
+                VStack(alignment: .leading, spacing: 7) {
                     Text("指纹")
-                        .font(.callout)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                     FingerprintText(fingerprint: offer.fingerprint)
+                        .foregroundStyle(KeyrefTheme.foreground)
                     Text("与终端上印出的指纹逐组核对")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            } header: {
+                KeyrefSectionLabel(text: "设备")
             }
             Section("同步服务器") {
                 LabeledContent("配对码指向", value: offer.origin.absoluteString)
@@ -507,7 +535,7 @@ struct PairVerifyView: View {
                             Text(mainButtonLabel)
                         }
                     }
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(KeyrefPrimaryButtonStyle())
                     .disabled(probing || model.switching)
                     if targetMissingVault {
                         Text("你的手机已有保险库，而这台服务器上还没有它。直接切过去只会得到一个空库——先迁移服务器。")
@@ -530,12 +558,13 @@ struct PairVerifyView: View {
                         Text("继续")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(KeyrefPrimaryButtonStyle())
                 }
             }
         }
         .navigationTitle("核对配对")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .onAppear {
             targetMissingVault = false
         }
@@ -556,12 +585,14 @@ struct GrantSelectionView: View {
                     Button {
                         model.toggle(row.id)
                     } label: {
-                        HStack {
+                        HStack(spacing: 12) {
                             Image(systemName: model.selected.contains(row.id)
                                   ? "checkmark.circle.fill" : "circle")
+                                .font(.title3)
                                 .foregroundStyle(model.selected.contains(row.id)
-                                                 ? Color.accentColor : Color.secondary)
-                            VStack(alignment: .leading, spacing: 2) {
+                                                 ? KeyrefTheme.success : KeyrefTheme.muted)
+                            ItemTypeGlyph(type: row.type, size: 34)
+                            VStack(alignment: .leading, spacing: 3) {
                                 Text(row.name)
                                 MaskText(row: row)
                             }
@@ -592,12 +623,13 @@ struct GrantSelectionView: View {
                          : "用 Face ID 确认（\(model.itemCount) 条）")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .disabled(model.itemCount == 0)
             }
         }
         .navigationTitle("勾选条目")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 }
@@ -607,19 +639,15 @@ struct PairDoneView: View {
     let onFinish: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green)
-            Text("配对完成")
-                .font(.title2.weight(.semibold))
-            Text("终端会显示成功，并拿到你勾选的条目。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            ResultHero(systemName: "checkmark.seal.fill",
+                       tint: KeyrefTheme.success,
+                       title: "配对完成",
+                       message: "终端会显示成功，并拿到你勾选的条目。")
             Spacer()
             Button("完成") { onFinish() }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }
@@ -630,17 +658,14 @@ struct PairFailedView: View {
     let onRetry: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "xmark.octagon.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.red)
-            Text(message)
-                .font(.callout)
-                .multilineTextAlignment(.center)
+            ResultHero(systemName: "xmark.octagon.fill",
+                       tint: KeyrefTheme.danger,
+                       title: message)
             Spacer()
             Button("返回扫码") { onRetry() }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }
@@ -660,9 +685,26 @@ struct DeviceDetailView: View {
     var body: some View {
         List {
             Section {
+                HStack(spacing: 14) {
+                    IconGlyph(systemName: "terminal.fill", size: 20)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(device.label)
+                            .font(.title3.weight(.semibold))
+                        Text(device.fingerprint)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 0)
+                    statusPillForDetail
+                }
+                .padding(.vertical, 4)
+            }
+            Section {
                 InfoRow(label: "状态", value: device.isActive ? "活跃" : device.isPending ? "等待确认" : "已撤销")
                 InfoRow(label: "指纹", value: device.fingerprint, mono: true)
-                InfoRow(label: "添加时间", value: Format.dateTime(device.createdAt))
+                InfoRow(label: "添加时间", value: Format.dateTime(device.createdAt), mono: true)
                 Button {
                     labelDraft = device.label
                     editingLabel = true
@@ -692,6 +734,7 @@ struct DeviceDetailView: View {
         }
         .navigationTitle(device.label)
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
         .sheet(isPresented: $showAddGrant) {
             GrantAddSheet(app: app, device: device)
@@ -722,6 +765,17 @@ struct DeviceDetailView: View {
             Button("取消", role: .cancel) { revokeTarget = nil }
         } message: {
             Text("设备下次同步后失效。已经拷到那台机器上的密钥不受影响——必要时撤销整台设备并轮换（B6）。")
+        }
+    }
+
+    @ViewBuilder
+    private var statusPillForDetail: some View {
+        if device.isPending {
+            StatusText(text: "等待确认", tint: KeyrefTheme.warning, showDot: true)
+        } else if device.isActive {
+            StatusText(text: "活跃", tint: KeyrefTheme.success, showDot: true)
+        } else {
+            StatusText(text: "已撤销", tint: KeyrefTheme.muted)
         }
     }
 
@@ -824,12 +878,14 @@ struct GrantAddSheet: View {
                                 app.haptics.fire(.lightImpact)
                             }
                         } label: {
-                            HStack {
+                            HStack(spacing: 12) {
                                 Image(systemName: selected.contains(row.id)
                                       ? "checkmark.circle.fill" : "circle")
+                                    .font(.title3)
                                     .foregroundStyle(selected.contains(row.id)
-                                                     ? Color.accentColor : Color.secondary)
-                                VStack(alignment: .leading, spacing: 2) {
+                                                     ? KeyrefTheme.success : KeyrefTheme.muted)
+                                ItemTypeGlyph(type: row.type, size: 34)
+                                VStack(alignment: .leading, spacing: 3) {
                                     Text(row.name)
                                     MaskText(row: row)
                                 }
@@ -859,12 +915,13 @@ struct GrantAddSheet: View {
                         Text(selected.isEmpty ? "授予（0 条）" : "授予（\(selected.count) 条）")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(KeyrefPrimaryButtonStyle())
                     .disabled(selected.isEmpty)
                 }
             }
             .navigationTitle("追加授权")
             .navigationBarTitleDisplayMode(.inline)
+            .keyrefListSurface()
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -886,9 +943,23 @@ struct LocalDeviceDetailView: View {
     var body: some View {
         List {
             Section {
+                HStack(spacing: 14) {
+                    IconGlyph(systemName: "iphone", size: 20)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("这台 iPhone")
+                            .font(.title3.weight(.semibold))
+                        Text(device.isActive ? "安全隔区包裹正常" : "包裹已失效")
+                            .font(.footnote)
+                            .foregroundStyle(device.isActive ? KeyrefTheme.success : KeyrefTheme.danger)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 4)
+            }
+            Section {
                 InfoRow(label: "状态", value: device.isActive ? "正常" : "包裹已失效")
                 InfoRow(label: "指纹", value: device.fingerprint, mono: true)
-                InfoRow(label: "创建时间", value: Format.dateTime(device.createdAt))
+                InfoRow(label: "创建时间", value: Format.dateTime(device.createdAt), mono: true)
             } header: {
                 Text("本机")
             } footer: {
@@ -911,6 +982,7 @@ struct LocalDeviceDetailView: View {
         }
         .navigationTitle("这台 iPhone")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .sheet(isPresented: $showExplanation) {
             SecurityExplanationView()
         }
@@ -1015,6 +1087,7 @@ struct RevokeFlowBody: View {
         }
         .navigationTitle("撤销 \(model.device.label)")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 
@@ -1038,58 +1111,45 @@ struct RevokeFlowBody: View {
     }
 
     var donePage: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green)
-            Text("已撤销")
-                .font(.title2.weight(.semibold))
-            Text("那台设备下次联网同步时会收到停用指令。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            ResultHero(systemName: "checkmark.seal.fill",
+                       tint: KeyrefTheme.success,
+                       title: "已撤销",
+                       message: "那台设备下次联网同步时会收到停用指令。")
             Spacer()
             Button("完成") { onFinish() }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }
 
     /// 失败态：轮换中途中断 → 「撤销已生效，轮换还剩 K 条」+「继续轮换」。
     func interruptedPage(remaining: Int) -> some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 44))
-                .foregroundStyle(.orange)
-            Text("撤销已生效，轮换还剩 \(remaining) 条")
-                .font(.title3.weight(.semibold))
-                .multilineTextAlignment(.center)
-            Text("目录签名与授权删除已落库（撤销本身不可回退），轮换作为可恢复任务继续。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            ResultHero(systemName: "arrow.triangle.2.circlepath",
+                       tint: KeyrefTheme.warning,
+                       title: "撤销已生效，轮换还剩 \(remaining) 条",
+                       message: "目录签名与授权删除已落库（撤销本身不可回退），轮换作为可恢复任务继续。")
             Spacer()
             Button("继续轮换") {
                 Task { await model.resume(authenticator: app.authenticator) }
             }
-            .buttonStyle(.glassProminent)
+            .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }
 
     func failedPage(message: String) -> some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "xmark.octagon.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.red)
-            Text(message)
-                .font(.callout)
-                .multilineTextAlignment(.center)
+            ResultHero(systemName: "xmark.octagon.fill",
+                       tint: KeyrefTheme.danger,
+                       title: message)
             Spacer()
             Button("返回") { onFinish() }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }

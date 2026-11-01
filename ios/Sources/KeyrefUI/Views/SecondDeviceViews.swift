@@ -92,34 +92,47 @@ struct JoinOfferPage: View {
     let onContinue: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Text("让旧手机扫这个码")
-                .font(.title3.weight(.semibold))
-            Text("旧手机会用 Face ID 确认，把这台手机加入它的保险库。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            QRCodeView(payload: offer.payload(), size: 220)
-                .accessibilityLabel("这是配对码，内容是设备公钥，不含任何秘密")
-            VStack(alignment: .leading, spacing: 6) {
-                LabeledContent("设备名", value: offer.label)
-                LabeledContent("同步服务器", value: offer.origin.absoluteString)
-                    .font(.callout.monospaced())
+        ZStack {
+            KeyrefBackdrop()
+            VStack(spacing: 18) {
+                Spacer()
+                HStack(spacing: 12) {
+                    IconGlyph(systemName: "iphone.badge.plus", size: 20)
+                    Text("让旧手机扫这个码")
+                        .font(.title3.weight(.semibold))
+                    Spacer(minLength: 0)
+                }
+                Text("旧手机会用 Face ID 确认，把这台手机加入它的保险库。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                QRCodeView(payload: offer.payload(), size: 220)
+                    .padding(14)
+                    .background(Color.white,
+                                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(KeyrefTheme.hairline, lineWidth: 1)
+                    )
+                    .accessibilityLabel("这是配对码，内容是设备公钥，不含任何秘密")
+                KeyrefBlock {
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("设备名", value: offer.label)
+                        Divider().overlay(KeyrefTheme.hairline)
+                        LabeledContent("同步服务器", value: offer.origin.absoluteString)
+                            .font(.callout.monospaced())
+                    }
+                    .font(.callout)
+                }
+                Spacer()
+                Button {
+                    onContinue()
+                } label: {
+                    Text("旧手机已扫码，下一步")
+                }
+                .buttonStyle(KeyrefPrimaryButtonStyle())
             }
-            .font(.callout)
-            .padding(.horizontal, 8)
-            Spacer()
-            Button {
-                onContinue()
-            } label: {
-                Text("旧手机已扫码，下一步")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.glassProminent)
+            .padding(24)
         }
-        .padding(24)
     }
 }
 
@@ -130,9 +143,7 @@ struct JoinHandoffInputPage: View {
     var body: some View {
         VStack(spacing: 18) {
             Spacer()
-            Image(systemName: "arrow.left.arrow.right.circle.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.tint)
+            KeyrefGlyphCircle(systemName: "arrow.left.arrow.right.circle.fill")
             Text("用这台手机扫旧手机上的交接码")
                 .font(.title3.weight(.semibold))
                 .multilineTextAlignment(.center)
@@ -156,7 +167,7 @@ struct JoinHandoffInputPage: View {
                 Button("接收交接") {
                     Task { await model.submitHandoff(model.manualHandoffInput) }
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .disabled(model.manualHandoffInput.isEmpty)
             }
             #endif
@@ -220,24 +231,18 @@ struct JoinDoneNewPage: View {
     let onFinish: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.green)
-            Text("已加入保险库")
-                .font(.title2.weight(.semibold))
-            Text("这台手机现在是第二台 owner 设备，\(itemCount) 条条目已经同步并可以解开。两台手机都能创建和修改条目。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Text("恢复码没有变化，仍然是唯一的恢复凭证。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            ResultHero(
+                systemName: "checkmark.seal.fill",
+                tint: KeyrefTheme.success,
+                title: "已加入保险库",
+                message: "这台手机现在是第二台 owner 设备，\(itemCount) 条条目已经同步并可以解开。两台手机都能创建和修改条目。",
+                footnote: "恢复码没有变化，仍然是唯一的恢复凭证。"
+            )
             Spacer()
             Button("进入保险库") { onFinish() }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }
@@ -339,6 +344,7 @@ struct JoinVerifyPage: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     FingerprintText(fingerprint: offer.fingerprint)
+                        .foregroundStyle(KeyrefTheme.foreground)
                     Text("与新手机屏幕上显示的指纹逐组核对")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -369,7 +375,7 @@ struct JoinVerifyPage: View {
                     Text(model.originMismatch ? "服务器不一致，无法继续" : "用 Face ID 确认交接")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
                 .disabled(model.originMismatch)
                 Button("重新扫描") {
                     model.backToScanning()
@@ -378,6 +384,7 @@ struct JoinVerifyPage: View {
         }
         .navigationTitle("核对交接")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 }
@@ -389,29 +396,38 @@ struct JoinHandoffShowPage: View {
     let onFinish: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.green)
-            Text("目录已更新，两台 iPhone 都是 owner")
-                .font(.title3.weight(.semibold))
-                .multilineTextAlignment(.center)
-            Text("把这个交接码给新手机扫。它只对那台手机的密钥有效。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            QRCodeView(payload: payload, size: 220)
-                .accessibilityLabel("这是交接码，内容是只有新手机能解开的主密钥加密包裹")
-            Text("交接完成后，这个码就作废了。不要截图或转发。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Spacer()
-            Button("完成") { onFinish() }
-                .buttonStyle(.glassProminent)
+        ZStack {
+            KeyrefBackdrop()
+            VStack(spacing: 18) {
+                Spacer()
+                HStack(spacing: 12) {
+                    IconGlyph(systemName: "checkmark.seal.fill", size: 20)
+                    Text("目录已更新，两台 iPhone 都是 owner")
+                        .font(.title3.weight(.semibold))
+                    Spacer(minLength: 0)
+                }
+                Text("把这个交接码给新手机扫。它只对那台手机的密钥有效。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                QRCodeView(payload: payload, size: 220)
+                    .padding(14)
+                    .background(Color.white,
+                                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(KeyrefTheme.hairline, lineWidth: 1)
+                    )
+                    .accessibilityLabel("这是交接码，内容是只有新手机能解开的主密钥加密包裹")
+                Text("交接完成后，这个码就作废了。不要截图或转发。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
+                Button("完成") { onFinish() }
+                    .buttonStyle(KeyrefPrimaryButtonStyle())
+            }
+            .padding(24)
         }
-        .padding(24)
     }
 }
 
@@ -420,17 +436,14 @@ struct JoinFailedPage: View {
     let onRetry: () -> Void
 
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 0) {
             Spacer()
-            Image(systemName: "xmark.octagon.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.red)
-            Text(message)
-                .font(.callout)
-                .multilineTextAlignment(.center)
+            ResultHero(systemName: "xmark.octagon.fill",
+                       tint: KeyrefTheme.danger,
+                       title: message)
             Spacer()
             Button("重试") { onRetry() }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(KeyrefPrimaryButtonStyle())
         }
         .padding(28)
     }

@@ -199,7 +199,6 @@ struct KeyrefApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(app: app)
-                .tint(.orange)
         }
     }
 

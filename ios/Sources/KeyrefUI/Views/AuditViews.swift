@@ -44,10 +44,19 @@ struct AuditListView: View {
 
     /// 空态（§2.11）。
     var emptyState: some View {
-        ContentUnavailableView {
-            Label("还没有审计记录", systemImage: "list.bullet.rectangle")
-        } description: {
-            Text("agent 第一次用 keyref exec 之后，每一次尝试——包括被拒绝的——都会出现在这里。")
+        ZStack {
+            KeyrefBackdrop()
+            VStack(spacing: 14) {
+                KeyrefGlyphCircle(systemName: "list.bullet.rectangle")
+                Text("还没有审计记录")
+                    .font(.title3.weight(.semibold))
+                Text("agent 第一次用 keyref exec 之后，每一次尝试——包括被拒绝的——都会出现在这里。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+            }
+            .padding(28)
         }
     }
 
@@ -94,12 +103,26 @@ struct AuditListView: View {
                     } label: {
                         AuditRowView(row: row, deviceLabel: audit.deviceLabel(row.deviceID))
                     }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 12))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparatorTint(KeyrefTheme.hairline)
                 }
+            } header: {
+                HStack {
+                    KeyrefSectionLabel(text: "最近事件")
+                    Spacer()
+                    Text("\(audit.filtered.count)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(KeyrefTheme.muted)
+                }
+                .padding(.horizontal, 4)
             } footer: {
                 Text(AuditStore.retentionFootnote)
+                    .padding(.top, 4)
             }
         }
         .listStyle(.plain)
+        .keyrefListSurface()
         .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
     }
 }
@@ -111,35 +134,60 @@ struct AuditRowView: View {
 
     var body: some View {
         if row.decryptFailed || row.payload == nil {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("一条无法解密的记录")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                Text(Format.dateTime(row.createdAt))
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
-        } else if let payload = row.payload {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(Format.dateTime(row.createdAt))
-                        .font(.caption)
+            HStack(spacing: 12) {
+                IconGlyph(systemName: "questionmark", tint: KeyrefTheme.muted, size: 20)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("一条无法解密的记录")
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
-                    Spacer()
-                    resultBadge(payload)
+                    Text(Format.dateTime(row.createdAt))
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
                 }
-                Text(deviceLabel)
-                    .font(.footnote.weight(.medium))
-                Text(payload.refs.isEmpty ? "（无 ref）" : payload.refs.joined(separator: "、"))
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text("脱敏替换 \(payload.redactions) 次")
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 11)
+        } else if let payload = row.payload {
+            HStack(alignment: .top, spacing: 12) {
+                IconGlyph(systemName: glyph(payload), tint: tint(payload), size: 20)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(deviceLabel)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        resultBadge(payload)
+                    }
+                    Text(payload.refs.isEmpty ? "（无 ref）" : payload.refs.joined(separator: "、"))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(KeyrefTheme.foreground)
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(Format.dateTime(row.createdAt))
+                        Text("·")
+                        Text("脱敏替换 \(payload.redactions) 次")
+                    }
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                }
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 11)
         }
+    }
+
+    private func denied(_ payload: AuditEventPayload) -> Bool {
+        Format.auditResultBadge(policyResult: payload.policyResult,
+                                childExit: payload.childExit) == "被拒绝"
+    }
+
+    private func glyph(_ payload: AuditEventPayload) -> String {
+        if denied(payload) { return "xmark" }
+        return payload.childExit == 0 ? "checkmark" : "exclamationmark"
+    }
+
+    private func tint(_ payload: AuditEventPayload) -> Color {
+        if denied(payload) { return KeyrefTheme.danger }
+        return payload.childExit == 0 ? KeyrefTheme.success : KeyrefTheme.warning
     }
 
     @ViewBuilder
@@ -147,11 +195,8 @@ struct AuditRowView: View {
         let text = Format.auditResultBadge(policyResult: payload.policyResult,
                                            childExit: payload.childExit)
         let denied = text == "被拒绝"
-        Text(text)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background((denied ? Color.red : Color.green).opacity(0.14), in: Capsule())
-            .foregroundStyle(denied ? Color.red : Color.green)
+        StatusText(text: text,
+                   tint: denied ? KeyrefTheme.danger : KeyrefTheme.success)
     }
 }
 
@@ -180,7 +225,7 @@ struct AuditDetailView: View {
                     }
                     InfoRow(label: "退出码", value: String(payload.childExit))
                     InfoRow(label: "脱敏替换次数", value: String(payload.redactions))
-                    InfoRow(label: "时间", value: Format.dateTime(row.createdAt))
+                    InfoRow(label: "时间", value: Format.dateTime(row.createdAt), mono: true)
                     InfoRow(label: "设备", value: app.audit.deviceLabel(row.deviceID))
                 }
                 Section {
@@ -197,5 +242,6 @@ struct AuditDetailView: View {
         }
         .navigationTitle("事件详情")
         .navigationBarTitleDisplayMode(.inline)
+        .keyrefListSurface()
     }
 }

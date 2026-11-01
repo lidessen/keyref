@@ -109,14 +109,18 @@ public final class SettingsStore {
 
     /// S10: 官方托管 / 自托管 origin 归属。
     public var hostedBadge: String {
-        let hosted: Bool
-        if let account {
-            hosted = account.isHosted
-        } else {
-            hosted = backend.origin.host?.hasSuffix("keyref.app") ?? false
-        }
-        return hosted ? "官方托管 · 只保存密文，受免费档配额约束"
-                      : "自托管 · 密文送到你指定的服务器，端到端加密不变"
+        isHosted ? "官方托管 · 只保存密文，受免费档配额约束"
+                 : "自托管 · 密文送到你指定的服务器，端到端加密不变"
+    }
+
+    /// 只给窄格子用的短标签（摘要卡的「托管」一栏放不下长句）。
+    public var hostedShortBadge: String {
+        isHosted ? "官方托管" : "自托管"
+    }
+
+    public var isHosted: Bool {
+        if let account { return account.isHosted }
+        return backend.origin.host?.hasSuffix("keyref.app") ?? false
     }
 
     public var planLabel: String {

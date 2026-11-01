@@ -70,6 +70,7 @@ struct CloudBackupView: View {
             }
         }
         .navigationTitle("iCloud 副本")
+        .keyrefListSurface()
         .task { await refresh() }
     }
 
@@ -112,7 +113,7 @@ struct ItemKeyRotationView: View {
                     LabeledContent("已轮换", value: "\(summary.rotatedCount) 条")
                     if summary.failedCount > 0 {
                         Label("\(summary.failedCount) 条失败，可重试（逐条自洽）。", systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(KeyrefTheme.warning)
                     }
                 }
                 Button {
@@ -134,11 +135,12 @@ struct ItemKeyRotationView: View {
             if let errorMessage {
                 Section {
                     Label(errorMessage, systemImage: "xmark.octagon")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(KeyrefTheme.danger)
                 }
             }
         }
         .navigationTitle("轮换条目密钥")
+        .keyrefListSurface()
     }
 
     private func runRotation() {
