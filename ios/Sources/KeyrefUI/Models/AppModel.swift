@@ -49,6 +49,10 @@ public final class AppModel {
     public let settings: SettingsStore
     /// 审批收件箱（Phase 2, §8.3）：前台轮询 + 待审批角标。
     public let approvals: ApprovalsStore
+    /// 短信验证码收件箱（v0.8 §14.4）：打开时拉取，按来源设备分组。
+    public let messages: MessagesStore
+    /// 自动审批委托（design v0.8 §14.8）：设置页状态行 + 编辑页。
+    public let delegation: DelegationStore
     /// APNs 注册状态机（Phase 2, §13）：解锁且已配对后注册；推送响应经
     /// AppDelegate 汇聚到 handleApprovalPush。App 注入真机驱动；测试/预览
     /// 注入 fake 或 nil（不注册，轮询兜底）。
@@ -72,6 +76,8 @@ public final class AppModel {
         self.audit = AuditStore(backend: backend, haptics: haptics)
         self.settings = SettingsStore(backend: backend, haptics: haptics, autoLock: autoLock)
         self.approvals = ApprovalsStore(backend: backend, haptics: haptics)
+        self.messages = MessagesStore(backend: backend, haptics: haptics)
+        self.delegation = DelegationStore(backend: backend, haptics: haptics)
         self.push = PushRegistrationStore(backend: backend, driver: pushDriver, env: pushEnv)
     }
 
@@ -94,6 +100,7 @@ public final class AppModel {
         await devices.refresh()
         await settings.refreshAccount()
         await approvals.refresh()
+        await delegation.refresh()
         // §8.4 90 天轮换提醒（开启时一次性 toast）。
         settings.consumeRotationReminder()
         // §6.7：解锁后合并一次 iCloud 副本（有脏标记才上传；失败静默）。
@@ -242,5 +249,13 @@ public final class AppModel {
         guard pendingPushApprovalID != nil else { return }
         pendingPushApprovalID = nil
         await approvals.triggerRefresh()
+    }
+
+    /// 推送说「收到新的验证码」（v0.8 §14.4）：已解锁就刷新收件箱。
+    /// 未解锁时什么也不做——消息要本机隔区密钥才解得开，也没有可以
+    /// 先记下来的非敏感内容（正文固定、无 sender），打开应用时会再拉。
+    public func handleMessagePush() async {
+        guard phase == .unlocked else { return }
+        await messages.refresh()
     }
 }

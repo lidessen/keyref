@@ -167,6 +167,42 @@ final class CryptoTests: XCTestCase {
                                                     owner: owner, ownerDeviceID: ownerDev))
     }
 
+    // decision_device_id is OPTIONAL (protocol §6.22, design v0.8 §14.5):
+    // audit payloads sealed before the field existed must still decode,
+    // and payloads carrying it must expose it.
+    func testAuditPayloadWithoutDecisionDeviceIDDecodes() throws {
+        let json = """
+        {"time":1790000000000,"device_id":"\(cliDev)","refs":["openai-prod"],
+        "injection":["env"],"argv":["curl"],"allow_argv":false,
+        "policy_result":"allow","approval_result":"approved",
+        "child_exit":0,"redactions":1}
+        """
+        let payload = try WireJSON.decoder.decode(AuditEventPayload.self, from: Data(json.utf8))
+        XCTAssertNil(payload.decisionDeviceID)
+        XCTAssertEqual(payload.approvalResult, "approved")
+        XCTAssertEqual(payload.policyResult, "allow")
+        XCTAssertEqual(payload.refs, ["openai-prod"])
+        // An event with no decision omits the key on the way back out.
+        let reencoded = String(decoding: try WireJSON.encoder.encode(payload), as: UTF8.self)
+        XCTAssertFalse(reencoded.contains("decision_device_id"))
+    }
+
+    func testAuditPayloadWithDecisionDeviceIDDecodes() throws {
+        let decider = "99998888777766665555444433332211"
+        let json = """
+        {"time":1790000000000,"device_id":"\(cliDev)","refs":["sms:00112233445566778899aabbccddeeff"],
+        "injection":["env"],"argv":["curl"],"allow_argv":false,
+        "policy_result":"allow","approval_result":"approved",
+        "decision_device_id":"\(decider)","child_exit":0,"redactions":1}
+        """
+        let payload = try WireJSON.decoder.decode(AuditEventPayload.self, from: Data(json.utf8))
+        XCTAssertEqual(payload.decisionDeviceID, decider)
+        XCTAssertEqual(payload.approvalResult, "approved")
+        let reencoded = String(decoding: try WireJSON.encoder.encode(payload), as: UTF8.self)
+        XCTAssertTrue(reencoded.contains("decision_device_id"))
+        XCTAssertTrue(reencoded.contains(decider))
+    }
+
     // MARK: item crypto
 
     func testSealOpenItemRoundtrip() throws {

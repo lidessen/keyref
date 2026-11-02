@@ -91,6 +91,11 @@ public final class LiveBackend: AppBackend {
     struct ApprovalRecord {
         var row: PendingApproval
         var plaintext: ApprovalRequestPlaintext
+        /// For an SMS consumption: the message's §3.9 plaintext JSON bytes,
+        /// which the decision delivers verbatim (D18), plus the fields the
+        /// approval screen shows next to the command.
+        var messagePayload: Data?
+        var message: MessageInboxEntry?
     }
 
     struct EncryptedAuditRow: Sendable {
@@ -856,7 +861,8 @@ public final class LiveBackend: AppBackend {
             return DeviceRow(id: d.deviceID, kind: d.kind, status: d.status, label: label,
                              createdAt: createdAt,
                              revokedAt: d.status == DeviceStatus.revoked ? 0 : nil,
-                             fingerprint: d.fingerprint, grants: dg)
+                             fingerprint: d.fingerprint, grants: dg,
+                             receiverRole: d.receiverRole)
         }
         return rows
     }
@@ -1144,7 +1150,9 @@ public final class LiveBackend: AppBackend {
             hpkeKEM: old.hpkeKEM, hpkePublicKey: old.hpkePublicKey,
             signAlg: old.signAlg, signPublicKey: old.signPublicKey,
             renewalSignPublicKey: old.renewalSignPublicKey,
-            grantsDigest: old.grantsDigest)
+            grantsDigest: old.grantsDigest,
+            // A revoked device can no longer receive pushes (design §14.4).
+            receiverRole: ReceiverRole.none)
         try await publishDirectory(devices, revision: dir.directoryRevision + 1,
                                    owner: owner, vaultID: vaultID)
     }
@@ -1156,7 +1164,8 @@ public final class LiveBackend: AppBackend {
                             hpkeKEM: $0.hpkeKEM, hpkePublicKey: $0.hpkePublicKey,
                             signAlg: $0.signAlg, signPublicKey: $0.signPublicKey,
                             renewalSignPublicKey: $0.renewalSignPublicKey,
-                            grantsDigest: $0.grantsDigest)
+                            grantsDigest: $0.grantsDigest,
+                            receiverRole: $0.receiverRole)
         }
         let transcript = DirectoryTranscript(vaultID: vaultID, directoryRevision: revision, devices: dd)
         let bytes = try transcript.buildBytes()
@@ -1706,14 +1715,16 @@ public final class LiveBackend: AppBackend {
                     hpkeKEM: owner.kemKEMName, hpkePublicKey: owner.kemPublicKey,
                     signAlg: owner.signer.signAlg, signPublicKey: owner.signPublicKey,
                     renewalSignPublicKey: d.renewalSignPublicKey,
-                    grantsDigest: d.grantsDigest))
+                    grantsDigest: d.grantsDigest,
+                    receiverRole: d.receiverRole))
             } else {
                 devices.append(DirectoryDevice(
                     deviceID: d.deviceID, kind: d.kind, status: d.status,
                     hpkeKEM: d.hpkeKEM, hpkePublicKey: d.hpkePublicKey,
                     signAlg: d.signAlg, signPublicKey: d.signPublicKey,
                     renewalSignPublicKey: d.renewalSignPublicKey,
-                    grantsDigest: d.grantsDigest))
+                    grantsDigest: d.grantsDigest,
+                    receiverRole: d.receiverRole))
             }
         }
         if !foundSelf {
@@ -1828,6 +1839,9 @@ public final class LiveBackend: AppBackend {
         let infos = stateStore.allDeviceInfo()
         var out: [ApprovalInboxEntry] = []
         approvalRecords.removeAll()
+        // Message subjects need the SMS itself on the same screen
+        // (design §14.5): pull the inbox once, lazily.
+        var messageRowsByID: [String: MessageRow]?
         for row in rows {
             let device = devices.first { $0.deviceID == row.cliDeviceID }
             let label = infos[row.cliDeviceID]?.label ?? device?.fingerprint ?? row.cliDeviceID
@@ -1842,6 +1856,60 @@ public final class LiveBackend: AppBackend {
                                                               ownerDeviceID: deviceID)
                 try ApprovalFlows.verifyRequestSignature(row, device: device)
                 try ApprovalFlows.validatePlaintext(plaintext, pending: row)
+
+                if row.isMessageSubject {
+                    // The decision seals the message's plaintext JSON (D18)
+                    // and the screen shows it beside the command; both come
+                    // from opening the envelope for this device.
+                    if messageRowsByID == nil {
+                        messageRowsByID = Dictionary(
+                            uniqueKeysWithValues: ((try? await api.listMessages())?.messages ?? [])
+                                .map { ($0.messageID, $0) })
+                    }
+                    guard let messageRow = messageRowsByID?[row.messageID] else {
+                        out.append(.invalid(row, cliDeviceLabel: label))
+                        continue
+                    }
+                    let sourceDevice = devices.first { $0.deviceID == messageRow.sourceDeviceID }
+                    let sourceLabel = infos[messageRow.sourceDeviceID]?.label
+                        ?? sourceDevice?.fingerprint
+                        ?? messageRow.sourceDeviceID
+                    let raw = try MessageEnvelope.openRaw(
+                        envelope: messageRow.envelope, vaultID: vaultID,
+                        sourceDeviceID: messageRow.sourceDeviceID,
+                        ownerDeviceID: deviceID, owner: owner)
+                    let sms = try MessagePlaintext.decode(raw)
+                    let entry = MessageInboxEntry(
+                        messageID: messageRow.messageID,
+                        sourceDeviceID: messageRow.sourceDeviceID,
+                        sourceLabel: sourceLabel,
+                        sender: sms.sender, body: sms.body, sim: sms.sim ?? "",
+                        receivedAt: sms.receivedAt, createdAt: messageRow.createdAt,
+                        expiresAt: messageRow.expiresAt, status: messageRow.status)
+                    approvalRecords[row.approvalID] = ApprovalRecord(
+                        row: row, plaintext: plaintext, messagePayload: raw, message: entry)
+                    out.append(ApprovalInboxEntry(
+                        approvalID: row.approvalID,
+                        cliDeviceID: row.cliDeviceID,
+                        cliDeviceLabel: label,
+                        itemID: "",
+                        itemName: "验证码",
+                        itemRef: "",
+                        argv: plaintext.argv,
+                        refs: plaintext.refs,
+                        injection: plaintext.injection,
+                        hosts: plaintext.hosts,
+                        createdAt: row.createdAt,
+                        expiresAt: row.expiresAt,
+                        valid: true,
+                        messageID: messageRow.messageID,
+                        messageSender: sms.sender,
+                        messageBody: sms.body,
+                        messageSourceLabel: sourceLabel,
+                        messageReceivedAt: sms.receivedAt))
+                    continue
+                }
+
                 approvalRecords[row.approvalID] = ApprovalRecord(row: row, plaintext: plaintext)
                 let itemMeta = stateStore.itemByID(row.itemID).flatMap {
                     try? decryptMeta($0, vmk: vmk!, vaultID: vaultID)
@@ -1867,6 +1935,95 @@ public final class LiveBackend: AppBackend {
         return out
     }
 
+    // MARK: - messages (design v0.8 §14.4)
+
+    /// Pulls the inbox and opens every envelope for this device. Requires
+    /// an unlocked vault: the message key is HPKE-sealed to this device's
+    /// key, so nothing here is readable before the enclave wrap is open.
+    public func loadMessages() async -> [MessageInboxEntry] {
+        guard let vaultID, let owner, let deviceID = ownDeviceID, vmk != nil else {
+            return []
+        }
+        let rows: [MessageRow]
+        do {
+            rows = try await api.listMessages().messages
+        } catch {
+            return []
+        }
+        let infos = stateStore.allDeviceInfo()
+        let devices = directoryDevices() ?? []
+        var out: [MessageInboxEntry] = []
+        for row in rows where row.isActive {
+            let device = devices.first { $0.deviceID == row.sourceDeviceID }
+            let label = infos[row.sourceDeviceID]?.label
+                ?? device?.fingerprint
+                ?? row.sourceDeviceID
+            do {
+                let plaintext = try MessageEnvelope.open(
+                    envelope: row.envelope, vaultID: vaultID,
+                    sourceDeviceID: row.sourceDeviceID,
+                    ownerDeviceID: deviceID, owner: owner)
+                out.append(MessageInboxEntry(
+                    messageID: row.messageID,
+                    sourceDeviceID: row.sourceDeviceID,
+                    sourceLabel: label,
+                    sender: plaintext.sender,
+                    body: plaintext.body,
+                    sim: plaintext.sim ?? "",
+                    receivedAt: plaintext.receivedAt,
+                    createdAt: row.createdAt,
+                    expiresAt: row.expiresAt,
+                    status: row.status))
+            } catch {
+                // Not sealed to this device (it paired after the message
+                // landed) or corrupt: skip rather than show garbage. The
+                // 24-hour TTL is the documented self-heal (§14.3).
+                continue
+            }
+        }
+        // Newest first, by the server's created_at — never the
+        // sender-reported received_at (§6.29).
+        return out.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    public func deleteMessage(messageID: String) async throws {
+        try await api.deleteMessage(messageID: messageID)
+    }
+
+    /// 设为主接收端（design v0.8 §14.4）。nil 表示取消。角色改动只能随目录
+    /// 重签下发（服务器只递送目录），所以这里改一个字节、revision+1。
+    public func setPrimaryReceiver(deviceID: String?) async throws {
+        let (_, owner, vaultID) = try guardUnlocked()
+        guard let dir = stateStore.currentDirectory(),
+              let devices = directoryDevices() else {
+            throw APIError.notFound
+        }
+        if let deviceID {
+            guard devices.contains(where: {
+                $0.deviceID == deviceID && $0.kind == DeviceKind.ios
+                    && $0.status == DeviceStatus.active
+            }) else {
+                throw APIError.notFound
+            }
+        }
+        let updated = devices.map { d -> KeyrefDirectoryDevice in
+            var copy = d
+            copy.receiverRole = (deviceID != nil && d.deviceID == deviceID)
+                ? ReceiverRole.primary : ReceiverRole.none
+            return copy
+        }
+        try await publishDirectory(updated, revision: dir.directoryRevision + 1,
+                                   owner: owner, vaultID: vaultID)
+    }
+
+    public func clearMessages() async throws {
+        let rows = (try? await api.listMessages().messages) ?? []
+        for row in rows {
+            // Best effort per row: one failure must not strand the rest.
+            try? await api.deleteMessage(messageID: row.messageID)
+        }
+    }
+
     public func decideApproval(approvalID: String, approve: Bool) async throws {
         guard let vaultID else { throw LockError.noVault }
         guard let record = approvalRecords[approvalID] else {
@@ -1874,6 +2031,22 @@ public final class LiveBackend: AppBackend {
         }
         let decision: ApprovalDecisionRequest
         if approve {
+            // §14.5: an SMS consumption delivers the message's plaintext
+            // JSON to the CLI's ephemeral key (D18) — the message key never
+            // crosses over, and the CLI has no endpoint to fetch the
+            // envelope. The VMK is not needed: the payload was decrypted
+            // when the request was loaded (the vault is unlocked by then).
+            if record.row.isMessageSubject {
+                guard let payload = record.messagePayload else {
+                    throw APIError.notFound
+                }
+                decision = try ApprovalFlows.approveMessageDecision(
+                    vaultID: vaultID, pending: record.row,
+                    plaintext: record.plaintext, messagePlaintext: payload)
+                try await api.submitApprovalDecision(approvalID: approvalID, decision)
+                approvalRecords.removeValue(forKey: approvalID)
+                return
+            }
             // §8.3 step 3: Face ID 已过（调用方），现在用请求里的临时
             // X25519 公钥包裹该条目 item key——只对这一次请求、这一个条目。
             guard let (vmkValue, _, _) = try? guardUnlocked() else {
@@ -1946,7 +2119,8 @@ public final class LiveBackend: AppBackend {
                                   hpkeKEM: $0.hpkeKEM, hpkePublicKey: $0.hpkePublicKey,
                                   signAlg: $0.signAlg, signPublicKey: $0.signPublicKey,
                                   renewalSignPublicKey: $0.renewalSignPublicKey,
-                                  grantsDigest: $0.grantsDigest)
+                                  grantsDigest: $0.grantsDigest,
+                                  receiverRole: $0.receiverRole)
         }
         try await publishDirectory(joinDevices, revision: join.revision,
                                    owner: owner, vaultID: vaultID)
@@ -2185,5 +2359,39 @@ public final class LiveBackend: AppBackend {
         snapshotDirty = true
         return SnapshotRestoreSummary(appliedCount: outcome.applied,
                                       snapshotRevision: outcome.snapshotRevision)
+    }
+
+    // MARK: auto-approval delegation (design v0.8 §14.8, §6.31)
+
+    /// `GET /v1/delegation`, parsed. nil when the server has never had
+    /// one (revision 0) or when the stored bytes do not parse — the
+    /// caller then shows "未开启" and the next save PUTs revision 1,
+    /// which the server accepts only if the revision really is free.
+    public func loadDelegation() async -> DelegationState? {
+        guard let vaultID else { return nil }
+        guard let resp = try? await api.getDelegation() else { return nil }
+        let signed = resp.delegationSigned ?? Data()
+        guard resp.delegationRevision >= 1, !signed.isEmpty else { return nil }
+        guard let t = try? KeyrefDelegationTranscript.parse(signed, wantVaultID: vaultID),
+              let policy = try? KeyrefDelegationPolicy.decode(json: t.policyJSON) else {
+            return nil
+        }
+        return DelegationState(revision: resp.delegationRevision, policy: policy)
+    }
+
+    /// Signs the §3.10 transcript with THIS device's owner signing key —
+    /// the same `owner.signer.sign(bytes)` primitive and the same key
+    /// that signs the device directory, so the ASN.1 DER ECDSA signature
+    /// is exactly what the server verifies for §6.15 — then PUTs it.
+    public func putDelegation(revision: UInt64, policy: KeyrefDelegationPolicy) async throws {
+        let (_, owner, vaultID) = try guardUnlocked()
+        let transcript = KeyrefDelegationTranscript(
+            vaultID: vaultID, delegationRevision: revision,
+            policyJSON: try policy.encodedJSONString())
+        let bytes = try transcript.buildBytes()
+        let signature = try owner.signer.sign(bytes)
+        try await api.putDelegation(DelegationPutRequest(
+            delegationRevision: revision, delegationSigned: bytes,
+            signature: signature))
     }
 }

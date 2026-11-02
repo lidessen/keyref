@@ -45,6 +45,19 @@ public enum Format {
         return isoFormatter.string(from: Date(timeIntervalSince1970: Double(millis) / 1000))
     }
 
+    static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    /// 只要时刻（`05:42`）：收件箱一行里，日期由分组与「剩余有效期」承担。
+    public static func shortClock(_ millis: Int64) -> String {
+        guard millis > 0 else { return "—" }
+        return clockFormatter.string(from: Date(timeIntervalSince1970: Double(millis) / 1000))
+    }
+
     public static func bytes(_ count: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: count, countStyle: .binary)
     }

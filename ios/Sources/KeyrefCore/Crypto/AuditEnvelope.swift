@@ -21,12 +21,18 @@ public struct AuditEventPayload: Codable, Equatable, Sendable {
     public var allowArgv: Bool
     public var policyResult: String
     public var approvalResult: String?
+    /// Device that signed the approval decision behind `approvalResult`
+    /// (design v0.8 §14.5/§14.8, protocol §6.22) — the owner or the
+    /// delegated decider. Optional: events from before this field, and
+    /// runs no approval decided, omit it and still decode.
+    public var decisionDeviceID: String?
     public var childExit: Int
     public var redactions: Int
 
     public init(time: Int64, deviceID: String, refs: [String], injection: [String],
                 argv: [String], allowArgv: Bool, policyResult: String,
-                approvalResult: String? = nil, childExit: Int = 0, redactions: Int = 0) {
+                approvalResult: String? = nil, decisionDeviceID: String? = nil,
+                childExit: Int = 0, redactions: Int = 0) {
         self.time = time
         self.deviceID = deviceID
         self.refs = refs
@@ -35,6 +41,7 @@ public struct AuditEventPayload: Codable, Equatable, Sendable {
         self.allowArgv = allowArgv
         self.policyResult = policyResult
         self.approvalResult = approvalResult
+        self.decisionDeviceID = decisionDeviceID
         self.childExit = childExit
         self.redactions = redactions
     }
@@ -48,6 +55,7 @@ public struct AuditEventPayload: Codable, Equatable, Sendable {
         case allowArgv = "allow_argv"
         case policyResult = "policy_result"
         case approvalResult = "approval_result"
+        case decisionDeviceID = "decision_device_id"
         case childExit = "child_exit"
         case redactions
     }

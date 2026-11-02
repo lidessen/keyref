@@ -13,8 +13,10 @@ public enum KeyrefPurpose {
     public static let metaKey = "meta-key"
     public static let itemKey = "item-key"
     public static let oneTimeItemKey = "one-time-item-key"
+    public static let oneTimeMessageKey = "one-time-message-key"
     public static let auditEventKey = "audit-event-key"
     public static let approvalRequest = "approval-request"
+    public static let sourceMessage = "source-message"
 }
 
 public enum KeyrefLabel {
@@ -24,6 +26,7 @@ public enum KeyrefLabel {
     public static let vaultItemKey = "vault-item-key"
     public static let recovery = "recovery"
     public static let audit = "audit"
+    public static let message = "message"
 }
 
 private let domainPrefix = "keyref v1"
@@ -105,4 +108,41 @@ public func auditAAD(vaultID: String, deviceID: String) throws -> Data {
     try requireHexID("vault_id", vaultID)
     try requireHexID("device_id", deviceID)
     return joined([domainPrefix, KeyrefLabel.audit, vaultID, deviceID])
+}
+
+/// "keyref v1" <US> "message" <US> vault_id(hex) <US> source_device_id(hex).
+/// Mirrors the audit AAD (D12): the source seals before the server has
+/// minted a `message_id`, so the AES段 binds the reporting (source)
+/// device, not the message id (§3.9, D15).
+public func messageAAD(vaultID: String, sourceDeviceID: String) throws -> Data {
+    try requireHexID("vault_id", vaultID)
+    try requireHexID("source_device_id", sourceDeviceID)
+    return joined([domainPrefix, KeyrefLabel.message, vaultID, sourceDeviceID])
+}
+
+/// purpose = `source-message` base info (§3.7): the recipients are owners
+/// and delegated deciders.
+public func sourceMessageInfo(vaultID: String, recipientDeviceID: String) throws -> Data {
+    try hpkeInfo(purpose: KeyrefPurpose.sourceMessage,
+                 vaultID: vaultID, recipientDeviceID: recipientDeviceID)
+}
+
+/// The one-time message wrap (design §14.5): the one-time base info under
+/// purpose = `one-time-message-key` followed by message_id, approval_id
+/// and SHA-256(request_ciphertext) — the item-key binding with the
+/// message id in the item position (protocol §3.7).
+public func oneTimeMessageKeyInfo(recipientDeviceID: String, vaultID: String,
+                                  messageID: String, approvalID: String,
+                                  requestCiphertext: Data) throws -> Data {
+    try requireHexID("message_id", messageID)
+    try requireHexID("approval_id", approvalID)
+    var info = try hpkeInfo(purpose: KeyrefPurpose.oneTimeMessageKey,
+                            vaultID: vaultID, recipientDeviceID: recipientDeviceID)
+    info.append(us)
+    info.append(contentsOf: messageID.utf8)
+    info.append(us)
+    info.append(contentsOf: approvalID.utf8)
+    info.append(us)
+    info.append(Data(SHA256.hash(data: requestCiphertext)))
+    return info
 }

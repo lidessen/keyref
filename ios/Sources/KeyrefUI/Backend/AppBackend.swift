@@ -115,6 +115,18 @@ public protocol AppBackend: AnyObject {
     /// 「怀疑恢复码泄露」— same + rotate every item key and re-encrypt (B5).
     func rotateRecoveryCodeFull() async throws -> String
 
+    // MARK: auto-approval delegation (design v0.8 §14.8)
+
+    /// `GET /v1/delegation` → the owner-signed policy the server holds,
+    /// or nil when there has never been one (revision 0). The revision
+    /// here is the basis for the next PUT (§6.31: strictly increasing).
+    func loadDelegation() async -> DelegationState?
+    /// Signs the §3.10 transcript with the owner signing key and PUTs it
+    /// at `revision`. Throws (never reports success locally) when the
+    /// server rejects the signature or the revision is not newer — the
+    /// caller keeps showing the previous state.
+    func putDelegation(revision: UInt64, policy: KeyrefDelegationPolicy) async throws
+
     // MARK: recovery (§2.12, §2.13)
 
     /// Parses the code, fetches materials, unwraps the VMK and builds the
@@ -136,6 +148,23 @@ public protocol AppBackend: AnyObject {
     /// step 3); deny carries no key material. The Face ID gate is the
     /// caller's (one authentication, one semantic, §3.3).
     func decideApproval(approvalID: String, approve: Bool) async throws
+
+    // MARK: messages — the SMS inbox (design v0.8 §14.4)
+
+    /// `GET /v1/messages?since=0`, then opens the §3.9 envelope for this
+    /// device and returns the decrypted inbox. Rows this device is not a
+    /// recipient of (sealed before it paired) are skipped — the 24-hour
+    /// TTL heals that gap (design §14.3). Requires an unlocked vault: the
+    /// envelope is HPKE-sealed to this device's key.
+    func loadMessages() async -> [MessageInboxEntry]
+    /// `DELETE /v1/messages/:id` — the inbox's manual delete (§6.31).
+    func deleteMessage(messageID: String) async throws
+    /// 设为主接收端（§14.4）：re-signs the directory with role=1 on this
+    /// device and 0 everywhere else, revision+1. At most one per vault;
+    /// only an active `kind = ios` device may hold it.
+    func setPrimaryReceiver(deviceID: String?) async throws
+    /// Deletes every message currently in the inbox (清空).
+    func clearMessages() async throws
 
     // MARK: second iPhone (Phase 2, §9.4 path 2)
 

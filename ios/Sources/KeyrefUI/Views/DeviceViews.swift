@@ -76,7 +76,11 @@ struct DeviceListView: View {
                     SecondDeviceFlowView(app: app, role: .oldPhone)
                 }
             }
-            .task { await devices.refresh() }
+            .task {
+                await devices.refresh()
+                // 收件箱计数在设备页可见，进入时顺带拉一次（§14.4：打开时拉取）。
+                await app.messages.refresh()
+            }
         }
     }
 
@@ -84,6 +88,21 @@ struct DeviceListView: View {
     /// ApprovalsStore 只在 App 活跃时进行；这里只是入口。
     var approvalsSection: some View {
         Section {
+            NavigationLink {
+                MessageInboxView(app: app)
+            } label: {
+                HStack(spacing: 12) {
+                    IconGlyph(systemName: "envelope", size: 20)
+                    Text("收件箱")
+                        .font(.body.weight(.medium))
+                    Spacer()
+                    if !app.messages.entries.isEmpty {
+                        Text("\(app.messages.entries.count)")
+                            .font(.caption.weight(.bold).monospacedDigit())
+                            .foregroundStyle(KeyrefTheme.foreground)
+                    }
+                }
+            }
             NavigationLink {
                 ApprovalInboxView(app: app)
             } label: {
@@ -107,7 +126,7 @@ struct DeviceListView: View {
                 }
             }
         } footer: {
-            Text("agent 发起的 approval 请求出现在这里，2 分钟内有效。批准需要 Face ID。")
+            Text("采集设备上传的验证码在收件箱里，24 小时后自动销毁；agent 发起的 approval 请求在待审批里，2 分钟内有效。")
         }
     }
 
@@ -220,6 +239,10 @@ struct DeviceListView: View {
                         .font(.caption2)
                         .foregroundStyle(KeyrefTheme.muted)
                 }
+            }
+            Spacer(minLength: 0)
+            if device.isPrimaryReceiver {
+                StatusText(text: "主接收端", tint: KeyrefTheme.success, showDot: true)
             }
         }
         .padding(.vertical, 12)
@@ -971,6 +994,28 @@ struct LocalDeviceDetailView: View {
                 } label: {
                     LabeledContent("自动锁定", value: app.settings.autoLock.label)
                 }
+            }
+            Section {
+                Button {
+                    Task {
+                        try? await app.backend.setPrimaryReceiver(
+                            deviceID: device.isPrimaryReceiver ? nil : device.id)
+                        await app.devices.refresh()
+                    }
+                } label: {
+                    HStack {
+                        Text(device.isPrimaryReceiver ? "取消主接收端" : "设为主接收端")
+                        Spacer()
+                        if device.isPrimaryReceiver {
+                            StatusText(text: "主接收端", tint: KeyrefTheme.success, showDot: true)
+                        }
+                    }
+                }
+                .disabled(!device.isActive)
+            } header: {
+                Text("短信接收")
+            } footer: {
+                Text("每个保险库至多一台主接收端。验证码与审批的推送指向它；没有登记推送令牌时退回全部 owner 设备。改动会随设备目录重签下发。")
             }
             if !device.isActive {
                 Section {

@@ -24,11 +24,24 @@ public struct ApprovalInboxEntry: Identifiable, Equatable, Sendable {
     public var createdAt: Int64
     public var expiresAt: Int64
     public var valid: Bool
+    /// SMS consumption (design v0.8 §14.5): set instead of itemName/itemRef.
+    /// The approval screen shows the command next to this SMS — sender and
+    /// source label are reference signals, not credentials (B9).
+    public var messageID: String
+    public var messageSender: String
+    public var messageBody: String
+    public var messageSourceLabel: String
+    public var messageReceivedAt: Int64
+
+    public var isMessageSubject: Bool { !messageID.isEmpty }
 
     public init(approvalID: String, cliDeviceID: String, cliDeviceLabel: String,
                 itemID: String, itemName: String, itemRef: String, argv: [String],
                 refs: [String], injection: String, hosts: [String],
-                createdAt: Int64, expiresAt: Int64, valid: Bool) {
+                createdAt: Int64, expiresAt: Int64, valid: Bool,
+                messageID: String = "", messageSender: String = "",
+                messageBody: String = "", messageSourceLabel: String = "",
+                messageReceivedAt: Int64 = 0) {
         self.approvalID = approvalID
         self.cliDeviceID = cliDeviceID
         self.cliDeviceLabel = cliDeviceLabel
@@ -42,6 +55,11 @@ public struct ApprovalInboxEntry: Identifiable, Equatable, Sendable {
         self.createdAt = createdAt
         self.expiresAt = expiresAt
         self.valid = valid
+        self.messageID = messageID
+        self.messageSender = messageSender
+        self.messageBody = messageBody
+        self.messageSourceLabel = messageSourceLabel
+        self.messageReceivedAt = messageReceivedAt
     }
 
     public var id: String { approvalID }

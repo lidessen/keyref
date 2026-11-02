@@ -23,6 +23,7 @@ struct SettingsView: View {
                 serverSection
                 quotaSection
                 securitySection
+                delegationSection
                 recoverySection
                 dangerSection
                 aboutSection
@@ -30,7 +31,11 @@ struct SettingsView: View {
             .navigationTitle("设置")
             .keyrefListSurface()
             .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
-            .task { await settings.refreshAccount() }
+            .task {
+                await settings.refreshAccount()
+                // 状态行要显示服务器上真正生效的委托（design §14.8）。
+                await app.delegation.refresh()
+            }
             .sheet(isPresented: Binding(
                 get: { app.requestServerMigration },
                 set: { app.requestServerMigration = $0 })) {
@@ -190,6 +195,21 @@ struct SettingsView: View {
             }
         } header: {
             Text("安全")
+        }
+    }
+
+    /// 自动审批委托（design v0.8 §14.8）：一行状态，点开编辑页。
+    var delegationSection: some View {
+        Section {
+            NavigationLink {
+                DelegationEditView(app: app)
+            } label: {
+                DelegationStatusRow(app: app)
+            }
+        } header: {
+            Text("自动审批")
+        } footer: {
+            Text("委托给决策器后，命中策略的短信验证码消费不必每次解锁手机——代价是它持有有效期内全部短信明文。不开委托时行为与从前一样：每条都等人确认。")
         }
     }
 

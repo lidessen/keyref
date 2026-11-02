@@ -397,6 +397,49 @@ public struct APIClient: Sendable {
         return try decode(AccountResponse.self, data)
     }
 
+    // MARK: 5.28–5.31 messages (§6.28–§6.31, design v0.8 §14)
+
+    /// `GET /v1/messages?since=` — unexpired messages for this device,
+    /// oldest first, `since` being the server `created_at` cursor (§6.29).
+    public func listMessages(since: Int64 = 0) async throws -> MessageListResponse {
+        let (status, data) = try await get("messages", query: [
+            URLQueryItem(name: "since", value: String(since)),
+        ])
+        try expect([200], status, data)
+        return try decode(MessageListResponse.self, data)
+    }
+
+    /// `DELETE /v1/messages/:id` — the inbox's manual delete (§6.31).
+    public func deleteMessage(messageID: String) async throws {
+        let (status, data) = try await sendEmpty(.delete, "messages/\(messageID)")
+        try expect([204], status, data)
+    }
+
+    /// `PUT /v1/messages/:id/wraps` — re-wrap a message key for a decider
+    /// that paired after the message landed (§6.30, D17).
+    public func putMessageWraps(messageID: String, _ req: MessageWrapsRequest) async throws {
+        let (status, data) = try await send(.put, "messages/\(messageID)/wraps", body: req)
+        try expect([204], status, data)
+    }
+
+    // MARK: 5.32 delegation (§6.31, design v0.8 §14.8)
+
+    /// `GET /v1/delegation` — the owner-signed policy any active device
+    /// may read. Revision 0 with empty blobs means "never installed".
+    public func getDelegation() async throws -> DelegationGetResponse {
+        let (status, data) = try await get("delegation")
+        try expect([200], status, data)
+        return try decode(DelegationGetResponse.self, data)
+    }
+
+    /// `PUT /v1/delegation` — installs the next revision. The server
+    /// requires `delegation_revision` strictly greater than the stored
+    /// one and verifies the owner signature over the transcript.
+    public func putDelegation(_ req: DelegationPutRequest) async throws {
+        let (status, data) = try await send(.put, "delegation", body: req)
+        try expect([204], status, data)
+    }
+
     // MARK: 5.26 billing (§6.26)
 
     public func postBillingApple(_ req: BillingAppleRequest) async throws -> BillingAppleResponse {

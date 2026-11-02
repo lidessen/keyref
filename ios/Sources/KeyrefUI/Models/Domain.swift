@@ -123,10 +123,16 @@ public struct DeviceRow: Identifiable, Equatable, Sendable {
     public var revokedAt: Int64?
     public var fingerprint: String
     public var grants: [GrantSummary]
+    /// SMS-inbox role from the signed directory (design v0.8 §14.4):
+    /// 0 none, 1 primary receiver, 2 inbox.
+    public var receiverRole: UInt8
+
+    public var isPrimaryReceiver: Bool { receiverRole == 1 }
 
     public init(id: String, kind: String, status: String, label: String,
                 createdAt: Int64, revokedAt: Int64? = nil,
-                fingerprint: String, grants: [GrantSummary]) {
+                fingerprint: String, grants: [GrantSummary],
+                receiverRole: UInt8 = 0) {
         self.id = id
         self.kind = kind
         self.status = status
@@ -135,6 +141,7 @@ public struct DeviceRow: Identifiable, Equatable, Sendable {
         self.revokedAt = revokedAt
         self.fingerprint = fingerprint
         self.grants = grants
+        self.receiverRole = receiverRole
     }
 
     public var isCLI: Bool { kind == "cli" }

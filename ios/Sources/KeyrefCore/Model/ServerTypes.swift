@@ -768,23 +768,68 @@ public struct ApprovalListResponse: Codable, Sendable {
 
 /// A pending approval as the owner receives it. The request ciphertext is
 /// opened before display, and the CLI signature is verified first (§6.20).
+///
+/// A row has exactly one subject (protocol D16): `item_id` for an item
+/// consumption, or `message_id` for an SMS consumption (design v0.8
+/// §14.5). The server omits the empty one, so both decode as "".
 public struct PendingApproval: Codable, Equatable, Sendable {
     public var approvalID: String
     public var cliDeviceID: String
     public var itemID: String
+    /// Set when the subject is `message:<id>`; empty for items.
+    public var messageID: String
+    /// The CLI's one-time X25519 public key, sent in the clear for a
+    /// message subject so a decider can build the wrap (D16); empty for
+    /// items (the owner takes it from the decrypted request).
+    public var cliEphemeralPublicKey: Data
     public var requestCiphertext: Data
     public var requestSignature: Data
     public var createdAt: Int64
     public var expiresAt: Int64
 
+    /// True when this approval consumes an SMS message.
+    public var isMessageSubject: Bool { !messageID.isEmpty }
+
     enum CodingKeys: String, CodingKey {
         case approvalID = "approval_id"
         case cliDeviceID = "cli_device_id"
         case itemID = "item_id"
+        case messageID = "message_id"
+        case cliEphemeralPublicKey = "cli_ephemeral_public_key"
         case requestCiphertext = "request_ciphertext"
         case requestSignature = "request_signature"
         case createdAt = "created_at"
         case expiresAt = "expires_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        approvalID = try c.decode(String.self, forKey: .approvalID)
+        cliDeviceID = try c.decode(String.self, forKey: .cliDeviceID)
+        // Omitted for the other subject kind — never a decode failure.
+        itemID = try c.decodeIfPresent(String.self, forKey: .itemID) ?? ""
+        messageID = try c.decodeIfPresent(String.self, forKey: .messageID) ?? ""
+        cliEphemeralPublicKey = try c.decodeIfPresent(Data.self, forKey: .cliEphemeralPublicKey) ?? Data()
+        requestCiphertext = try c.decode(Data.self, forKey: .requestCiphertext)
+        requestSignature = try c.decode(Data.self, forKey: .requestSignature)
+        createdAt = try c.decode(Int64.self, forKey: .createdAt)
+        expiresAt = try c.decode(Int64.self, forKey: .expiresAt)
+    }
+
+    /// Memberwise (declaring `init(from:)` suppresses the synthesized one).
+    public init(approvalID: String, cliDeviceID: String, itemID: String,
+                messageID: String = "", cliEphemeralPublicKey: Data = Data(),
+                requestCiphertext: Data, requestSignature: Data,
+                createdAt: Int64, expiresAt: Int64) {
+        self.approvalID = approvalID
+        self.cliDeviceID = cliDeviceID
+        self.itemID = itemID
+        self.messageID = messageID
+        self.cliEphemeralPublicKey = cliEphemeralPublicKey
+        self.requestCiphertext = requestCiphertext
+        self.requestSignature = requestSignature
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
     }
 }
 
@@ -878,4 +923,63 @@ public struct BillingAppleResponse: Codable, Equatable, Sendable {
         case plan
         case planExpiresAt = "plan_expires_at"
     }
+}
+
+// MARK: - messages (§6.28–§6.31, design v0.8 §14)
+
+/// One message row from `GET /v1/messages` (§6.29). `envelope` is the
+/// §3.9 blob; it only opens for a device that is one of its recipients.
+public struct MessageRow: Codable, Equatable, Sendable {
+    public var messageID: String
+    public var sourceDeviceID: String
+    public var status: String          // "active" | "consumed"
+    public var envelope: Data
+    /// Sender-reported arrival time — display only (ordering and policy
+    /// use `createdAt`, §6.29).
+    public var receivedAt: Int64
+    public var createdAt: Int64
+    public var expiresAt: Int64
+
+    public var isActive: Bool { status == "active" }
+
+    enum CodingKeys: String, CodingKey {
+        case messageID = "message_id"
+        case sourceDeviceID = "source_device_id"
+        case status
+        case envelope
+        case receivedAt = "received_at"
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+    }
+}
+
+public struct MessageListResponse: Codable, Equatable, Sendable {
+    public var messages: [MessageRow]
+    public var cursor: Int64
+    public var hasMore: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case messages
+        case cursor
+        case hasMore = "has_more"
+    }
+}
+
+/// One backfill record of `PUT /v1/messages/:id/wraps` (§6.30): the owner
+/// re-wraps a message key for a decider that paired after the message
+/// landed.
+public struct MessageWrap: Codable, Equatable, Sendable {
+    public var deviceID: String
+    public var hpkeEnc: Data
+    public var wrappedKey: Data
+
+    enum CodingKeys: String, CodingKey {
+        case deviceID = "device_id"
+        case hpkeEnc = "hpke_enc"
+        case wrappedKey = "wrapped_key"
+    }
+}
+
+public struct MessageWrapsRequest: Codable, Equatable, Sendable {
+    public var wraps: [MessageWrap]
 }

@@ -21,11 +21,14 @@ public struct KeyrefDirectoryDevice: Equatable, Sendable {
     public var signPublicKey: Data
     public var renewalSignPublicKey: Data
     public var grantsDigest: Data
+    /// SMS-inbox role (design v0.8 §14.4): 0 none, 1 primary, 2 inbox.
+    public var receiverRole: UInt8
 
     public init(deviceID: String, kind: String, status: String,
                 hpkeKEM: String, hpkePublicKey: Data,
                 signAlg: String, signPublicKey: Data,
-                renewalSignPublicKey: Data, grantsDigest: Data) {
+                renewalSignPublicKey: Data, grantsDigest: Data,
+                receiverRole: UInt8 = ReceiverRole.none) {
         self.deviceID = deviceID
         self.kind = kind
         self.status = status
@@ -35,6 +38,7 @@ public struct KeyrefDirectoryDevice: Equatable, Sendable {
         self.signPublicKey = signPublicKey
         self.renewalSignPublicKey = renewalSignPublicKey
         self.grantsDigest = grantsDigest
+        self.receiverRole = receiverRole
     }
 
     /// SHA-256(sign public key) first 8 bytes as `A1B2-C3D4-E5F6-7890` (§9.1).
@@ -62,7 +66,8 @@ public extension VaultFlows {
                                   hpkeKEM: $0.hpkeKEM, hpkePublicKey: $0.hpkePublicKey,
                                   signAlg: $0.signAlg, signPublicKey: $0.signPublicKey,
                                   renewalSignPublicKey: $0.renewalSignPublicKey,
-                                  grantsDigest: $0.grantsDigest)
+                                  grantsDigest: $0.grantsDigest,
+                                  receiverRole: $0.receiverRole)
         }
     }
 }

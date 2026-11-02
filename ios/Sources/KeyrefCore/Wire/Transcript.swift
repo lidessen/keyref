@@ -40,6 +40,18 @@ public enum KEMName {
 public enum DeviceKind {
     public static let ios = "ios"
     public static let cli = "cli"
+    /// SMS collector (design v0.8 §14.2): upload-only, reads nothing.
+    public static let source = "source"
+    /// Decision delegate (design v0.8 §14.8): sees messages within the TTL.
+    public static let decider = "decider"
+}
+
+/// SMS-inbox role carried as one byte directly after `grants_digest` in
+/// each directory record (design v0.8 §14.4, protocol §3.3).
+public enum ReceiverRole {
+    public static let none: UInt8 = 0
+    public static let primary: UInt8 = 1
+    public static let inbox: UInt8 = 2
 }
 
 public enum DeviceStatus {
@@ -252,12 +264,15 @@ public struct DirectoryDevice: Sendable {
     /// Ed25519 renewal public key (§8.4); empty when the device has none.
     public var renewalSignPublicKey: Data
     public var grantsDigest: Data
+    /// SMS-inbox role (design v0.8 §14.4): one byte after `grants_digest`.
+    public var receiverRole: UInt8
 
     public init(deviceID: String, kind: String, status: String,
                 hpkeKEM: String, hpkePublicKey: Data,
                 signAlg: String, signPublicKey: Data,
                 renewalSignPublicKey: Data = Data(),
-                grantsDigest: Data) {
+                grantsDigest: Data,
+                receiverRole: UInt8 = ReceiverRole.none) {
         self.deviceID = deviceID
         self.kind = kind
         self.status = status
@@ -267,6 +282,7 @@ public struct DirectoryDevice: Sendable {
         self.signPublicKey = signPublicKey
         self.renewalSignPublicKey = renewalSignPublicKey
         self.grantsDigest = grantsDigest
+        self.receiverRole = receiverRole
     }
 }
 
@@ -284,8 +300,9 @@ public struct DirectoryTranscript: Sendable {
 
 private func validateDirectoryDevice(_ d: DirectoryDevice) throws {
     try requireID("device_id", d.deviceID)
-    guard d.kind == DeviceKind.ios || d.kind == DeviceKind.cli else {
-        throw KeyrefWireError.invalidField("kind must be \"ios\" or \"cli\"")
+    guard d.kind == DeviceKind.ios || d.kind == DeviceKind.cli
+            || d.kind == DeviceKind.source || d.kind == DeviceKind.decider else {
+        throw KeyrefWireError.invalidField("kind must be \"ios\", \"cli\", \"source\" or \"decider\"")
     }
     guard d.status == DeviceStatus.pending || d.status == DeviceStatus.active || d.status == DeviceStatus.revoked else {
         throw KeyrefWireError.invalidField("status must be \"pending\", \"active\" or \"revoked\"")
@@ -305,6 +322,16 @@ private func validateDirectoryDevice(_ d: DirectoryDevice) throws {
     }
     guard d.grantsDigest.count == KeyrefSizes.digest else {
         throw KeyrefWireError.invalidField("grants_digest must be \(KeyrefSizes.digest) bytes")
+    }
+    switch d.receiverRole {
+    case ReceiverRole.none:
+        break
+    case ReceiverRole.primary, ReceiverRole.inbox:
+        guard d.kind == DeviceKind.ios else {
+            throw KeyrefWireError.invalidField("receiver roles are reserved for ios devices")
+        }
+    default:
+        throw KeyrefWireError.invalidField("receiver_role must be 0, 1 or 2")
     }
 }
 
@@ -335,6 +362,9 @@ extension DirectoryTranscript {
             b.append(d.signPublicKey); b.append(KeyrefEncoding.fieldSeparator)
             b.append(d.renewalSignPublicKey); b.append(KeyrefEncoding.fieldSeparator)
             b.append(d.grantsDigest)
+            // receiver_role rides directly after the digest, before the
+            // next record's NUL (§3.3, design §14.4).
+            b.append(d.receiverRole)
         }
         return b
     }

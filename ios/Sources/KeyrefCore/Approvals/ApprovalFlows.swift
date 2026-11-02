@@ -25,11 +25,15 @@ public struct ApprovalRequestPlaintext: Codable, Equatable, Sendable {
     public var ephemeralKEM: String
     public var ephemeralPublicKey: Data
     public var createdAt: Int64
+    /// Set for an SMS consumption (design v0.8 §14.5); `itemID` is then
+    /// empty. Exactly one subject is present (protocol D16).
+    public var messageID: String
 
     enum CodingKeys: String, CodingKey {
         case v
         case cliDeviceID = "cli_device_id"
         case itemID = "item_id"
+        case messageID = "message_id"
         case argv
         case refs
         case injection
@@ -39,13 +43,31 @@ public struct ApprovalRequestPlaintext: Codable, Equatable, Sendable {
         case createdAt = "created_at"
     }
 
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        v = try c.decode(Int.self, forKey: .v)
+        cliDeviceID = try c.decode(String.self, forKey: .cliDeviceID)
+        // The CLI omits the subject field it is not using.
+        itemID = try c.decodeIfPresent(String.self, forKey: .itemID) ?? ""
+        messageID = try c.decodeIfPresent(String.self, forKey: .messageID) ?? ""
+        argv = try c.decode([String].self, forKey: .argv)
+        refs = try c.decode([String].self, forKey: .refs)
+        injection = try c.decode(String.self, forKey: .injection)
+        hosts = try c.decode([String].self, forKey: .hosts)
+        ephemeralKEM = try c.decode(String.self, forKey: .ephemeralKEM)
+        ephemeralPublicKey = try c.decode(Data.self, forKey: .ephemeralPublicKey)
+        createdAt = try c.decode(Int64.self, forKey: .createdAt)
+    }
+
     /// Internal memberwise for the CLI simulation in tests.
-    init(v: Int, cliDeviceID: String, itemID: String, argv: [String], refs: [String],
+    init(v: Int, cliDeviceID: String, itemID: String, messageID: String = "",
+         argv: [String], refs: [String],
          injection: String, hosts: [String], ephemeralKEM: String,
          ephemeralPublicKey: Data, createdAt: Int64) {
         self.v = v
         self.cliDeviceID = cliDeviceID
         self.itemID = itemID
+        self.messageID = messageID
         self.argv = argv
         self.refs = refs
         self.injection = injection
@@ -143,21 +165,33 @@ public enum ApprovalFlows {
 
     /// Cross-checks the opened plaintext against the server row (a request
     /// whose inner ids disagree with its own envelope row is invalid).
+    /// Exactly one subject must be present and must match the row (D16).
     public static func validatePlaintext(_ plaintext: ApprovalRequestPlaintext,
                                          pending: PendingApproval) throws {
         guard plaintext.v == 1 else {
             throw KeyrefWireError.invalidField("unsupported approval request version")
         }
-        guard plaintext.itemID == pending.itemID,
-              plaintext.cliDeviceID == pending.cliDeviceID else {
+        guard plaintext.cliDeviceID == pending.cliDeviceID else {
             throw KeyrefWireError.invalidField("approval request ids do not match its envelope row")
+        }
+        if pending.isMessageSubject {
+            guard plaintext.messageID == pending.messageID,
+                  plaintext.itemID.isEmpty else {
+                throw KeyrefWireError.invalidField("approval request ids do not match its envelope row")
+            }
+            try requireID("message_id", plaintext.messageID)
+        } else {
+            guard plaintext.itemID == pending.itemID,
+                  plaintext.messageID.isEmpty else {
+                throw KeyrefWireError.invalidField("approval request ids do not match its envelope row")
+            }
+            try requireID("item_id", plaintext.itemID)
         }
         guard plaintext.ephemeralKEM == KEMName.x25519,
               plaintext.ephemeralPublicKey.count == KeyrefSizes.x25519Key else {
             throw KeyrefWireError.invalidField("ephemeral key must be a 32-byte X25519 public key")
         }
         try requireID("cli_device_id", plaintext.cliDeviceID)
-        try requireID("item_id", plaintext.itemID)
     }
 
     /// §6.21 approved decision: wraps the item key to the request's
@@ -177,6 +211,31 @@ public enum ApprovalFlows {
         let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: plaintext.ephemeralKEM,
                                                recipientPublicKey: plaintext.ephemeralPublicKey,
                                                info: info, plaintext: itemKey)
+        return .approved(oneTimeEnc: enc, oneTimeWrappedKey: ct)
+    }
+
+    /// §6.21 / §14.5 approved decision for an SMS consumption.
+    ///
+    /// The payload is the message's PLAINTEXT JSON, not its key (D18): the
+    /// message key never leaves the owner/decider domain, the CLI has no
+    /// endpoint to fetch `messages.envelope`, and what the agent needs is
+    /// the body. The binding is the same one-time shape with the message id
+    /// in the item position, so a decision answers exactly this message and
+    /// this request.
+    public static func approveMessageDecision(vaultID: String, pending: PendingApproval,
+                                              plaintext: ApprovalRequestPlaintext,
+                                              messagePlaintext: Data) throws -> ApprovalDecisionRequest {
+        guard pending.isMessageSubject else {
+            throw KeyrefWireError.invalidField("not a message-subject approval")
+        }
+        let info = try oneTimeMessageKeyInfo(recipientDeviceID: plaintext.cliDeviceID,
+                                             vaultID: vaultID,
+                                             messageID: pending.messageID,
+                                             approvalID: pending.approvalID,
+                                             requestCiphertext: pending.requestCiphertext)
+        let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: plaintext.ephemeralKEM,
+                                               recipientPublicKey: plaintext.ephemeralPublicKey,
+                                               info: info, plaintext: messagePlaintext)
         return .approved(oneTimeEnc: enc, oneTimeWrappedKey: ct)
     }
 

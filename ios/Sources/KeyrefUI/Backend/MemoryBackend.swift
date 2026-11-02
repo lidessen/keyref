@@ -79,6 +79,14 @@ public final class MemoryBackend: AppBackend {
     /// §6.7 每条目覆盖（setSnapshotExcluded 写入；loadItems 回读）。
     public var snapshotExcludedItems: Set<String> = []
 
+    // v0.8 §14.8 seams: auto-approval delegation.
+    /// Installed policy (nil = never installed); revision 0 goes with it.
+    public var delegationPolicy: KeyrefDelegationPolicy?
+    public var delegationRevision: UInt64 = 0
+    public var putDelegationError: Error?
+    /// Every successful PUT, for tests to assert the revision ladder.
+    public private(set) var delegationPuts: [(revision: UInt64, policy: KeyrefDelegationPolicy)] = []
+
     public init(origin: URL = URL(string: "https://sync.keyref.app")!) {
         self.origin = origin
     }
@@ -418,6 +426,35 @@ public final class MemoryBackend: AppBackend {
         approvalEntries.removeAll { $0.approvalID == approvalID }
     }
 
+    // MARK: messages (design v0.8 §14.4)
+
+    /// In-memory inbox for previews and UI tests.
+    public var messageEntries: [MessageInboxEntry] = []
+    public private(set) var deletedMessageIDs: [String] = []
+    public private(set) var messageLoadCount = 0
+
+    public func loadMessages() async -> [MessageInboxEntry] {
+        messageLoadCount += 1
+        return messageEntries.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    public func deleteMessage(messageID: String) async throws {
+        deletedMessageIDs.append(messageID)
+        messageEntries.removeAll { $0.messageID == messageID }
+    }
+
+    public func clearMessages() async throws {
+        deletedMessageIDs.append(contentsOf: messageEntries.map(\.messageID))
+        messageEntries.removeAll()
+    }
+
+    /// Records the 设为主接收端 request for tests and previews.
+    public private(set) var primaryReceiverSets: [String?] = []
+
+    public func setPrimaryReceiver(deviceID: String?) async throws {
+        primaryReceiverSets.append(deviceID)
+    }
+
     // MARK: push (Phase 2, §13)
 
     public func putPushToken(token: String, env: String) async -> Bool {
@@ -505,5 +542,32 @@ public final class MemoryBackend: AppBackend {
         snapshotRestoreCount += 1
         if let snapshotRestoreError { throw snapshotRestoreError }
         return snapshotRestoreResult
+    }
+
+    // MARK: auto-approval delegation (design v0.8 §14.8)
+
+    /// Seeds an already-installed policy so previews and store tests can
+    /// render the 已开启 state without a round trip.
+    @discardableResult
+    public func seedDelegation(_ policy: KeyrefDelegationPolicy,
+                               revision: UInt64 = 1) -> Self {
+        delegationPolicy = policy
+        delegationRevision = revision
+        return self
+    }
+
+    public func loadDelegation() async -> DelegationState? {
+        guard let policy = delegationPolicy, delegationRevision >= 1 else { return nil }
+        return DelegationState(revision: delegationRevision, policy: policy)
+    }
+
+    public func putDelegation(revision: UInt64, policy: KeyrefDelegationPolicy) async throws {
+        if let putDelegationError { throw putDelegationError }
+        // §6.31: strictly greater than what is stored.
+        guard revision > delegationRevision else { throw APIError.revisionConflict }
+        try policy.validate()
+        delegationPuts.append((revision, policy))
+        delegationRevision = revision
+        delegationPolicy = policy
     }
 }

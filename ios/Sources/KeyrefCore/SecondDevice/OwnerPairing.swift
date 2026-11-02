@@ -224,7 +224,8 @@ public enum OwnerPairing {
                             hpkeKEM: $0.hpkeKEM, hpkePublicKey: $0.hpkePublicKey,
                             signAlg: $0.signAlg, signPublicKey: $0.signPublicKey,
                             renewalSignPublicKey: $0.renewalSignPublicKey,
-                            grantsDigest: $0.grantsDigest)
+                            grantsDigest: $0.grantsDigest,
+                            receiverRole: $0.receiverRole)
         }
         devices.append(DirectoryDevice(
             deviceID: offer.deviceID, kind: DeviceKind.ios, status: DeviceStatus.active,

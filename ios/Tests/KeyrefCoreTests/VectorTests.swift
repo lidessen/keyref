@@ -460,7 +460,10 @@ final class VectorTests: XCTestCase {
                     signAlg: obj["sign_alg"]?.stringValue ?? "",
                     signPublicKey: hex(obj["sign_public_key_hex"]?.stringValue ?? ""),
                     renewalSignPublicKey: hex(obj["renewal_sign_public_key_hex"]?.stringValue ?? ""),
-                    grantsDigest: hex(obj["grants_digest_hex"]?.stringValue ?? "")))
+                    grantsDigest: hex(obj["grants_digest_hex"]?.stringValue ?? ""),
+                    // One raw byte after the digest (design v0.8 §14.4):
+                    // the vector must round-trip it or the bytes diverge.
+                    receiverRole: UInt8(obj["receiver_role"]?.numberValue ?? 0)))
             }
         }
         let dir = DirectoryTranscript(vaultID: f["vault_id"]?.stringValue ?? "",

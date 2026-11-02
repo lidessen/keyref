@@ -109,26 +109,33 @@ struct ApprovalRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            IconGlyph(systemName: "checkmark.shield.fill", size: 20)
+            IconGlyph(systemName: entry.isMessageSubject ? "envelope" : "checkmark.shield.fill", size: 20)
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Text(entry.itemName)
+                    Text(entry.isMessageSubject ? "验证码 · \(entry.messageSender)" : entry.itemName)
                         .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
                     Spacer(minLength: 4)
                     ApprovalCountdown(expiresAt: entry.expiresAt)
                 }
-                Text(entry.argv.joined(separator: " "))
-                    .font(.caption.monospaced())
+                Text(entry.isMessageSubject
+                     ? entry.messageBody
+                     : entry.argv.joined(separator: " "))
+                    .font(entry.isMessageSubject ? .caption : .caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                Text("\(entry.cliDeviceLabel) · \(entry.injectionLabel)")
+                Text(entry.isMessageSubject
+                     ? "\(entry.cliDeviceLabel) · 来自 \(entry.messageSourceLabel)"
+                     : "\(entry.cliDeviceLabel) · \(entry.injectionLabel)")
                     .font(.caption2)
                     .foregroundStyle(KeyrefTheme.muted)
             }
         }
         .padding(.vertical, 12)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(entry.itemName)，来自 \(entry.cliDeviceLabel)，\(entry.injectionLabel)")
+        .accessibilityLabel(entry.isMessageSubject
+                            ? "验证码，来自 \(entry.messageSender)，\(entry.cliDeviceLabel) 请求使用"
+                            : "\(entry.itemName)，来自 \(entry.cliDeviceLabel)，\(entry.injectionLabel)")
     }
 }
 
@@ -206,9 +213,18 @@ struct ApprovalDetailView: View {
 
     var contextSection: some View {
         Section("请求内容") {
-            InfoRow(label: "条目", value: entry.itemName)
-            if !entry.itemRef.isEmpty {
-                InfoRow(label: "ref", value: entry.itemRef, mono: true)
+            if entry.isMessageSubject {
+                // §14.5：人独立确认的是「这次登录该用哪条短信」——命令原文
+                // 与短信全文同屏并列。发信号码只是参考信号（B9）。
+                InfoRow(label: "短信", value: entry.messageBody)
+                InfoRow(label: "发信号码", value: entry.messageSender)
+                InfoRow(label: "来源设备", value: entry.messageSourceLabel)
+                InfoRow(label: "短信到达", value: Format.dateTime(entry.messageReceivedAt), mono: true)
+            } else {
+                InfoRow(label: "条目", value: entry.itemName)
+                if !entry.itemRef.isEmpty {
+                    InfoRow(label: "ref", value: entry.itemRef, mono: true)
+                }
             }
             InfoRow(label: "注入方式", value: entry.injectionLabel)
             InfoRow(label: "refs", value: entry.refs.joined(separator: ", "), mono: true)
@@ -248,7 +264,9 @@ struct ApprovalDetailView: View {
             }
             .disabled(expired || working)
         } footer: {
-            Text("批准后，这条条目的密钥会以一次性包裹发给发起设备，只对这次请求有效（60 秒内取走，§8.3）。")
+            Text(entry.isMessageSubject
+                 ? "批准后，这条短信的全文会以一次性包裹发给发起设备，只对这次请求有效（60 秒内取走），用完这条验证码即被标记为已消费。"
+                 : "批准后，这条条目的密钥会以一次性包裹发给发起设备，只对这次请求有效（60 秒内取走，§8.3）。")
         }
     }
 

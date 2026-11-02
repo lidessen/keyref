@@ -132,7 +132,11 @@ public enum VaultFlows {
                                 hpkeKEM: $0.hpkeKEM, hpkePublicKey: $0.hpkePublicKey,
                                 signAlg: $0.signAlg, signPublicKey: $0.signPublicKey,
                                 renewalSignPublicKey: $0.renewalSignPublicKey,
-                                grantsDigest: $0.grantsDigest)
+                                grantsDigest: $0.grantsDigest,
+                                // Takeover revokes every old device; a
+                                // revoked device holds no inbox role
+                                // (design §14.4).
+                                receiverRole: ReceiverRole.none)
             }
         }
         devices.append(DirectoryDevice(
@@ -207,6 +211,8 @@ struct ParsedDirectoryDevice: Equatable, Sendable {
     var signPublicKey: Data
     var renewalSignPublicKey: Data
     var grantsDigest: Data
+    /// One byte after `grants_digest` (§3.3, design v0.8 §14.4).
+    var receiverRole: UInt8
 }
 
 func parseDirectoryForTakeover(_ transcript: Data, vaultID: String) throws -> [ParsedDirectoryDevice] {
@@ -274,16 +280,23 @@ func parseDirectoryForTakeover(_ transcript: Data, vaultID: String) throws -> [P
         } else {
             body = body.dropFirst(1)
         }
-        guard body.count >= KeyrefSizes.digest else {
+        guard body.count >= KeyrefSizes.digest + 1 else {
             throw KeyrefWireError.invalidField("directory record truncated")
         }
         let digest = Data(body.prefix(KeyrefSizes.digest))
         body = body.dropFirst(KeyrefSizes.digest)
+        // receiver_role: one raw byte, no separator (§3.3, design §14.4).
+        let role = body[body.startIndex]
+        body = body.dropFirst(1)
+        guard role == ReceiverRole.none || role == ReceiverRole.primary || role == ReceiverRole.inbox else {
+            throw KeyrefWireError.invalidField("receiver_role must be 0, 1 or 2")
+        }
         out.append(ParsedDirectoryDevice(deviceID: deviceID, kind: kind, status: status,
                                          hpkeKEM: kem, hpkePublicKey: hpkePub,
                                          signAlg: alg, signPublicKey: signPub,
                                          renewalSignPublicKey: renewal,
-                                         grantsDigest: digest))
+                                         grantsDigest: digest,
+                                         receiverRole: role))
         // Records are joined by a single NUL (§3.3); consume it before the
         // next record. A missing separator where more bytes remain is a
         // malformed transcript.

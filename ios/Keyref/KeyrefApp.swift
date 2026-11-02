@@ -60,9 +60,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                      didReceiveRemoteNotification userInfo: [AnyHashable: Any],
                      fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
         let approvalID = Self.approvalID(in: userInfo)
+        let messageID = Self.messageID(in: userInfo)
         completionHandler(.noData)
         Task { @MainActor in
             await Self.routeApprovalPush(approvalID)
+            await Self.routeMessagePush(messageID)
         }
     }
 
@@ -75,9 +77,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                                             willPresent notification: UNNotification,
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let approvalID = Self.approvalID(in: notification.request.content.userInfo)
+        let messageID = Self.messageID(in: notification.request.content.userInfo)
         completionHandler([.banner, .list, .sound])
         Task { @MainActor in
             await Self.routeApprovalPush(approvalID)
+            await Self.routeMessagePush(messageID)
         }
     }
 
@@ -86,9 +90,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                                             didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let approvalID = Self.approvalID(in: response.notification.request.content.userInfo)
+        let messageID = Self.messageID(in: response.notification.request.content.userInfo)
         completionHandler()
         Task { @MainActor in
             await Self.routeApprovalPush(approvalID)
+            await Self.routeMessagePush(messageID)
         }
     }
 
@@ -106,6 +112,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     private static func routeApprovalPush(_ approvalID: String?) async {
         guard let approvalID else { return }
         await wiredModel?.handleApprovalPush(approvalID: approvalID)
+    }
+
+    /// 契约：payload = {"aps":{...},"message_id":"<id>"}（v0.8 §14.4）。
+    /// 正文固定为「收到新的验证码」，不带发信号码与短信内容——锁屏是
+    /// 半公开表面（B9），所以这里只用来触发刷新。
+    private nonisolated static func messageID(in userInfo: [AnyHashable: Any]) -> String? {
+        let id = userInfo["message_id"] as? String
+            ?? (userInfo["aps"] as? [AnyHashable: Any])?["message_id"] as? String
+        guard let id, !id.isEmpty else { return nil }
+        return id
+    }
+
+    /// 验证码到了：刷新收件箱（未解锁时不拉——消息要本机的隔区密钥才解得开）。
+    private static func routeMessagePush(_ messageID: String?) async {
+        guard messageID != nil else { return }
+        await wiredModel?.handleMessagePush()
     }
 }
 
