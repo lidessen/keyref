@@ -50,7 +50,29 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		writeDecodeError(w, err)
 		return
 	}
-	if !wire.ValidID(req.ItemID) {
+	// Subject resolution (protocol D16): exactly one of item_id /
+	// message_id; a message subject must carry the request's one-time
+	// public key as plaintext for the decider (design v0.8 §14.8).
+	subject, err := req.Subject()
+	if err != nil {
+		writeError(w, "invalid_field")
+		return
+	}
+	var msg *store.Message
+	if req.MessageID != "" {
+		if len(req.CLIEphemeralPublicKey) != wire.SizeX25519Key {
+			writeError(w, "invalid_field")
+			return
+		}
+		msg, err = s.st.GetMessage(r.Context(), ac.vault.ID, req.MessageID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, "not_found")
+			return
+		} else if err != nil {
+			writeError(w, "internal")
+			return
+		}
+	} else if !wire.ValidID(req.ItemID) {
 		writeError(w, "invalid_field")
 		return
 	}
@@ -60,13 +82,22 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field")
 		return
 	}
-	it, err := s.st.GetItem(r.Context(), ac.vault.ID, req.ItemID)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && it.Tombstone) {
-		writeError(w, "not_found")
-		return
-	} else if err != nil {
-		writeError(w, "internal")
-		return
+	if req.MessageID == "" {
+		it, err := s.st.GetItem(r.Context(), ac.vault.ID, req.ItemID)
+		if errors.Is(err, store.ErrNotFound) || (err == nil && it.Tombstone) {
+			writeError(w, "not_found")
+			return
+		} else if err != nil {
+			writeError(w, "internal")
+			return
+		}
+	} else {
+		// Expired messages are swept lazily; an explicit check keeps the
+		// inbox contract exact (design §14.5: unknown/expired → not_found).
+		if msg.Status != wire.MessageStatusActive || msg.ExpiresAt <= nowMs {
+			writeError(w, "not_found")
+			return
+		}
 	}
 	if err := wire.VerifyCLISignature(req.RequestCiphertext, req.RequestSignature, ac.device.SignPublicKey); err != nil {
 		writeError(w, "bad_signature")
@@ -81,16 +112,37 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "quota_exceeded")
 		return
 	}
+	// One live approval per MESSAGE subject (design §14.3: a message
+	// cannot be double-spent through two concurrent approvals). Items
+	// keep the v1.1 semantics — several pending approvals per item are
+	// legitimate (one per exec attempt).
+	if req.MessageID != "" {
+		pendingForSubject, err := s.st.CountPendingBySubject(r.Context(), ac.vault.ID, subject)
+		if err != nil {
+			writeError(w, "internal")
+			return
+		}
+		if pendingForSubject > 0 {
+			writeError(w, "approval_not_pending")
+			return
+		}
+	}
+	subjectID := req.ItemID
+	if req.MessageID != "" {
+		subjectID = req.MessageID
+	}
 	a := &store.Approval{
-		ID:                hex.EncodeToString(randomBytes(16)),
-		VaultID:           ac.vault.ID,
-		CLIDeviceID:       ac.device.ID,
-		ItemID:            req.ItemID,
-		RequestCiphertext: req.RequestCiphertext,
-		RequestSignature:  req.RequestSignature,
-		Status:            wire.ApprovalStatusPending,
-		ExpiresAt:         req.ExpiresAt,
-		CreatedAt:         nowMs,
+		ID:                    hex.EncodeToString(randomBytes(16)),
+		VaultID:               ac.vault.ID,
+		CLIDeviceID:           ac.device.ID,
+		ItemID:                subjectID,
+		Subject:               subject,
+		CLIEphemeralPublicKey: req.CLIEphemeralPublicKey,
+		RequestCiphertext:     req.RequestCiphertext,
+		RequestSignature:      req.RequestSignature,
+		Status:                wire.ApprovalStatusPending,
+		ExpiresAt:             req.ExpiresAt,
+		CreatedAt:             nowMs,
 	}
 	if err := s.st.InsertApproval(r.Context(), a); err != nil {
 		writeError(w, "internal")
@@ -106,15 +158,14 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleApprovalList implements GET /v1/approvals (protocol §6.20), the
+// handleApprovalList implements GET /v1/approvals (protocol §6.20): the
 // owner's pending queue. The status filter defaults to pending; "all"
-// disables filtering.
+// disables filtering. A decider sees ONLY message-subject rows, and
+// only while pending — it evaluates them under the owner-signed
+// delegation policy (design v0.8 §14.8).
 func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
 	ac, ok := s.authorize(w, r, false)
 	if !ok {
-		return
-	}
-	if !s.requireOwner(w, ac) {
 		return
 	}
 	status := r.URL.Query().Get("status")
@@ -128,6 +179,20 @@ func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field")
 		return
 	}
+	decider := ac.device.Kind == wire.DeviceKindDecider
+	switch {
+	case ac.device.Kind == wire.DeviceKindIOS:
+	case decider:
+		// A decider's queue is pending message subjects only; statuses
+		// beyond pending are the owner's audit view, not its business.
+		if status != wire.ApprovalStatusPending {
+			writeError(w, "forbidden")
+			return
+		}
+	default:
+		writeError(w, "forbidden")
+		return
+	}
 	rows, err := s.st.ListApprovals(r.Context(), ac.vault.ID, status)
 	if err != nil {
 		writeError(w, "internal")
@@ -136,15 +201,24 @@ func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
 	out := wire.ApprovalListResponse{Approvals: make([]wire.ApprovalRow, 0, len(rows))}
 	for i := range rows {
 		a := &rows[i]
-		out.Approvals = append(out.Approvals, wire.ApprovalRow{
-			ApprovalID:        a.ID,
-			CLIDeviceID:       a.CLIDeviceID,
-			ItemID:            a.ItemID,
-			RequestCiphertext: a.RequestCiphertext,
-			RequestSignature:  a.RequestSignature,
-			CreatedAt:         a.CreatedAt,
-			ExpiresAt:         a.ExpiresAt,
-		})
+		if decider && !a.IsMessageSubject() {
+			continue
+		}
+		row := wire.ApprovalRow{
+			ApprovalID:            a.ID,
+			CLIDeviceID:           a.CLIDeviceID,
+			ItemID:                a.ItemID,
+			RequestCiphertext:     a.RequestCiphertext,
+			RequestSignature:      a.RequestSignature,
+			CreatedAt:             a.CreatedAt,
+			ExpiresAt:             a.ExpiresAt,
+			CLIEphemeralPublicKey: a.CLIEphemeralPublicKey,
+		}
+		if a.IsMessageSubject() {
+			row.ItemID = ""
+			row.MessageID = a.SubjectID()
+		}
+		out.Approvals = append(out.Approvals, row)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -152,18 +226,40 @@ func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
 // handleApprovalDecision implements POST /v1/approvals/:approval_id/decision
 // (protocol §6.21). An approved decision must carry the one-time wrap
 // and stamps the 60-second pickup window; both paths require the row to
-// still be pending.
+// still be pending. The owner decides any subject; a DECIDER may only
+// decide message subjects — the server enforces the boundary that
+// keeps item approvals human-only (design v0.8 §14.8).
 func (s *Server) handleApprovalDecision(w http.ResponseWriter, r *http.Request) {
 	ac, ok := s.authorize(w, r, false)
 	if !ok {
 		return
 	}
-	if !s.requireOwner(w, ac) {
-		return
-	}
 	approvalID := r.PathValue("approval_id")
 	if !wire.ValidID(approvalID) {
 		writeError(w, "not_found")
+		return
+	}
+	// Kind authorization comes before existence (protocol §1.3: a CLI
+	// decision is 403 forbidden regardless of the row).
+	switch ac.device.Kind {
+	case wire.DeviceKindIOS:
+	case wire.DeviceKindDecider:
+	default:
+		writeError(w, "forbidden")
+		return
+	}
+	a, err := s.st.GetApproval(r.Context(), ac.vault.ID, approvalID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, "not_found")
+		return
+	} else if err != nil {
+		writeError(w, "internal")
+		return
+	}
+	if ac.device.Kind == wire.DeviceKindDecider && !a.IsMessageSubject() {
+		// The boundary that keeps item approvals human-only is
+		// server-enforced, not left to configuration (design v0.8 §14.8).
+		writeError(w, "forbidden")
 		return
 	}
 	var req wire.ApprovalDecisionRequest
@@ -189,7 +285,6 @@ func (s *Server) handleApprovalDecision(w http.ResponseWriter, r *http.Request) 
 	now := s.cfg.Now().UnixMilli()
 	expiresAt := now + ApprovalWrapTTLMs
 	var wrap []byte
-	var err error
 	if req.Decision == wire.ApprovalStatusApproved {
 		wrap, err = store.PackOneTimeWrap(req.OneTimeEnc, req.OneTimeWrappedKey)
 		if err != nil {
@@ -197,8 +292,20 @@ func (s *Server) handleApprovalDecision(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	err = s.st.DecideApproval(r.Context(), ac.vault.ID, approvalID,
-		req.Decision == wire.ApprovalStatusApproved, wrap, expiresAt, now)
+	approved := req.Decision == wire.ApprovalStatusApproved
+	// The deciding device is whoever signed this decision — the owner
+	// (kind=ios) or the delegated decider (kind=decider). It is stored on
+	// the row and echoed by the poll so the CLI can name it in the audit
+	// event (design v0.8 §14.5/§14.8, protocol §6.22).
+	if a.IsMessageSubject() {
+		// Decision + one-way consumed stamp commit together (design
+		// §14.3): a second approval can never deliver the same code.
+		err = s.st.DecideApprovalForMessage(r.Context(), ac.vault.ID, approvalID, a.SubjectID(), ac.device.ID,
+			approved, wrap, expiresAt, now)
+	} else {
+		err = s.st.DecideApproval(r.Context(), ac.vault.ID, approvalID, ac.device.ID,
+			approved, wrap, expiresAt, now)
+	}
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, "not_found")
@@ -245,7 +352,10 @@ func (s *Server) handleApprovalPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.cfg.Now()
 	nowMs := now.UnixMilli()
-	resp := wire.ApprovalPollResponse{ApprovalID: a.ID, Status: a.Status}
+	// DecisionDeviceID is empty (→ omitted, protocol §6.22) until a
+	// decision has been accepted; pending and never-decided rows carry
+	// nothing.
+	resp := wire.ApprovalPollResponse{ApprovalID: a.ID, Status: a.Status, DecisionDeviceID: a.DecisionDeviceID}
 	switch a.Status {
 	case wire.ApprovalStatusPending:
 		if a.ExpiresAt < nowMs {

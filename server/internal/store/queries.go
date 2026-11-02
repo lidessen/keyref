@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lidessen/keyref/proto/wire"
 )
@@ -249,12 +250,13 @@ func (s *Store) ListAllVaults(ctx context.Context) ([]Vault, error) {
 // devices
 
 const deviceCols = `device_id, vault_id, kind, status, hpke_kem, hpke_public_key,
-sign_alg, sign_public_key, label, created_at, revoked_at, push_token`
+sign_alg, sign_public_key, label, created_at, revoked_at, push_token, receiver_role`
 
 func scanDevice(row interface{ Scan(...any) error }) (*Device, error) {
 	var d Device
 	err := row.Scan(&d.ID, &d.VaultID, &d.Kind, &d.Status, &d.HPKEKEM, &d.HPKEPublicKey,
-		&d.SignAlg, &d.SignPublicKey, &d.Label, &d.CreatedAt, &d.RevokedAt, &d.PushToken)
+		&d.SignAlg, &d.SignPublicKey, &d.Label, &d.CreatedAt, &d.RevokedAt, &d.PushToken,
+		&d.ReceiverRole)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -351,9 +353,10 @@ func (s *Store) CountActiveDevicesAfterDirectory(ctx context.Context, vaultID st
 
 func txInsertDevice(ctx context.Context, tx *sql.Tx, d *Device) error {
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID, d.VaultID, d.Kind, d.Status, d.HPKEKEM, d.HPKEPublicKey,
-		d.SignAlg, d.SignPublicKey, d.Label, d.CreatedAt, d.RevokedAt, d.PushToken)
+		d.SignAlg, d.SignPublicKey, d.Label, d.CreatedAt, d.RevokedAt, d.PushToken,
+		d.ReceiverRole)
 	if err != nil {
 		return fmt.Errorf("store: insert device: %w", err)
 	}
@@ -370,9 +373,10 @@ func txUpsertDeviceFromDirectory(ctx context.Context, tx *sql.Tx, vaultID string
 	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE devices SET kind = ?, status = ?, hpke_kem = ?, hpke_public_key = ?,
-sign_alg = ?, sign_public_key = ?, label = label, revoked_at = ? WHERE device_id = ? AND vault_id = ?`,
+sign_alg = ?, sign_public_key = ?, label = label, revoked_at = ?, receiver_role = ?
+WHERE device_id = ? AND vault_id = ?`,
 		rec.Kind, rec.Status, rec.HPKEKEM, rec.HPKEPublicKey, rec.SignAlg, rec.SignPublicKey,
-		revokedAt, rec.DeviceID, vaultID)
+		revokedAt, rec.ReceiverRole, rec.DeviceID, vaultID)
 	if err != nil {
 		return false, fmt.Errorf("store: update device from directory: %w", err)
 	}
@@ -384,9 +388,9 @@ sign_alg = ?, sign_public_key = ?, label = label, revoked_at = ? WHERE device_id
 		return rec.Status == wire.DeviceStatusRevoked, nil
 	}
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO devices (`+deviceCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		rec.DeviceID, vaultID, rec.Kind, rec.Status, rec.HPKEKEM, rec.HPKEPublicKey,
-		rec.SignAlg, rec.SignPublicKey, "", now, revokedAt, nil)
+		rec.SignAlg, rec.SignPublicKey, "", now, revokedAt, nil, rec.ReceiverRole)
 	if err != nil {
 		return false, fmt.Errorf("store: insert device from directory: %w", err)
 	}
@@ -439,6 +443,28 @@ WHERE vault_id = ? AND kind = 'ios' AND status = 'active' AND push_token IS NOT 
 		}
 	}
 	return out, rows.Err()
+}
+
+// PrimaryReceiverToken returns the APNs token of the vault's primary
+// receiver (design v0.8 §14.4: receiver_role = 1, at most one per
+// vault), or "" when none is registered.
+func (s *Store) PrimaryReceiverToken(ctx context.Context, vaultID string) (string, error) {
+	var tok sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT push_token FROM devices
+WHERE vault_id = ? AND kind = 'ios' AND status = 'active'
+  AND receiver_role = 1 AND push_token IS NOT NULL`,
+		vaultID).Scan(&tok)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: primary receiver token: %w", err)
+	}
+	if !tok.Valid {
+		return "", nil
+	}
+	return tok.String, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,9 +1037,9 @@ func (s *Store) InsertSession(ctx context.Context, sess *Session) error {
 // Expired sessions never match. ErrNotFound for unknown/expired tokens.
 func (s *Store) LookupSession(ctx context.Context, token []byte, now int64) (*Device, error) {
 	sum := sha256.Sum256(token)
+	cols := "d." + strings.ReplaceAll(deviceCols, ", ", ", d.")
 	row := s.db.QueryRowContext(ctx,
-		`SELECT d.device_id, d.vault_id, d.kind, d.status, d.hpke_kem, d.hpke_public_key,
-d.sign_alg, d.sign_public_key, d.label, d.created_at, d.revoked_at, d.push_token
+		`SELECT `+cols+`
 FROM sessions s JOIN devices d ON d.device_id = s.device_id
 WHERE s.token_hash = ? AND s.expires_at > ?`, hex.EncodeToString(sum[:]), now)
 	return scanDevice(row)
@@ -1194,7 +1220,12 @@ FROM items WHERE vault_id = ?`, vaultID).Scan(&itemBytes); err != nil {
 	if err != nil {
 		return 0, err
 	}
-	return itemBytes + auditBytes + approvalBytes, nil
+	// Message envelopes count toward the same quota (design v0.8 §14.7).
+	messageBytes, err := s.MessageEnvelopeBytes(ctx, vaultID)
+	if err != nil {
+		return 0, err
+	}
+	return itemBytes + auditBytes + approvalBytes + messageBytes, nil
 }
 
 // HealthzWriteProbe verifies the database accepts writes by rewriting the
@@ -1206,4 +1237,45 @@ func (s *Store) HealthzWriteProbe(ctx context.Context) error {
 	}
 	_, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v))
 	return err
+}
+
+// GetDelegation reads the vault's auto-approval delegation columns
+// (design v0.8 §14.8). Revision 0 with nil signed bytes = no delegation.
+// The owner signature is returned too: a decider must verify the bytes
+// before acting on them and cannot take the server's word for it
+// (protocol §3.10 "先验后用").
+func (s *Store) GetDelegation(ctx context.Context, vaultID string) (int64, []byte, []byte, error) {
+	var rev int64
+	var signed, signature []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT delegation_revision, delegation_signed, delegation_signature
+		   FROM vaults WHERE vault_id = ?`,
+		vaultID).Scan(&rev, &signed, &signature)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("store: get delegation: %w", err)
+	}
+	return rev, signed, signature, nil
+}
+
+// SetDelegation installs a new owner-signed delegation after the API
+// layer verified revision ordering and the signature (protocol §6.31).
+func (s *Store) SetDelegation(ctx context.Context, vaultID string, revision int64, signed, signature []byte) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE vaults SET delegation_signed = ?, delegation_signature = ?, delegation_revision = ?
+		  WHERE vault_id = ?`,
+		signed, signature, revision, vaultID)
+	if err != nil {
+		return fmt.Errorf("store: set delegation: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

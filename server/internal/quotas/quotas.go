@@ -20,12 +20,17 @@ const (
 	PlanUnlimited = "unlimited"
 )
 
-// Limits of one plan (design §10.5 tier table). Zero-value *int64 fields
-// mean "not enforced" and serialize as null (§6.25).
+// Limits of one plan (design §10.5 tier table; source/decider device
+// and pending-message ceilings added with design v0.8 §14.7).
+// Zero-value *int64 fields mean "not enforced" and serialize as null
+// (§6.25).
 type Limits struct {
 	Items              int64
 	DevicesIOS         int64
 	DevicesCLI         int64
+	DevicesSource      int64
+	DevicesDecider     int64
+	MessagesPending    int64
 	StorageBytes       int64
 	AuditRetentionDays int64
 	AuditMaxEvents     int64
@@ -37,11 +42,13 @@ type Limits struct {
 var (
 	FreeLimits = Limits{
 		Items: 20, DevicesIOS: 1, DevicesCLI: 1,
+		DevicesSource: 1, DevicesDecider: 1, MessagesPending: 20,
 		StorageBytes: 1 << 20, AuditRetentionDays: 7, AuditMaxEvents: 100,
 		RequestsPerDay: 500, RequestsPerMinute: 30,
 	}
 	PlusLimits = Limits{
 		Items: 500, DevicesIOS: 3, DevicesCLI: 5,
+		DevicesSource: 3, DevicesDecider: 3, MessagesPending: 200,
 		StorageBytes: 50 << 20, AuditRetentionDays: 30, AuditMaxEvents: 5000,
 		RequestsPerDay: 5000, RequestsPerMinute: 60,
 	}
@@ -123,6 +130,9 @@ func (m *Manager) LimitsFor(plan string) *wire.PlanLimits {
 		Items:              ptr(l.Items),
 		DevicesIOS:         ptr(l.DevicesIOS),
 		DevicesCLI:         ptr(l.DevicesCLI),
+		DevicesSource:      ptr(l.DevicesSource),
+		DevicesDecider:     ptr(l.DevicesDecider),
+		MessagesPending:    ptr(l.MessagesPending),
 		StorageBytes:       ptr(l.StorageBytes),
 		AuditRetentionDays: ptr(l.AuditRetentionDays),
 		AuditMaxEvents:     ptr(l.AuditMaxEvents),

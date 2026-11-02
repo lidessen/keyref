@@ -40,6 +40,10 @@ const (
 	// 8 KiB ceiling.
 	MaxDecisionBodyBytes = 96 << 10 // 96 KiB
 	MaxDefaultBody       = 1 << 20  // 1 MiB ceiling for every other endpoint
+
+	// MaxMessageBodyBytes is the message-upload ceiling (protocol v1.2
+	// §1.2/§6.28: a 4 KiB plaintext plus per-recipient wraps must fit).
+	MaxMessageBodyBytes = 16 << 10 // 16 KiB
 )
 
 // Approval polling floor (protocol §1.3, §6.22): approval polls are the
@@ -74,6 +78,12 @@ type Config struct {
 	// nil — the default for deployments without KEYREF_APN_* variables —
 	// disables push notifications; everything else is unaffected.
 	Push apns.Provider
+
+	// PairRegisterPerMinute overrides the per-IP pair/register window
+	// (protocol §6.16). Zero keeps the default; the e2e harness raises it
+	// because one run registers far more devices than one person would in
+	// a minute. It is a test knob, not a deployment setting.
+	PairRegisterPerMinute int
 }
 
 // Server holds the HTTP API state.
@@ -175,6 +185,15 @@ func (s *Server) Handler() http.Handler {
 	// device registers the APNs token approval pushes are sent to.
 	mux.HandleFunc("PUT /v1/devices/push-token", s.handlePutPushToken)
 
+	// SMS verification-code inbox (design v0.8 §14, protocol v1.2
+	// §5.28–§5.32).
+	mux.HandleFunc("POST /v1/messages", s.handlePostMessages)
+	mux.HandleFunc("GET /v1/messages", s.handleGetMessages)
+	mux.HandleFunc("PUT /v1/messages/{message_id}/wraps", s.handleMessageWraps)
+	mux.HandleFunc("DELETE /v1/messages/{message_id}", s.handleMessageDelete)
+	mux.HandleFunc("PUT /v1/delegation", s.handlePutDelegation)
+	mux.HandleFunc("GET /v1/delegation", s.handleGetDelegation)
+
 	mux.HandleFunc("POST /v1/billing/apple", notImplemented)
 
 	mux.HandleFunc("/v1/", notImplemented)
@@ -215,6 +234,10 @@ func (s *Server) bodyLimit(r *http.Request) int64 {
 		// local item carries the HPKE-wrapped secret (≤64 KiB) instead of
 		// a 32-byte item key (protocol §6.21, design §6.6 v0.7).
 		return MaxDecisionBodyBytes
+	case r.Method == http.MethodPost && p == "/v1/messages":
+		// Message envelope: 4 KiB plaintext plus per-recipient wraps
+		// (protocol v1.2 §6.28, design v0.8 §14.3).
+		return MaxMessageBodyBytes
 	case strings.HasPrefix(p, "/v1/approvals"):
 		return MaxApprovalBytes
 	default:
@@ -248,6 +271,7 @@ var errorStatus = map[string]int{
 	"body_too_large":            413,
 	"rate_limited":              429,
 	"quota_exceeded":            429,
+	"invalid_receiver_role":     400,
 	"internal":                  500,
 }
 

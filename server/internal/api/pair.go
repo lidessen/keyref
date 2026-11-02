@@ -24,7 +24,11 @@ const PairSessionTTL = 10 * time.Minute
 // and IP rate limited. Only the nonce hash reaches the database.
 func (s *Server) handlePairRegister(w http.ResponseWriter, r *http.Request) {
 	now := s.cfg.Now()
-	if !s.windowAllow("pair:"+clientIPKey(r), now.UnixMilli(), PairRegisterPerIPPerMinute, 60_000) {
+	limit := int64(PairRegisterPerIPPerMinute)
+	if s.cfg.PairRegisterPerMinute > 0 {
+		limit = int64(s.cfg.PairRegisterPerMinute)
+	}
+	if !s.windowAllow("pair:"+clientIPKey(r), now.UnixMilli(), limit, 60_000) {
 		writeError(w, "rate_limited")
 		return
 	}
@@ -127,8 +131,16 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field")
 		return
 	}
-	if req.Device.Kind != wire.DeviceKindCLI {
-		writeError(w, "invalid_field") // pairing admits CLI devices (§6.17)
+	// Pairing admits cli devices (§6.17) plus the v0.8 kinds (design
+	// §14.2/§14.8): source collectors and deciders never carry grants.
+	switch req.Device.Kind {
+	case wire.DeviceKindCLI, wire.DeviceKindSource, wire.DeviceKindDecider:
+	default:
+		writeError(w, "invalid_field")
+		return
+	}
+	if req.Device.Kind != wire.DeviceKindCLI && len(req.Grants) > 0 {
+		writeError(w, "invalid_field") // source/decider hold no grants, ever
 		return
 	}
 	if err := validateDeviceInput(&req.Device); err != nil {
@@ -159,13 +171,23 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Plan device ceiling (design §10.5) before admitting the device.
+	// Each kind draws from its own tier bucket (design §14.7).
 	if s.cfg.EnforceQuotas {
 		plan := quotas.EffectivePlan(ac.vault, now.UnixMilli())
 		if plan != quotas.PlanUnlimited {
 			limits := s.quota.LimitsFor(plan)
-			if limits.DevicesCLI != nil {
-				n, err := s.st.CountActiveDevices(r.Context(), ac.vault.ID, wire.DeviceKindCLI)
-				if err == nil && n >= *limits.DevicesCLI {
+			var ceiling *int64
+			switch req.Device.Kind {
+			case wire.DeviceKindCLI:
+				ceiling = limits.DevicesCLI
+			case wire.DeviceKindSource:
+				ceiling = limits.DevicesSource
+			case wire.DeviceKindDecider:
+				ceiling = limits.DevicesDecider
+			}
+			if ceiling != nil {
+				n, err := s.st.CountActiveDevices(r.Context(), ac.vault.ID, req.Device.Kind)
+				if err == nil && n >= *ceiling {
 					writeError(w, "quota_exceeded")
 					return
 				}
@@ -249,7 +271,7 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	device := &store.Device{
-		ID: req.Device.DeviceID, VaultID: ac.vault.ID, Kind: wire.DeviceKindCLI,
+		ID: req.Device.DeviceID, VaultID: ac.vault.ID, Kind: req.Device.Kind,
 		Status:  wire.DeviceStatusActive,
 		HPKEKEM: req.Device.HPKEKEM, HPKEPublicKey: req.Device.HPKEPublicKey,
 		SignAlg: req.Device.SignAlg, SignPublicKey: req.Device.SignPublicKey,

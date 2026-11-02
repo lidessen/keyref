@@ -74,13 +74,16 @@ func TestOpenCreatesSchemaInWalMode(t *testing.T) {
 		"vaults": false, "devices": false, "items": false, "grants": false,
 		"approvals": false, "audit_events": false, "changes": false,
 		"sessions": false, "usage_daily": false, "pair_sessions": false,
+		"messages": false, "message_usage_daily": false,
 	}
 	wantIndexes := map[string]bool{
-		"idx_changes_vault_seq":      false,
-		"idx_grants_vault_device":    false,
-		"idx_devices_vault_status":   false,
-		"idx_approvals_vault_status": false,
-		"idx_approvals_cli_status":   false,
+		"idx_changes_vault_seq":        false,
+		"idx_grants_vault_device":      false,
+		"idx_devices_vault_status":     false,
+		"idx_approvals_vault_status":   false,
+		"idx_approvals_cli_status":     false,
+		"idx_messages_vault_expires":   false,
+		"idx_messages_vault_device":    false,
 	}
 	rows, err := s.db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
 	if err != nil {

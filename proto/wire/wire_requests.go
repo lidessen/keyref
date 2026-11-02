@@ -97,11 +97,15 @@ type SessionChallengeResponse struct {
 
 // PlanLimits is the limits object of session and account responses
 // (protocol §6.3, §6.25). Null fields mean "not enforced" (unlimited
-// self-hosted deployments).
+// self-hosted deployments). The source/decider device ceilings and the
+// pending-message cap arrived with design v0.8 §14 (protocol §5.28–§5.32).
 type PlanLimits struct {
 	Items              *int64 `json:"items"`
 	DevicesIOS         *int64 `json:"devices_ios"`
 	DevicesCLI         *int64 `json:"devices_cli"`
+	DevicesSource      *int64 `json:"devices_source"`
+	DevicesDecider     *int64 `json:"devices_decider"`
+	MessagesPending    *int64 `json:"messages_pending"`
 	StorageBytes       *int64 `json:"storage_bytes"`
 	AuditRetentionDays *int64 `json:"audit_retention_days"`
 	AuditMaxEvents     *int64 `json:"audit_max_events"`
@@ -250,11 +254,39 @@ const (
 // §6.19). request_ciphertext = HPKE enc ‖ ct (encapsulated to an owner
 // device, info purpose=approval-request); request_signature is the CLI
 // device's Ed25519 over the raw request_ciphertext bytes.
+//
+// Subject (protocol §6.19, D16): exactly one of item_id (item
+// consumption, v1.1 shape) or message_id (SMS code consumption, design
+// v0.8 §14.5) must be set. A message request must also carry
+// CLIEphemeralPublicKey — the request's one-time X25519 public key as a
+// plaintext field, because the decider never decrypts
+// request_ciphertext (design §14.8).
 type ApprovalCreateRequest struct {
-	ItemID            string `json:"item_id"`
-	RequestCiphertext Blob   `json:"request_ciphertext"`
-	RequestSignature  Blob   `json:"request_signature"`
-	ExpiresAt         int64  `json:"expires_at"`
+	ItemID                string `json:"item_id,omitempty"`
+	MessageID             string `json:"message_id,omitempty"`
+	CLIEphemeralPublicKey Blob   `json:"cli_ephemeral_public_key,omitempty"`
+	RequestCiphertext     Blob   `json:"request_ciphertext"`
+	RequestSignature      Blob   `json:"request_signature"`
+	ExpiresAt             int64  `json:"expires_at"`
+}
+
+// Subject renders the approval target of D16: "item:<id>" or
+// "message:<id>".
+func (r ApprovalCreateRequest) Subject() (string, error) {
+	switch {
+	case r.ItemID != "" && r.MessageID == "":
+		if !ValidID(r.ItemID) {
+			return "", ErrInvalidField
+		}
+		return EntityItem + ":" + r.ItemID, nil
+	case r.MessageID != "" && r.ItemID == "":
+		if !ValidID(r.MessageID) {
+			return "", ErrInvalidField
+		}
+		return EntityMessage + ":" + r.MessageID, nil
+	default:
+		return "", ErrInvalidField
+	}
 }
 
 // ApprovalCreateResponse is the 201 body of POST /v1/approvals.
@@ -265,15 +297,19 @@ type ApprovalCreateResponse struct {
 
 // ApprovalRow is one entry of GET /v1/approvals (protocol §6.20). The
 // owner verifies the CLI signature over request_ciphertext BEFORE
-// decrypting and displaying the request (design §8.3).
+// decrypting and displaying the request (design §8.3). Message-subject
+// rows additionally carry message_id and the request's plaintext
+// ephemeral public key (protocol §6.19, design v0.8 §14.8).
 type ApprovalRow struct {
-	ApprovalID        string `json:"approval_id"`
-	CLIDeviceID       string `json:"cli_device_id"`
-	ItemID            string `json:"item_id"`
-	RequestCiphertext Blob   `json:"request_ciphertext"`
-	RequestSignature  Blob   `json:"request_signature"`
-	CreatedAt         int64  `json:"created_at"`
-	ExpiresAt         int64  `json:"expires_at"`
+	ApprovalID            string `json:"approval_id"`
+	CLIDeviceID           string `json:"cli_device_id"`
+	ItemID                string `json:"item_id,omitempty"`
+	MessageID             string `json:"message_id,omitempty"`
+	CLIEphemeralPublicKey Blob   `json:"cli_ephemeral_public_key,omitempty"`
+	RequestCiphertext     Blob   `json:"request_ciphertext"`
+	RequestSignature      Blob   `json:"request_signature"`
+	CreatedAt             int64  `json:"created_at"`
+	ExpiresAt             int64  `json:"expires_at"`
 }
 
 // ApprovalListResponse is the body of GET /v1/approvals (protocol §6.20).
@@ -295,12 +331,16 @@ type ApprovalDecisionRequest struct {
 // ApprovalPollResponse is the body of GET /v1/approvals/:approval_id
 // (protocol §6.22). The first poll that observes status approved
 // atomically returns the one-time wrap and flips the row to consumed.
+// DecisionDeviceID is the device that signed the decision (owner or
+// decider, design v0.8 §14.5/§14.8); it is absent — omitted — while the
+// row is pending and on rows that never took a decision (expired).
 type ApprovalPollResponse struct {
 	ApprovalID        string `json:"approval_id"`
 	Status            string `json:"status"`
 	OneTimeEnc        Blob   `json:"one_time_enc,omitempty"`
 	OneTimeWrappedKey Blob   `json:"one_time_wrapped_key,omitempty"`
 	ExpiresAt         int64  `json:"expires_at,omitempty"`
+	DecisionDeviceID  string `json:"decision_device_id,omitempty"`
 }
 
 // ApprovalStatusData is the sync "approval" entity data (protocol §8.2,
@@ -351,4 +391,82 @@ type AccountUsage struct {
 	StorageBytes  int64 `json:"storage_bytes"`
 	AuditEvents   int64 `json:"audit_events"`
 	RequestsToday int64 `json:"requests_today"`
+}
+
+// ---------------------------------------------------------------------------
+// SMS verification codes (design v0.8 §14, protocol §5.28–§5.32, v1.2)
+
+// MessageCreateRequest is the body of POST /v1/messages (protocol
+// §6.28). Only an active kind=source device may submit. The envelope is
+// opaque to the server; request_signature is the device's Ed25519 over
+// the §3.9 message-upload transcript, verified before the row is
+// stored.
+type MessageCreateRequest struct {
+	Envelope         Blob  `json:"envelope"`
+	RequestSignature Blob  `json:"request_signature"`
+	ReceivedAt       int64 `json:"received_at"`
+}
+
+// MessageCreateResponse is the 201 body of POST /v1/messages.
+type MessageCreateResponse struct {
+	MessageID string `json:"message_id"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+// MessageRow is one entry of GET /v1/messages (protocol §6.29). The
+// envelope is opaque; status is active until a decision delivers the
+// payload, then consumed (design §14.3).
+type MessageRow struct {
+	MessageID      string `json:"message_id"`
+	SourceDeviceID string `json:"source_device_id"`
+	Status         string `json:"status"`
+	Envelope       Blob   `json:"envelope"`
+	ReceivedAt     int64  `json:"received_at"`
+	CreatedAt      int64  `json:"created_at"`
+	ExpiresAt      int64  `json:"expires_at"`
+}
+
+// MessageListResponse is the body of GET /v1/messages (protocol
+// §6.29): active-or-consumed rows newer than the cursor, ascending by
+// server created_at. Cursor and age policy always use the server clock
+// — the device-reported received_at is advisory (design §14.4).
+type MessageListResponse struct {
+	Messages []MessageRow `json:"messages"`
+	Cursor   int64        `json:"cursor"`
+	HasMore  bool         `json:"has_more"`
+}
+
+// MessageWrap is one decider backfill record of
+// PUT /v1/messages/:message_id/wraps (protocol §6.30, D17): an owner
+// re-wrap of the message key to a decider's HPKE public key. The server
+// merges these into the stored envelope without decrypting anything.
+type MessageWrap struct {
+	DeviceID   string `json:"device_id"`
+	HPKEEnc    Blob   `json:"hpke_enc"`
+	WrappedKey Blob   `json:"wrapped_key"`
+}
+
+// MessageWrapsRequest is the body of PUT /v1/messages/:id/wraps.
+type MessageWrapsRequest struct {
+	Wraps []MessageWrap `json:"wraps"`
+}
+
+// DelegationPutRequest is the body of PUT /v1/delegation (protocol
+// §6.31). delegation_signed is the §3.10 owner-signed transcript; the
+// server verifies the signature against the current directory's active
+// owner keys and stores it opaque.
+type DelegationPutRequest struct {
+	DelegationRevision uint64 `json:"delegation_revision"`
+	DelegationSigned   Blob   `json:"delegation_signed"`
+	Signature          Blob   `json:"signature"`
+}
+
+// DelegationGetResponse is the body of GET /v1/delegation (protocol
+// §6.31). Null delegation_signed means "no delegation" (revision 0).
+// The signature rides along so the decider can verify the policy before
+// using it — the server only relays, it is not a trust anchor (§3.10).
+type DelegationGetResponse struct {
+	DelegationRevision uint64 `json:"delegation_revision"`
+	DelegationSigned   Blob   `json:"delegation_signed"`
+	Signature          Blob   `json:"signature"`
 }

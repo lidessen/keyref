@@ -18,21 +18,52 @@ var (
 	ErrApprovalExpired    = errors.New("store: approval expired")
 )
 
-const approvalCols = `approval_id, vault_id, cli_device_id, item_id,
-request_ciphertext, request_signature, status, one_time_wrap, expires_at, created_at`
+const approvalCols = `approval_id, vault_id, cli_device_id, item_id, subject,
+cli_ephemeral_public_key, request_ciphertext, request_signature, status,
+one_time_wrap, expires_at, created_at, decision_device_id`
 
 func scanApproval(row interface{ Scan(...any) error }) (*Approval, error) {
 	var a Approval
-	err := row.Scan(&a.ID, &a.VaultID, &a.CLIDeviceID, &a.ItemID,
-		&a.RequestCiphertext, &a.RequestSignature, &a.Status, &a.OneTimeWrap,
-		&a.ExpiresAt, &a.CreatedAt)
+	// decision_device_id is empty (NULL on pre-v6 rows) until a decision
+	// is accepted (schema v6); the wire treats "" as absent.
+	var decider sql.NullString
+	err := row.Scan(&a.ID, &a.VaultID, &a.CLIDeviceID, &a.ItemID, &a.Subject,
+		&a.CLIEphemeralPublicKey, &a.RequestCiphertext, &a.RequestSignature,
+		&a.Status, &a.OneTimeWrap, &a.ExpiresAt, &a.CreatedAt, &decider)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: scan approval: %w", err)
 	}
+	a.DecisionDeviceID = decider.String
 	return &a, nil
+}
+
+// IsMessageSubject reports whether the approval targets an SMS
+// verification code rather than an item (design v0.8 §14.5, D16).
+func (a *Approval) IsMessageSubject() bool {
+	return len(a.Subject) > len(wire.EntityMessage)+1 &&
+		a.Subject[:len(wire.EntityMessage)+1] == wire.EntityMessage+":"
+}
+
+// SubjectID returns the id half of the subject ("item:<id>" / "message:<id>").
+func (a *Approval) SubjectID() string {
+	if i := len(a.Subject); i > 0 {
+		if p := indexByte(a.Subject, ':'); p >= 0 {
+			return a.Subject[p+1:]
+		}
+	}
+	return ""
+}
+
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // GetApproval loads one approval row; ErrNotFound when absent.
@@ -80,16 +111,32 @@ func (s *Store) ListApprovals(ctx context.Context, vaultID, status string) ([]Ap
 	return out, rows.Err()
 }
 
-// InsertApproval stores a freshly verified approval request.
+// InsertApproval stores a freshly verified approval request. For
+// message subjects the caller passes Subject = "message:<id>" and
+// CLIEphemeralPublicKey; the item_id column then carries the message_id
+// as well (schema v4 keeps it NOT NULL, D16).
 func (s *Store) InsertApproval(ctx context.Context, a *Approval) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.VaultID, a.CLIDeviceID, a.ItemID, a.RequestCiphertext,
-		a.RequestSignature, a.Status, a.OneTimeWrap, a.ExpiresAt, a.CreatedAt)
+		`INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.VaultID, a.CLIDeviceID, a.ItemID, a.Subject, a.CLIEphemeralPublicKey,
+		a.RequestCiphertext, a.RequestSignature, a.Status, a.OneTimeWrap,
+		a.ExpiresAt, a.CreatedAt, a.DecisionDeviceID)
 	if err != nil {
 		return fmt.Errorf("store: insert approval: %w", err)
 	}
 	return nil
+}
+
+// CountPendingBySubject counts pending approvals pointing at one
+// subject — the "同一消息同时最多一个未终结审批" rule (design §14.3, §11).
+func (s *Store) CountPendingBySubject(ctx context.Context, vaultID, subject string) (int64, error) {
+	var n int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM approvals WHERE vault_id = ? AND subject = ? AND status = ?`,
+		vaultID, subject, wire.ApprovalStatusPending).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count pending by subject: %w", err)
+	}
+	return n, nil
 }
 
 // txAppendApprovalChange records the approval entity change of D8
@@ -105,35 +152,79 @@ func txAppendApprovalChange(ctx context.Context, tx *sql.Tx, vaultID, approvalID
 // DecideApproval applies the owner's decision atomically (protocol
 // §6.21): only a pending row accepts a decision; an approved decision
 // stores the one-time wrap (enc ‖ wrapped, length-prefixed by the
-// caller) and sets the 60-second wrap expiry; both paths append the
-// approval change.
-func (s *Store) DecideApproval(ctx context.Context, vaultID, approvalID string,
+// caller) and sets the 60-second wrap expiry; both paths stamp
+// decisionDeviceID — the device that signed the decision — and append
+// the approval change.
+func (s *Store) DecideApproval(ctx context.Context, vaultID, approvalID, decisionDeviceID string,
 	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
-		var status string
-		err := tx.QueryRowContext(ctx,
-			`SELECT status FROM approvals WHERE approval_id = ? AND vault_id = ?`,
-			approvalID, vaultID).Scan(&status)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		} else if err != nil {
-			return fmt.Errorf("store: decide approval: read: %w", err)
-		}
-		if status != wire.ApprovalStatusPending {
-			return ErrApprovalNotPending
-		}
-		newStatus := wire.ApprovalStatusDenied
-		if approved {
-			newStatus = wire.ApprovalStatusApproved
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE approvals SET status = ?, one_time_wrap = ?, expires_at = ?
-WHERE approval_id = ? AND vault_id = ? AND status = ?`,
-			newStatus, oneTimeWrap, expiresAt, approvalID, vaultID, wire.ApprovalStatusPending); err != nil {
-			return fmt.Errorf("store: decide approval: %w", err)
-		}
-		return txAppendApprovalChange(ctx, tx, vaultID, approvalID, now)
+		return s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now)
 	})
+}
+
+// DecideApprovalForMessage is DecideApproval plus the same-transaction
+// consumed stamp of the targeted message (design §14.3, §14.5): the
+// approval decision and the message's one-way consumed flag commit
+// atomically, so a second approval can never deliver the same code. A
+// message that is no longer active fails with ErrApprovalNotPending.
+func (s *Store) DecideApprovalForMessage(ctx context.Context, vaultID, approvalID, messageID, decisionDeviceID string,
+	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		if approved {
+			var status string
+			err := tx.QueryRowContext(ctx,
+				`SELECT status FROM messages WHERE vault_id = ? AND message_id = ?`,
+				vaultID, messageID).Scan(&status)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrApprovalNotPending
+			} else if err != nil {
+				return fmt.Errorf("store: decide message approval: read message: %w", err)
+			}
+			if status != wire.MessageStatusActive {
+				return ErrApprovalNotPending
+			}
+		}
+		if err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now); err != nil {
+			return err
+		}
+		if approved {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE messages SET status = ? WHERE vault_id = ? AND message_id = ? AND status = ?`,
+				wire.MessageStatusConsumed, vaultID, messageID, wire.MessageStatusActive); err != nil {
+				return fmt.Errorf("store: decide message approval: consume: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// decideApprovalTx is the shared body of DecideApproval: it assumes an
+// open transaction and appends the approval change inside it.
+func (s *Store) decideApprovalTx(ctx context.Context, tx *sql.Tx, vaultID, approvalID, decisionDeviceID string,
+	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
+	var status string
+	err := tx.QueryRowContext(ctx,
+		`SELECT status FROM approvals WHERE approval_id = ? AND vault_id = ?`,
+		approvalID, vaultID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return fmt.Errorf("store: decide approval: read: %w", err)
+	}
+	if status != wire.ApprovalStatusPending {
+		return ErrApprovalNotPending
+	}
+	newStatus := wire.ApprovalStatusDenied
+	if approved {
+		newStatus = wire.ApprovalStatusApproved
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE approvals SET status = ?, one_time_wrap = ?, expires_at = ?, decision_device_id = ?
+WHERE approval_id = ? AND vault_id = ? AND status = ?`,
+		newStatus, oneTimeWrap, expiresAt, decisionDeviceID, approvalID, vaultID, wire.ApprovalStatusPending); err != nil {
+		return fmt.Errorf("store: decide approval: %w", err)
+	}
+	return txAppendApprovalChange(ctx, tx, vaultID, approvalID, now)
 }
 
 // ExpireApproval flips one pending row to expired and appends the

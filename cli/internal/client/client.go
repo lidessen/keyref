@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -217,6 +218,47 @@ func (c *Client) ApprovalCreate(req *wire.ApprovalCreateRequest) (*wire.Approval
 func (c *Client) ApprovalPoll(approvalID string) (*wire.ApprovalPollResponse, error) {
 	var out wire.ApprovalPollResponse
 	if err := c.do(http.MethodGet, "/v1/approvals/"+approvalID, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListApprovals lists approvals by status (§6.20). An owner sees every
+// pending approval; a decider sees only message subjects (server-enforced,
+// design §14.8).
+func (c *Client) ListApprovals(status string) (*wire.ApprovalListResponse, error) {
+	q := url.Values{}
+	q.Set("status", status)
+	var out wire.ApprovalListResponse
+	if err := c.do(http.MethodGet, "/v1/approvals", q, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SubmitApprovalDecision posts a decision (§6.21). For a message subject
+// the payload is the message plaintext JSON sealed to the CLI's ephemeral
+// key (D18); the server only relays it.
+func (c *Client) SubmitApprovalDecision(approvalID string, req *wire.ApprovalDecisionRequest) error {
+	return c.do(http.MethodPost, "/v1/approvals/"+approvalID+"/decision", nil, req, nil)
+}
+
+// GetDelegation fetches the owner-signed delegation policy (§6.31).
+func (c *Client) GetDelegation() (*wire.DelegationGetResponse, error) {
+	var out wire.DelegationGetResponse
+	if err := c.do(http.MethodGet, "/v1/delegation", nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListMessages pulls the inbox from `since` (§6.29). The decider uses it
+// to reach the ciphertext it must open for a pending consumption.
+func (c *Client) ListMessages(since int64) (*wire.MessageListResponse, error) {
+	q := url.Values{}
+	q.Set("since", strconv.FormatInt(since, 10))
+	var out wire.MessageListResponse
+	if err := c.do(http.MethodGet, "/v1/messages", q, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

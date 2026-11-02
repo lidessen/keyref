@@ -38,6 +38,19 @@ func (f *fakePush) Push(token string, payload []byte) error {
 	return f.err
 }
 
+// callsAfter returns the tokens of every call after the given count.
+func (f *fakePush) callsAfter(n int) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for i, c := range f.calls {
+		if i >= n {
+			out = append(out, c.Token)
+		}
+	}
+	return out
+}
+
 func (f *fakePush) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

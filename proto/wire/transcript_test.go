@@ -53,6 +53,7 @@ func TestBuildTranscriptGolden(t *testing.T) {
 		SignPublicKey:        append([]byte{0x04, 0x00}, rep(0xb2, 63)...),
 		RenewalSignPublicKey: rep(0xc3, SizeEd25519Key),
 		GrantsDigest:         digestA,
+		ReceiverRole:         ReceiverRolePrimary,
 	}
 	dirB := DirectoryDevice{
 		DeviceID:      tvDevice2,
@@ -146,9 +147,9 @@ func TestBuildTranscriptGolden(t *testing.T) {
 			want: "KEYREF1\x00directory\x00" + tvVault + "\x00" + u64hex(2) + "\x00" +
 				recA + "\x00" + string(dirA.HPKEPublicKey) + "\x00" + dirA.SignAlg + "\x00" +
 				string(dirA.SignPublicKey) + "\x00" + string(dirA.RenewalSignPublicKey) + "\x00" +
-				string(digestA) + "\x00" +
-				recB + "\x00" + string(dirB.HPKEPublicKey) + "\x00" + dirB.SignAlg + "\x00" +
-				string(dirB.SignPublicKey) + "\x00" + "" + "\x00" + string(digestB),
+				string(digestA) + "\x01" + // receiver_role directly after the digest (§14.4)
+				"\x00" + recB + "\x00" + string(dirB.HPKEPublicKey) + "\x00" + dirB.SignAlg + "\x00" +
+				string(dirB.SignPublicKey) + "\x00" + "" + "\x00" + string(digestB) + "\x00",
 		},
 		{
 			name: "pair sorts grants and concatenates transcripts",

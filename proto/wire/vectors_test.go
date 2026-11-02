@@ -47,6 +47,7 @@ type vecDevice struct {
 	SignPublicKey        string `json:"sign_public_key"`
 	RenewalSignPublicKey string `json:"renewal_sign_public_key"`
 	GrantsDigest         string `json:"grants_digest"`
+	ReceiverRole         uint8  `json:"receiver_role"`
 }
 
 type vectorsFile struct {
@@ -222,6 +223,7 @@ func TestVectorDirectoryTranscript(t *testing.T) {
 			SignPublicKey:        mustHex(t, d.SignPublicKey),
 			RenewalSignPublicKey: mustHex(t, d.RenewalSignPublicKey),
 			GrantsDigest:         mustHex(t, d.GrantsDigest),
+			ReceiverRole:         d.ReceiverRole,
 		}
 	}
 	got, err := BuildDirectoryTranscript(DirectoryTranscript{

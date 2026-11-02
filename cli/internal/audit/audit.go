@@ -37,6 +37,10 @@ type DeviceRecord struct {
 	SignPublicKey        []byte
 	RenewalSignPublicKey []byte
 	GrantsDigest         []byte
+	// ReceiverRole is the SMS-inbox role carried as one byte directly
+	// after grants_digest (design v0.8 §14.4, protocol §3.3): 0 none,
+	// 1 primary receiver, 2 inbox.
+	ReceiverRole uint8
 }
 
 // ParseDirectory returns the device records of a directory transcript,
@@ -55,18 +59,23 @@ func ParseDirectory(signed []byte) ([]DeviceRecord, error) {
 }
 
 // Event is the audit plaintext (design.md §7.7): argv in placeholder
-// form, never injected secrets.
+// form, never injected secrets. DecisionDeviceID names the device that
+// signed the approval decision behind an `approval_result` (design v0.8
+// §14.5/§14.8, protocol §6.22) — owner or decider; it is omitted when no
+// approval decided the run. The message an SMS consumption targeted is
+// already in Refs as `sms:<id>`, so no separate id field exists here.
 type Event struct {
-	Time           int64    `json:"time"`
-	DeviceID       string   `json:"device_id"`
-	Refs           []string `json:"refs"`
-	Injection      []string `json:"injection"`
-	Argv           []string `json:"argv"`
-	AllowArgv      bool     `json:"allow_argv"`
-	PolicyResult   string   `json:"policy_result"`
-	ApprovalResult string   `json:"approval_result,omitempty"`
-	ChildExit      int      `json:"child_exit"`
-	Redactions     int      `json:"redactions"`
+	Time             int64    `json:"time"`
+	DeviceID         string   `json:"device_id"`
+	Refs             []string `json:"refs"`
+	Injection        []string `json:"injection"`
+	Argv             []string `json:"argv"`
+	AllowArgv        bool     `json:"allow_argv"`
+	PolicyResult     string   `json:"policy_result"`
+	ApprovalResult   string   `json:"approval_result,omitempty"`
+	DecisionDeviceID string   `json:"decision_device_id,omitempty"`
+	ChildExit        int      `json:"child_exit"`
+	Redactions       int      `json:"redactions"`
 }
 
 // OwnersFromDirectory extracts the active owner (kind=ios) records
@@ -175,11 +184,15 @@ func parseDirectory(signed []byte) ([]dirDevice, error) {
 		}
 		rest = rest[i+1:]
 
-		if len(rest) < 32 {
+		if len(rest) < 32+1 {
 			return nil, fail("truncated grants digest")
 		}
 		d.GrantsDigest = rest[:32]
 		rest = rest[32:]
+		// receiver_role sits directly after the digest, before the record
+		// separator (protocol §3.3 / design §14.4).
+		d.ReceiverRole = rest[0]
+		rest = rest[1:]
 		if len(rest) > 0 {
 			if rest[0] != 0x00 {
 				return nil, fail("bad record separator")
@@ -216,6 +229,7 @@ func toWireDevices(ds []dirDevice) []wire.DirectoryDevice {
 			SignPublicKey:        d.SignPublicKey,
 			RenewalSignPublicKey: d.RenewalSignPublicKey,
 			GrantsDigest:         d.GrantsDigest,
+			ReceiverRole:         d.ReceiverRole,
 		})
 	}
 	return out

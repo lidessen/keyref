@@ -129,6 +129,20 @@ func HasArgvPlaceholder(argv []string) bool {
 	return false
 }
 
+// HasMessagePlaceholder reports whether argv carries an
+// {{keyref:sms:…}} placeholder. The form does not exist (design v0.8
+// §14.5) — the argv placeholder grammar only admits item refs — so the
+// caller rejects it explicitly instead of passing the literal text to
+// the child.
+func HasMessagePlaceholder(argv []string) bool {
+	for _, a := range argv {
+		if strings.Contains(a, "{{keyref:"+MessageRefPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ArgvPlaceholderRefs lists the refs referenced by argv placeholders.
 func ArgvPlaceholderRefs(argv []string) []string {
 	var refs []string

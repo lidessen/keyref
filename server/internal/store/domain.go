@@ -35,6 +35,7 @@ type Device struct {
 	CreatedAt     int64
 	RevokedAt     sql.NullInt64
 	PushToken     sql.NullString // APNs token (schema v3); NULL = not registered
+	ReceiverRole  int            // 0 none, 1 primary receiver, 2 inbox (schema v5, §14.4)
 }
 
 // Item is a row of the items table. Tombstone rows carry NULL
@@ -69,16 +70,34 @@ type Grant struct {
 
 // Approval is a row of the approvals table.
 type Approval struct {
-	ID                string // hex approval_id
-	VaultID           string
-	CLIDeviceID       string
-	ItemID            string
-	RequestCiphertext []byte
-	RequestSignature  []byte // CLI Ed25519 over the request ciphertext bytes
-	Status            string // pending | approved | denied | expired | consumed
-	OneTimeWrap       []byte // NULL until the owner approves
-	ExpiresAt         int64
-	CreatedAt         int64
+	ID                    string // hex approval_id
+	VaultID               string
+	CLIDeviceID           string
+	ItemID                string // item-subject rows; message-subject rows carry the message_id here too (schema v4 keeps the NOT NULL column)
+	Subject               string // "item:<item_id>" or "message:<message_id>" (schema v4, protocol D16)
+	CLIEphemeralPublicKey []byte // message subjects only: request's one-time X25519 public key (design §14.8); nil for item subjects
+	RequestCiphertext     []byte
+	RequestSignature      []byte // CLI Ed25519 over the request ciphertext bytes
+	Status                string // pending | approved | denied | expired | consumed
+	OneTimeWrap           []byte // NULL until the owner approves
+	DecisionDeviceID      string // device that signed the decision (kind=ios or kind=decider); "" = none yet (schema v6, design §14.5/§14.8)
+	ExpiresAt             int64
+	CreatedAt             int64
+}
+
+// Message is a row of the messages table (design v0.8 §14.3): one SMS
+// verification code, end-to-end encrypted to the owner devices and any
+// delegated decider. Everything is opaque to the server.
+type Message struct {
+	VaultID          string
+	MessageID        string // hex message_id
+	SourceDeviceID   string
+	Status           string // active | consumed
+	Envelope         []byte // §3.9 envelope
+	RequestSignature []byte // source Ed25519 over the upload transcript
+	ReceivedAt       int64  // device-reported arrival time; advisory only
+	CreatedAt        int64  // server clock; cursor and age-policy basis
+	ExpiresAt        int64  // server-stamped: created_at + 24h
 }
 
 // AuditEvent is a row of the audit_events table. The ciphertext is

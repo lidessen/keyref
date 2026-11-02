@@ -38,10 +38,11 @@ type apsPayload struct {
 }
 
 // pushEnvelope is the full APNs payload: the aps dictionary plus the
-// custom approval_id the iOS app routes on.
+// custom routing id the iOS app routes on (approval_id or message_id).
 type pushEnvelope struct {
 	Aps        apsPayload `json:"aps"`
-	ApprovalID string     `json:"approval_id"`
+	ApprovalID string     `json:"approval_id,omitempty"`
+	MessageID  string     `json:"message_id,omitempty"`
 }
 
 // pushApprovalPayload renders the fixed approval notification payload
@@ -54,6 +55,24 @@ func pushApprovalPayload(approvalID string) []byte {
 			Sound: "default",
 		},
 		ApprovalID: approvalID,
+	})
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// pushMessagePayload renders the fixed new-message notification payload
+// (design v0.8 §14.4): the body is the same fixed string for every
+// message and carries no sender, no device label and no SMS content —
+// the lock screen is a semi-public surface (B9).
+func pushMessagePayload(messageID string) []byte {
+	b, err := json.Marshal(pushEnvelope{
+		Aps: apsPayload{
+			Alert: apsAlert{Title: "keyref", Body: "收到新的验证码"},
+			Sound: "default",
+		},
+		MessageID: messageID,
 	})
 	if err != nil {
 		return nil
@@ -114,30 +133,53 @@ func validAPNsToken(token string) bool {
 // runs on its own goroutine bounded by the provider's client timeout;
 // a token APNs rejected (410) is cleared from the store.
 func (s *Server) pushApprovalCreated(vaultID, approvalID string) {
-	if s.cfg.Push == nil {
+	s.pushToOwners(vaultID, pushApprovalPayload(approvalID), "approval", approvalID)
+}
+
+// pushMessageCreated fans a new message out to the owner devices'
+// registered APNs tokens (design v0.8 §14.4). Same contract as
+// pushApprovalCreated: durable row first, best-effort push, failures
+// only log.
+func (s *Server) pushMessageCreated(vaultID, messageID string) {
+	s.pushToOwners(vaultID, pushMessagePayload(messageID), "message", messageID)
+}
+
+// pushToOwners is the shared fan-out of pushApprovalCreated and
+// pushMessageCreated. payload may be nil (marshal failure): the push is
+// then silently skipped. Targeting follows design v0.8 §14.4: the
+// primary receiver gets the push alone; without a registered primary
+// token every owner device with a token is fanned out as before.
+func (s *Server) pushToOwners(vaultID string, payload []byte, kind, id string) {
+	if s.cfg.Push == nil || payload == nil {
 		return
 	}
-	payload := pushApprovalPayload(approvalID)
-	if payload == nil {
-		return
-	}
-	tokens, err := s.st.ListPushTokens(bgContext(), vaultID)
+	primary, err := s.st.PrimaryReceiverToken(bgContext(), vaultID)
 	if err != nil {
-		log.Printf("api: push approval %s: list tokens: %v", approvalID, err)
+		log.Printf("api: push %s %s: primary receiver: %v", kind, id, err)
 		return
+	}
+	tokens := []string(nil)
+	if primary != "" {
+		tokens = []string{primary}
+	} else {
+		tokens, err = s.st.ListPushTokens(bgContext(), vaultID)
+		if err != nil {
+			log.Printf("api: push %s %s: list tokens: %v", kind, id, err)
+			return
+		}
 	}
 	for _, token := range tokens {
 		go func(token string) {
 			if err := s.cfg.Push.Push(token, payload); err != nil {
 				if errors.Is(err, apns.ErrTokenInvalid) {
 					// APNs no longer knows this token: drop it so
-					// future approvals stop hitting a dead device.
+					// future pushes stop hitting a dead device.
 					if cerr := s.st.ClearPushToken(bgContext(), token); cerr != nil {
-						log.Printf("api: push approval %s: clear token: %v", approvalID, cerr)
+						log.Printf("api: push %s %s: clear token: %v", kind, id, cerr)
 					}
 					return
 				}
-				log.Printf("api: push approval %s: %v", approvalID, err)
+				log.Printf("api: push %s %s: %v", kind, id, err)
 			}
 		}(token)
 	}

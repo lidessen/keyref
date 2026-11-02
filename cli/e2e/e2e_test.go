@@ -85,7 +85,10 @@ func TestMain(m *testing.M) {
 	serverURL = "http://127.0.0.1:" + port
 	dataDir := filepath.Join(base, "data")
 	srv := exec.Command(filepath.Join(base, "keyref-server"), "serve", "--listen", "127.0.0.1:"+port)
-	srv.Env = append(os.Environ(), "KEYREF_DATA="+dataDir)
+	// The suite registers many devices from 127.0.0.1 in quick succession;
+	// raise the per-IP pair/register window (test-only knob, protocol §6.16).
+	srv.Env = append(os.Environ(), "KEYREF_DATA="+dataDir,
+		"KEYREF_PAIR_REGISTER_PER_MINUTE=200")
 	var srvLog bytes.Buffer
 	srv.Stdout = &srvLog
 	srv.Stderr = &srvLog
@@ -582,6 +585,16 @@ func cliEnv() []string {
 
 func runCLI(t *testing.T, args ...string) cliRun {
 	t.Helper()
+	run, err := execCLI(args...)
+	if err != nil {
+		t.Fatalf("run keyref %v: %v", args, err)
+	}
+	return run
+}
+
+// execCLI runs the CLI binary and reports a start failure as an error
+// instead of failing the test — safe to call from a spawned goroutine.
+func execCLI(args ...string) (cliRun, error) {
 	cmd := exec.Command(cliBin, args...)
 	cmd.Env = cliEnv()
 	var out, errBuf bytes.Buffer
@@ -592,9 +605,9 @@ func runCLI(t *testing.T, args ...string) cliRun {
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
-		t.Fatalf("run keyref %v: %v", args, err)
+		return cliRun{}, err
 	}
-	return cliRun{stdout: out.String(), stderr: errBuf.String(), code: code}
+	return cliRun{stdout: out.String(), stderr: errBuf.String(), code: code}, nil
 }
 
 type pairProc struct {

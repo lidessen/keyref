@@ -1,8 +1,8 @@
 # keyref 线协议契约
 
-状态：v1.1，对应 design.md v0.7。本文是唯一的线格式依据：并行的 Go 服务器实现者与 Go CLI 实现者都只按本文写字节。design.md 讲「为什么」，本文讲「精确是什么」。两者冲突时，以本文对线格式的拍板为准，并把差异登记在第 12 节。
+状态：v1.2，对应 design.md v0.8。本文是唯一的线格式依据：并行的 Go 服务器实现者与 Go CLI 实现者都只按本文写字节。design.md 讲「为什么」，本文讲「精确是什么」。两者冲突时，以本文对线格式的拍板为准，并把差异登记在第 12 节。
 
-日期：2026-10-27（v1.1 修订：补 §5.27/§6.27 推送令牌端点、目录与 Go 版本对齐实际树；初版 2026-10-24）。实现语言：Go（design §12.2，v0.4 起 CLI 与服务器同为 Go）。
+日期：2026-11-02（v1.2 修订：随 design v0.8 新增短信验证码采集——`source`/`decider` 设备种类、消息端点与信封、审批 subject 扩展、委托策略誊本、§5.28–§5.32；v1.1 2026-10-27 补推送令牌端点；初版 2026-10-24）。实现语言：Go（design §12.2，v0.4 起 CLI 与服务器同为 Go）。
 
 ---
 
@@ -13,7 +13,7 @@
 | 项 | 规则 |
 | --- | --- |
 | 二进制字段（JSON 内） | 标准 Base64，RFC 4648 **带填充**，`encoding/base64.StdEncoding` |
-| id（`vault_id`、`device_id`、`item_id`、`approval_id`、`nonce`） | 16 字节随机数的**小写 hex**，32 个字符，正则 `^[0-9a-f]{32}$` |
+| id（`vault_id`、`device_id`、`item_id`、`approval_id`、`message_id`、`nonce`） | 16 字节随机数的**小写 hex**，32 个字符，正则 `^[0-9a-f]{32}$` |
 | 时间 | Unix 毫秒，JSON number（`int64`） |
 | 誊本内整数（`revision`、`expires_at`、`directory_revision`、计数） | **uint64 大端 8 字节**（`binary.BigEndian.PutUint64`） |
 | HPKE `info` 与 AAD 分隔 | ASCII unit separator `0x1f`（下文写作 `<US>`） |
@@ -25,7 +25,7 @@
 - 请求与响应 `Content-Type: application/json; charset=utf-8`。
 - 字段名 lower_snake_case。**未知字段一律拒绝**（`400 invalid_field`，design §12.3），避免把客户端误传的明文写进日志。
 - 错误响应固定为 `{"error":"<code>"}`，可附结构化字段（如 `challenge`），**永不回显请求字段**（design §11）。
-- 请求正文上限先于解析执行：item 路径 256 KiB、审计 4 KiB、审批 8 KiB，超限 `413 body_too_large`。
+- 请求正文上限先于解析执行：item 路径 256 KiB、审计 4 KiB、审批 8 KiB、消息 16 KiB（decision 96 KiB，§6.21），超限 `413 body_too_large`。
 
 ### 1.3 错误码 → HTTP 状态
 
@@ -49,7 +49,7 @@
 | `rate_limited` | 429 | 超过每分钟配额；审批轮询间隔 < 2 秒 |
 | `quota_exceeded` | 429 | 超过每日请求、存储、条目数、待审批数等档位上限 |
 
-超额（`quota_exceeded`）时**永远可用**的操作集合（design §10.5 第 7 条）：读（`sync`、`account`、`items` 读、`grants/self`）、删除（item tombstone、grants、目录、整个保险库）、审批决定。
+超额（`quota_exceeded`）时**永远可用**的操作集合（design §10.5 第 7 条）：读（`sync`、`account`、`items` 读、`grants/self`、`messages`）、删除（item tombstone、grants、目录、整个保险库、消息）、审批决定。
 
 ### 1.4 算法标识（数据库列值与 JSON 字符串）
 
@@ -217,13 +217,14 @@ hpke_enc <NUL> wrapped_key
 <设备记录按 device_id 的 hex 字节序升序排列，记录之间以单个 <NUL> 连接，末尾无 <NUL>>
 
 每个设备记录：
-device_id(hex) <NUL> kind("ios"|"cli") <NUL> status("pending"|"active"|"revoked") <NUL>
+device_id(hex) <NUL> kind("ios"|"cli"|"source"|"decider") <NUL> status("pending"|"active"|"revoked") <NUL>
 hpke_kem("X25519"|"P-256") <NUL> hpke_public_key <NUL> sign_alg("ed25519"|"ecdsa-p256") <NUL>
-sign_public_key <NUL> renewal_sign_public_key <NUL> grants_digest(32 字节原始 SHA-256)
+sign_public_key <NUL> renewal_sign_public_key <NUL> grants_digest(32 字节原始 SHA-256) receiver_role(1 字节)
 ```
 
 - 签名者：owner（多 owner 时任一在目录内的 owner）。`renewal_sign_public_key` 无则为零长度。
-- **`grants_digest`** = SHA-256( 该设备当前全部 grant 誊本按 `(item_id hex 升序, kind 字节序升序)` 排序后顺序拼接 )。注意：`kind` 按字符串字节序，即 `"use"` 排在 `"view"` 之前。
+- **`receiver_role`**（v1.2 新增，design §14.4）：紧跟 `grants_digest` 之后的一个原始字节，**不带分隔符**。取值：`0x00` 无角色 / `0x01` 主接收端 / `0x02` 收件箱。记录之间仍只有一个 `<NUL>`，所以两设备的字节目次是：`记录一 … grants_digest(32) receiver_role(1)`、`<NUL>`、`记录二 … grants_digest(32) receiver_role(1)`（末条记录后无 `<NUL>`）。校验：非 `0x00` 的角色只允许出现在 `kind = ios` 的设备上；每个 vault 至多一条 `0x01`（超限 → `invalid_receiver_role`）。`0x02` 本轮保留给后面的安卓收件箱设备，MVP 不下发。
+- **`grants_digest`** = SHA-256( 该设备当前全部 grant 誊本按 `(item_id hex 升序, kind 字节序升序)` 排序后顺序拼接 )。注意：`kind` 按字符串字节序，即 `"use"` 排在 `"view"` 之前。`source` 与 `decider` 设备（design v0.8 §14）永远没有 grants，其 `grants_digest` = SHA-256(空串)，即 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。
 
 ### 3.4 pair 誊本（配对完成，owner 签）
 
@@ -255,7 +256,8 @@ vault-recovery: "KEYREF1" <NUL> "vault-recovery" <NUL> vault_id(hex) <NUL>
 
 ```text
 info 基底: "keyref v1" <US> <purpose> <US> <vault_id hex> <US> <recipient_device_id hex>
-purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, approval-request }
+purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, approval-request,
+            source-message, one-time-message-key }
 ```
 
 | 用途 | 完整 info / AAD |
@@ -263,13 +265,16 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 | view 授权包裹 meta key | 基底，purpose=`meta-key` |
 | use 授权包裹 item key | 基底，purpose=`item-key` |
 | 一次性 item key（§7.1.4） | 基底 purpose=`one-time-item-key`，再接 `<US> item_id(hex) <US> approval_id(hex) <US> SHA-256(request_ciphertext 原始字节)`（第 12 节 D4：把 design §8.3 要求绑定的 `item_id` 并进 §9.1 的基底） |
+| 一次性消息密钥（§6.28 消费） | 基底 purpose=`one-time-message-key`，再接 `<US> message_id(hex) <US> approval_id(hex) <US> SHA-256(request_ciphertext 原始字节)` |
 | 审计事件密钥包裹 owner | 基底，purpose=`audit-event-key` |
+| 消息密钥包裹 owner/决策器 | 基底，purpose=`source-message`（recipient = 该包裹的目标设备，§3.9） |
 | 审批请求 HPKE 给 owner | 基底，purpose=`approval-request`（recipient = owner 设备） |
 | VMK 包给 owner 设备 | 基底，purpose=`vmk` |
 | 条目密文 AAD | `keyref v1 <US> secret <US> <vault_id> <US> <item_id>`（meta 换成 `meta`；**不含 revision**，design §9.1） |
 | `vault_wrapped_*` AAD | `keyref v1 <US> vault-meta-key|vault-item-key <US> <vault_id> <US> <item_id>` |
 | `recovery_wrap` AAD | `keyref v1 <US> recovery <US> <vault_id>` |
 | 审计正文 AES 段 AAD | `keyref v1 <US> audit <US> <vault_id> <US> <device_id>(上报设备)` |
+| 消息正文 AES 段 AAD | `keyref v1 <US> message <US> <vault_id> <US> <source_device_id>(上报设备)`——镜像审计信封绑定上报设备而非服务器生成的 id：source 在上传前就要构建信封，那时 message_id 尚不存在（D15） |
 
 ### 3.8 恢复码与派生（design §8.5）
 
@@ -277,6 +282,52 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 - HKDF-SHA256：`prk = hkdf.Extract(sha256.New, ikm=种子, salt=nil)`；`recovery-kek = Expand(prk, "recovery-kek", 32)`；`recovery-sign` 的 Ed25519 种子 = `Expand(prk, "recovery-sign", 32)`。两条派生域分离、相互独立。
 - `recovery_wrap` = AES-256-GCM(`recovery-kek`, VMK)，blob 与 AAD 见 §1.5/§3.7。
 - `recovery_kdf_json` 固定为：`{"v":1,"kdf":"hkdf-sha256","salt":"","kek_info":"recovery-kek","sign_info":"recovery-sign"}`。以后加 Argon2id 口令副本时 `kdf` 换 `"argon2id"` 并增 `m/t/p/salt` 字段，服务器只透传不解释。
+
+### 3.9 message-upload 誊本与消息信封（design v0.8 §14.3）
+
+**上传誊本**（source 设备 Ed25519 签，服务器在落库前验证）：
+
+```text
+"KEYREF1" <NUL> "message-upload" <NUL> vault_id(hex) <NUL> source_device_id(hex) <NUL>
+u64be(received_at, 设备自报的短信到达时间) <NUL> envelope(原始字节)
+```
+
+**消息信封**（复用 D12 审计信封的构造，增加显式目标标识——多接收方类别（owner + 决策器）必须钉死对应关系）：
+
+```text
+u8 wrap_count ‖ 每个接收者记录（按 device_id 的 hex 字节序升序，记录间无分隔）:
+    u16be(device_id_len=32) ‖ device_id(hex ascii, 32 字节) ‖
+    u16be(enc_len) ‖ enc(KEM 封装，X25519 32B / P-256 65B) ‖
+    wrapped(48B: HPKE 密文 = ct(32 字节消息密钥) ‖ tag(16)；与 §3.7 的其余包裹同为 `enc ‖ ct`，不另带 nonce——HPKE 自己派生 nonce)
+‖ 消息正文 blob: nonce(12) ‖ ct ‖ tag(16)，AES-256-GCM(消息密钥, 明文 JSON)
+```
+
+每条包裹的 HPKE `info` = §3.7 基底，purpose=`source-message`，recipient = 该记录的 `device_id`；正文 blob 的 AAD = `keyref v1 <US> message <US> <vault_id> <US> <source_device_id>`（上报设备——source 在上传前构建信封，服务器生成的 `message_id` 尚不存在，故镜像审计信封 D12 绑定上报设备）。明文 JSON（≤ 4 KiB）：
+
+```json
+{ "v": 1, "sender": "10086", "body": "【XX银行】您的验证码 482913，5 分钟内有效。",
+  "sim": "备用卡1", "received_at": 1790000000000 }
+```
+
+**决策器补投**（design §14.8）：决策器配对或委托开启后，owner 对**已落库且未过期**的消息计算 `HPKE(source-message, recipient=decider)` 包裹并通过 `PUT /v1/messages/:message_id/wraps` 补写（§6.30）——服务器不改写正文 blob，只追加目标记录；`device_id` 重复追加 → `409 revision_conflict`（复用码，语义=已存在）。
+
+### 3.10 delegation 誊本（design v0.8 §14.8）
+
+```text
+"KEYREF1" <NUL> "delegation" <NUL> vault_id(hex) <NUL> u64be(delegation_revision) <NUL>
+policy_json(utf-8)
+```
+
+- 签名者：owner（任一在目录内且 active 的 owner 密钥，Ed25519 或 ECDSA 随设备）。
+- `policy_json` 是**签名的明文**（服务器可见其字节但只验签、不解析——这是委托功能新增的唯一明文面，已记入 design §6.4）：
+
+```json
+{ "v": 1, "senders": ["10086", "95533"], "max_age_min": 5,
+  "per_cli_hourly": 10, "per_cli_daily": 50, "cli_devices": ["<device_id hex>"] }
+```
+
+- 空委托（撤回）= `policy_json` 为 `{"v":1}`：全部字段缺省 ⇒ 无 sender 白名单 ⇒ 决策器无可自动批准的对象。
+- 决策器把 `delegation_revision` 与最新策略一起拉取（§6.31）；策略字节与签名必须先验后用（owner 公钥已钉死）。
 
 ---
 
@@ -331,8 +382,13 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 | 5.25 | `GET /v1/account` | bearer + owner | iOS owner |
 | 5.26 | `POST /v1/billing/apple` | bearer + owner | iOS owner（仅托管；自托管 404） |
 | 5.27 | `PUT /v1/devices/push-token` | bearer + owner | iOS owner（APNs 令牌登记） |
+| 5.28 | `POST /v1/messages` | bearer | source 设备（上传验证码） |
+| 5.29 | `GET /v1/messages?since=` | bearer | iOS owner 或决策器 |
+| 5.30 | `PUT /v1/messages/:message_id/wraps` | bearer + owner | iOS owner（决策器补投） |
+| 5.31 | `DELETE /v1/messages/:message_id` | bearer + owner | iOS owner |
+| 5.32 | `PUT` / `GET /v1/delegation` | bearer（PUT + owner） | iOS owner 写；全部设备读 |
 
-通用校验（每个端点都做）：设备属于该 vault 且 `status = active`（§8.4 送达语义的例外除外）；`kind = cli` 调 5.10/5.11/5.12/5.13/5.15/5.4/5.5/5.27 → `403 forbidden`；签名字段在该设备当前公钥下验证；正文上限 §1.2。
+通用校验（每个端点都做）：设备属于该 vault 且 `status = active`（§8.4 送达语义的例外除外）；`kind = cli` 调 5.10/5.11/5.12/5.13/5.15/5.4/5.5/5.27 → `403 forbidden`；`kind = source` 只能调 5.28、会话续期与 5.8（仅目录）；`kind = decider` 只能调 5.29、5.32 读、5.20（仅 message subject）与 5.21（subject 必须为 `message:` 前缀）；签名字段在该设备当前公钥下验证；正文上限 §1.2。
 
 ## 6. 端点明细
 
@@ -393,7 +449,9 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 ```json
 { "token": "<64 hex>", "expires_at": 1790000000000,
   "origin": "https://sync.example", "plan": "free",
-  "limits": { "items": 20, "devices_ios": 1, "devices_cli": 1, "storage_bytes": 1048576,
+  "limits": { "items": 20, "devices_ios": 1, "devices_cli": 1,
+              "devices_source": 1, "devices_decider": 1, "messages_pending": 20,
+              "storage_bytes": 1048576,
               "audit_retention_days": 7, "audit_max_events": 100,
               "requests_per_day": 500, "requests_per_minute": 30 } }
 ```
@@ -521,6 +579,8 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
   "expires_at": 1790000000000 }
 ```
 
+**消息消费形态**（design v0.8 §14.5）：`item_id` 省略，改传 `message_id`（32 hex，指向一条 `status = active` 的消息），并必须带 `cli_ephemeral_public_key`（请求内一次性 X25519 公钥的 32 字节原始值——决策器不解密 request_ciphertext，靠这个明文字段构造一次性包裹；条目审批可省略，owner 从密文内取）。明文 JSON 的 `item_id` 字段换为 `message_id`，其余不变。同一 `message_id` 同时最多一个未终结审批：存在 pending 时 → `409 approval_not_pending`。
+
 → `201 {"approval_id":"…","expires_at":…}`。`expires_at − now ≤ 120000`（CLI `--timeout`）。正文 ≤ 8 KiB、每库 pending ≤ 10，超出 `413` / `429 quota_exceeded`。`request_ciphertext` = `enc(32B 一次性 X25519) ‖ ct‖tag`；明文 JSON：
 
 ```json
@@ -530,16 +590,16 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
   "ephemeral_public_key": "<b64 32B>", "created_at": 1790000000000 }
 ```
 
-### 6.20 `GET /v1/approvals?status=pending`（owner）
+### 6.20 `GET /v1/approvals?status=pending`（owner；决策器仅见 message subject）
 
-`{"approvals":[{"approval_id":"…","cli_device_id":"…","item_id":"…","request_ciphertext":"…","request_signature":"…","created_at":…,"expires_at":…}]}`。iOS 解开后**先验 CLI 签名**（对密文），再展示。
+`{"approvals":[{"approval_id":"…","cli_device_id":"…","item_id":"…","message_id":"…(消息类才有)","cli_ephemeral_public_key":"…(消息类才有)","request_ciphertext":"…","request_signature":"…","created_at":…,"expires_at":…}]}`。iOS 解开后**先验 CLI 签名**（对密文），再展示；决策器不解开 request_ciphertext，只按 §3.10 的委托策略与明文元数据评估。
 
-### 6.21 `POST /v1/approvals/:approval_id/decision`（owner）
+### 6.21 `POST /v1/approvals/:approval_id/decision`（owner 或决策器）
 
 同意：`{"decision":"approved","one_time_enc":"<b64>","one_time_wrapped_key":"<b64 ct‖tag>"}`。
-包裹 = HPKE(X25519, recipient=请求里的 `ephemeral_public_key`, info=§3.7 一次性模板, AAD 空)；服务器置 `expires_at = now + 60000`。拒绝：`{"decision":"denied"}`。→ `204`。错误：`approval_not_pending`、`bad_signature`（缺 CLI 签名的旧行）。
+包裹 = HPKE(X25519, recipient=请求的临时公钥, info=§3.7 一次性模板, AAD 空)；服务器置 `expires_at = now + 60000`。拒绝：`{"decision":"denied"}`。→ `204`。错误：`approval_not_pending`、`bad_signature`（缺 CLI 签名的旧行）、`forbidden`（决策器对非 message subject 的审批做决定——服务器强制，design §14.8）。服务器把**签署这次决定的设备 id**（owner `kind=ios` 或决策器 `kind=decider`）写进审批行，同意与拒绝都记（schema v6，design v0.8 §14.5/§14.8），由 §6.22 轮询回传、CLI 转写进审计事件。
 
-**载荷两种**（design v0.7 §6.6）：同步条目照旧包 32 字节 item key；**仅本机条目**（`items.secret_ciphertext` 为 NULL，design §6.6）包该条目的 secret **值本身**——owner 解开本地包裹后的明文字节（UTF-8 的 value 字符串，≤64 KiB；不是 §3.7 的 secret JSON 包装，也不是密文）。CLI 的 unwrap 结果直接作为注入值。decision 端点正文上限相应为 **96 KiB**（审批请求仍 8 KiB）。CLI 按本地缓存中该条目是否缺 `secret_ciphertext` 区分两种投递。仅本机条目不得拥有 `use` 授权（服务器互斥校验，错误码 `local_item_grant_conflict`）。
+**载荷三种**（design v0.7 §6.6、v0.8 §14.5）：同步条目照旧包 32 字节 item key；**仅本机条目**（`items.secret_ciphertext` 为 NULL，design §6.6）包该条目的 secret **值本身**——owner 解开本地包裹后的明文字节（UTF-8 的 value 字符串，≤64 KiB；不是 §3.7 的 secret JSON 包装，也不是密文）。CLI 的 unwrap 结果直接作为注入值。**消息消费**（design v0.8 §14.5）包**该消息的明文 JSON**（§3.9 的 `{"v":1,"sender":…,"body":…,"sim":…,"received_at":…}` 原始字节，≤4 KiB）——消息密钥不出 owner/决策器域，CLI 解开即得正文。decision 端点正文上限 **96 KiB**（审批请求仍 8 KiB）。CLI 按本地缓存中该条目是否缺 `secret_ciphertext`、审批请求是否带 `message_id` 区分三种投递。仅本机条目不得拥有 `use` 授权（服务器互斥校验，错误码 `local_item_grant_conflict`）。
 
 ### 6.22 `GET /v1/approvals/:approval_id`（发起 CLI 轮询）
 
@@ -547,8 +607,11 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
 
 ```json
 { "approval_id": "…", "status": "approved",
-  "one_time_enc": "<b64>", "one_time_wrapped_key": "<b64>", "expires_at": 1790000000060 }
+  "one_time_enc": "<b64>", "one_time_wrapped_key": "<b64>", "expires_at": 1790000000060,
+  "decision_device_id": "…(32 hex，可选)" }
 ```
+
+**可选字段 `decision_device_id`**（32 hex）：签署该次 decision 的设备——owner（`kind=ios`）或被委托的决策器（`kind=decider`，design v0.8 §14.5/§14.8）。服务器只在 decision 被接受时写入（§6.21），因此 `pending` 行与从未做出决定的行（如 `expired`）**省略**该字段。纯增量：v1.1 的 CLI 与 iOS 解码时只读自己认识的键，行为不变。
 
 轮询间隔 < 2 秒 → `429 rate_limited`；轮询**不计**每日请求配额（design §8.3）。
 
@@ -558,7 +621,7 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
 { "ciphertext": "<b64 审计信封：u8 wrap_count ‖ 每.owner{ u16be enc_len ‖ enc ‖ 48B 包裹的事件密钥 } ‖ nonce‖ct‖tag（AES-GCM(事件密钥) 正文）>" }
 ```
 
-MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序追加包裹，信封格式不变）。事件密钥 32 字节随机；包裹 info = §3.7 `audit-event-key`。明文 JSON 字段见 design §7.7（无秘密值）。→ `201 {"seq":42}`。正文 ≤ 4 KiB。审计与待审批密文计入存储口径（design §10.5）。
+MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序追加包裹，信封格式不变）。事件密钥 32 字节随机；包裹 info = §3.7 `audit-event-key`。明文 JSON 字段见 design §7.7（无秘密值）：`time`、`device_id`、`refs`、`injection`、`argv`、`allow_argv`、`policy_result`、`child_exit`、`redactions`，加上两个可选键——`approval_result`（走过审批时的结论）与 **`decision_device_id`**（32 hex，签署那次审批决定的设备：owner `kind=ios` 或决策器 `kind=decider`，design v0.8 §14.5/§14.8）。`decision_device_id` 由 CLI 从 §6.22 同名字段回填，没有审批决定的尝试省略它；`sms:<message_id>` 这类被消费对象已经在 `refs` 里，不另设消息 id 字段。→ `201 {"seq":42}`。正文 ≤ 4 KiB。审计与待审批密文计入存储口径（design §10.5）。
 
 ### 6.24 `GET /v1/audit?cursor=<int>`（owner）
 
@@ -587,7 +650,43 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 { "token": "<hex、偶数长度、32–200 字符（APNs 当前 64）>", "env": "sandbox" | "production" }
 ```
 
-→ `204`。令牌写到**调用者自己的**设备行（owner 即 `kind=ios`；`kind=cli` → `403 forbidden`），重复登记覆盖旧值；`env` 只校验取值、不落库。错误：`unauthorized`、`forbidden`、`invalid_field`（`env` 非 `sandbox|production`、token 非 hex 或长度越界）。登记只存令牌；新审批落库后，服务器向各 owner 设备已登记的 token **尽力推送**（best-effort，失败只记日志；APNs 回 410 即清除该 token，design §8.3）。未配置 APNs 凭据的部署照常接受登记，只是不推送。
+→ `204`。令牌写到**调用者自己的**设备行（owner 即 `kind=ios`；`kind=cli` → `403 forbidden`），重复登记覆盖旧值；`env` 只校验取值、不落库。错误：`unauthorized`、`forbidden`、`invalid_field`（`env` 非 `sandbox|production`、token 非 hex 或长度越界）。登记只存令牌；新审批落库后，服务器向各 owner 设备已登记的 token **尽力推送**（best-effort，失败只记日志；APNs 回 410 即清除该 token，design §8.3）。未配置 APNs 凭据的部署照常接受登记，只是不推送。新消息落库后走同一推送面：正文固定为「收到新的验证码」，**不带 sender 与任何短信内容**（design §14.4，锁屏是半公开表面）。
+
+### 6.28 `POST /v1/messages` — 上传验证码（source 设备）
+
+```json
+{ "envelope": "<b64 §3.9 信封>", "request_signature": "<b64 Ed25519，签 §3.9 message-upload 誊本>",
+  "received_at": 1790000000000 }
+```
+
+→ `201 {"message_id":"…","expires_at":…}`，`message_id` 由服务器生成，`expires_at = 服务器 now + 24h`（固定 TTL，design §14.3；客户端自报的过期时间不存在）。服务器校验顺序：`kind = source` → 誊本验证（vault、source_device_id、received_at、envelope 覆盖于该设备当前 Ed25519 公钥）→ 明文上限（envelope ≤ 16 KiB）→ 该设备 active 消息数 < 档位上限（托管）→ 该设备当日上传 < 100（托管）。错误：`forbidden`（非 source）、`bad_signature`、`body_too_large`、`quota_exceeded`。落库后向 owner 设备的已登记 token 尽力推送（§6.27 的消息推送面）。
+
+### 6.29 `GET /v1/messages?since=<int>`（owner 或决策器）
+
+`since` 是十进制的 `created_at` 单调游标（0 = 全量）。响应：
+
+```json
+{ "messages": [ { "message_id": "…", "source_device_id": "…", "status": "active|consumed",
+    "envelope": "<b64>", "received_at": 1790000000000,
+    "created_at": 1790000000000, "expires_at": 1790000000000 } ],
+  "cursor": 1790000001234, "has_more": false }
+```
+
+只返回 `expires_at > now` 的行，按 `created_at` 升序，每页 ≤ 200，`cursor` = 本页最大 `created_at`。**不进 §8 的 changes 日志**（90 天滚动日志不被 24 小时消息污染，design §14.3）；拉取时顺带删除已过期的行（与审计清理同性质）。`received_at` 是设备自报值，仅作展示参考；排序、游标与「最大年龄」策略一律用服务器 `created_at`。
+
+### 6.30 `PUT /v1/messages/:message_id/wraps` — 决策器补投（owner）
+
+```json
+{ "wraps": [ { "device_id": "<decider device_id hex>", "hpke_enc": "<b64>", "wrapped_key": "<b64>" } ] }
+```
+
+→ `204`。owner（iOS）在决策器配对或委托开启后，把**未过期**消息的消息密钥按 §3.9 信封记录格式补包给决策器。服务器按信封格式解析、按 `device_id` 升序重排后重写 envelope；目标已存在 → `409 revision_conflict`；消息已过期/不存在 → `404`。服务器不解任何包裹。
+
+### 6.31 `DELETE /v1/messages/:message_id` 与 `PUT` / `GET /v1/delegation`
+
+- `DELETE /v1/messages/:message_id`（owner）→ `204`：立即删除（收件箱手动删除，design §14.4）；不存在 → `404`。
+- `PUT /v1/delegation`（owner）：`{"delegation_revision":3,"delegation_signed":"<b64 §3.10 誊本>","signature":"<b64>"}` → `204`。要求 `delegation_revision` 严格大于已存值，签名用**当前目录内 active 的 owner 公钥**验证（与 §6.15 目录验证同规）。
+- `GET /v1/delegation`（任意 active 设备）：`{"delegation_revision":3,"delegation_signed":"<b64>","signature":"<b64>"}`；未委托时 `{"delegation_revision":0,"delegation_signed":null,"signature":null}`。**`signature` 必须回传**：决策器要「先验后用」，而服务器不是信任锚——只存字节不给签名，等于让决策器信服务器的一面之词（2026-11-02 修正，服务器原本验完即丢）。owner 公钥已在配对时钉死（§9.2）。
 
 ---
 
@@ -654,10 +753,11 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 ### 9.1 二维码负载（design §8.1）
 
 ```text
-keyref://pair?v=1&k=<b64 X25519 hpke_public_key>&s=<b64 ed25519 sign_public_key>&n=<hex nonce 32>&name=<percent-encoded utf-8, ≤32 字节>&u=<percent-encoded origin, https>
+keyref://pair?v=1&k=<b64 X25519 hpke_public_key>&s=<b64 ed25519 sign_public_key>&n=<hex nonce 32>&name=<percent-encoded utf-8, ≤32 字节>&u=<percent-encoded origin, https>&t=<cli|source|decider>
 ```
 
 - `k`、`s` 为标准 Base64 后按 RFC 3986 percent-encode 进 query（`+`、`=`、`/` 必须转义）；`n` 是 hex，无需转义；`name`、`u` 是普通 percent-encoding。iOS 必须先 percent-decode 再 base64 解码。
+- `t` 是 v1.2 新增的可选参数，声明请求配对的设备种类；缺省为 `cli`（旧二维码兼容）。iOS 扫到 `t=source` 时确认页写明「只能上传短信」，`t=decider` 时写明「将看到全部短信明文」（design §14.2、§14.8）；非 owner 扫到的 `t` 值以 owner 在 `pair/complete` 里提交的 `device.kind` 为准。
 - `nonce` = CLI 生成的 16 字节随机数，即 §6.16/§3.5 的 nonce；10 分钟有效。
 - 终端同时以文字打印 origin 与指纹：指纹 = `SHA-256(s 原始字节)` 前 8 字节的 hex，按 4 位分组大写显示 `A1B2-C3D4-E5F6-7890`，供扫不出来时人工核对。
 
@@ -763,6 +863,11 @@ CLI：`keyref pair` 生成密钥（私钥入密钥环）→ 打印二维码 + �
 | D12 | 审计密文信封 | `u8 wrap_count ‖ 每 owner { u16be enc_len ‖ enc ‖ 48B } ‖ AES blob`，MVP count=1，多 owner 平滑扩展 | design §7.7 只描述了构造 |
 | D13 | 恢复接管双签 | `recovery_signature` 与 `owner_signature` 都签 §3.3 目录誊本原文；响直接发新 owner 会话 | design §8.5「共同签署一份接管誊本」 |
 | D14 | pair/status 与 register 无鉴权 | nonce 即凭证（16 字节随机，仅出现在二维码）；按 IP/每分钟限流 | CLI 配对前无会话，design §8.1 |
+| D15 | 消息信封带显式目标 | `u16be id_len ‖ device_id ‖ u16be enc_len ‖ enc ‖ wrapped(48B)` 记录式信封（按 device_id 升序），不复用审计 D12 的隐式排序——消息的接收方有两类（owner + 决策器），必须钉死对应关系。`wrapped` 是普通 HPKE 包裹（`enc ‖ ct`，32 字节消息密钥 → 48 字节密文），与 §3.7 其他包裹同构；2026-11-02 修正：原文写作 60B 并把 §1.5 的 AES 段格式误套到 HPKE 段，任何 HPKE 实现（circl、CryptoKit）都产不出该长度 | design v0.8 §14.3「信封里每个包裹带目标 device_id」 |
+| D16 | 审批 subject 的线格式 | 请求体沿用 `item_id` 字段并新增可选 `message_id`（互斥）；服务器落库为 `subject` 列（`item:<id>` / `message:<id>`）。不改名为 subject 是为了 v1.1 客户端字节兼容 | design v0.8 §14.5「`item_id` 扩展为 `subject`」 |
+| D17 | 决策器补投走独立端点 | 决策器配对/委托开启前的旧消息，由 owner 通过 `PUT /v1/messages/:id/wraps` 补包（服务器只追加记录）；补投之前决策器解不开旧消息，24h TTL 自愈 | design v0.8 §14.3 自愈缺口需要显式载体 |
+| D18 | 消息消费的 decision 载荷 | 包**消息明文 JSON 原始字节**（§3.9），不是消息密钥——消息密钥不出 owner/决策器域，CLI 无 `messages` 读权限 | design v0.8 §14.5 经三视角评审修正（评审 P0：密钥管道断裂） |
+| D19 | 谁批的进审计 | 审批行新增 `decision_device_id` 列（schema v6），decision 被接受时记下签署设备（owner `kind=ios` 或决策器 `kind=decider`）；§6.22 轮询响应与 CLI 审计事件明文各加一个**可选**同名键（`omitempty`，pending/未决行省略）。纯增量，v1.1 客户端忽略未知键 | design v0.8 §14.5「消费审计的明文含 decision 来源设备」、§14.8「审批单与审计里记录 decision 的 device_id」 |
 
 ## 13. 假设
 

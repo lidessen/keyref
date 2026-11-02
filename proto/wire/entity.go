@@ -14,6 +14,11 @@ const (
 	EntityDevice    = "device"
 	EntityDirectory = "directory"
 	EntityApproval  = "approval"
+	// EntityMessage is the approval-subject prefix for SMS verification
+	// codes (design v0.8 §14.5, protocol D16). Messages never appear in
+	// the changes log itself — this prefix only ever shows up inside an
+	// approvals.subject value.
+	EntityMessage = "message"
 )
 
 // EntityIDItem encodes "item:<item_id>".

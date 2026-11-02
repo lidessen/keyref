@@ -4,11 +4,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"github.com/lidessen/keyref/cli/internal/audit"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/config"
+	"github.com/lidessen/keyref/cli/internal/decider"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/exitcode"
@@ -82,6 +85,8 @@ func dispatch(cmd string, args []string) int {
 	switch cmd {
 	case "server":
 		return cmdServer(args)
+	case "decider":
+		return cmdDecider(args[1:])
 	case "pair":
 		return cmdPair(args)
 	case "session":
@@ -120,6 +125,7 @@ func usage(w *os.File) {
 commands:
   server [set <origin>]     show or set the sync-server origin
   pair [--name <label>]     pair with the iOS vault (QR code + fingerprint)
+                            --kind decider pairs an auto-approval delegate
   session                   establish or refresh the server session
   sync                      pull authorized ciphertext changes
   list [--format json]      refs, names, masks (no plaintext)
@@ -129,6 +135,8 @@ commands:
   exec [flags] -- <argv>    run a command with injected secrets
   local <init|set|delete>    manage an independent local vault
   mcp                       serve list/get/exec over stdio as MCP JSON-RPC
+  decider run               auto-approve SMS consumptions inside the owner's
+                            delegation policy (design v0.8 §14.8)
 
 exec flags:
   --env NAME=REF            inject the secret as an environment variable
@@ -144,6 +152,11 @@ exec flags:
                             must be sensitivity=approval and its allowCommands
                             must contain this argv0)
   --timeout SECONDS         approval wait timeout (default 120, max 120)
+
+  REF is an item ref. --env, --stdin and --fd also accept sms:<message_id>:
+                            inject a verification code's SMS body once, after
+                            Face ID approval. Always approved (no standard
+                            tier), never a {{keyref:...}} argv placeholder.
 `)
 }
 
@@ -229,14 +242,19 @@ func cmdPair(args []string) int {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	name := fs.String("name", defaultDeviceName(), "device label shown on iOS")
 	printPayload := fs.Bool("print-payload", false, "also print the raw QR payload (debug/e2e)")
+	kind := fs.String("kind", "cli", "device kind announced in the QR: cli | decider")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *kind != "cli" && *kind != "decider" {
+		return fatalf(2, "--kind must be cli or decider")
 	}
 	st := mustStore()
 	id := mustIdentity()
 	cl := client.New(config.Origin(mustPaths()), nil)
 	err := pair.Run(st, cl, id, pair.Options{
 		Name:         *name,
+		Kind:         *kind,
 		PrintPayload: *printPayload,
 		Stdout:       os.Stdout,
 	})
@@ -568,7 +586,7 @@ func runExecCore(opts execOptions) int {
 		}
 	}
 	injection := injectionModes(opts)
-	approvalUsed := false
+	appr := &approvalAudit{}
 	auditAttempt := func(code int, state string, refs []string) int {
 		if paired && len(auditRecips) > 0 {
 			o := &exec.Outcome{
@@ -629,9 +647,23 @@ func runExecCore(opts execOptions) int {
 	// decrypted yet: exec.Run resolves values lazily after its policy
 	// checks pass, so a rejected attempt never touches secret
 	// plaintext (design.md §7.3 checks-before-spawn, §12.2).
+	// sms:<message_id> refs carry no item meta: they are recorded as
+	// message refs and resolved through their own approval round
+	// (design v0.8 §14.5).
 	refs := map[string]*exec.ResolvedRef{}
 	itemIDs := map[string]string{}
+	messageIDs := map[string]string{}
 	for _, ref := range wanted {
+		if strings.HasPrefix(ref, exec.MessageRefPrefix) {
+			messageID, ok := exec.ParseMessageRef(ref)
+			if !ok {
+				return auditAttempt(fatalf(exitcode.PolicyRejection,
+					"malformed sms ref %q (want sms:<32 hex message id>)", ref), "sms-ref", []string{ref})
+			}
+			refs[ref] = &exec.ResolvedRef{Ref: ref, Message: true}
+			messageIDs[ref] = messageID
+			continue
+		}
 		itemID, m, err := metaByRef(st, id, vaultID, ownerPub, ref)
 		if err != nil {
 			if errors.Is(err, meta.ErrUnknownRef) || errors.Is(err, meta.ErrNoViewGrant) {
@@ -649,9 +681,13 @@ func runExecCore(opts execOptions) int {
 	// key) resolve through the per-exec approval flow of design §8.3.
 	deviceID, _, _ := st.GetKV(session.KVDeviceID)
 	resolveValue := func(ref string) (*secret.Plaintext, int, string) {
+		if rr, ok := refs[ref]; ok && rr.Message {
+			return resolveMessageViaApproval(vaultID, string(deviceID), id, cl, auditRecips,
+				opts, rr, messageIDs[ref], appr)
+		}
 		m := refs[ref].Meta
 		if m.Policy.Sensitivity == "approval" {
-			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, opts, refs[ref], itemIDs[ref], &approvalUsed)
+			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, opts, refs[ref], itemIDs[ref], appr)
 		}
 		return resolveValueFor(st, id, vaultID, ownerPub, ref, itemIDs[ref])
 	}
@@ -677,13 +713,24 @@ func runExecCore(opts execOptions) int {
 			if !paired || len(auditRecips) == 0 {
 				return
 			}
-			o.ApprovalResult = approvalResultOf(o.PolicyState, approvalUsed)
+			o.ApprovalResult = approvalResultOf(o.PolicyState, appr.used)
+			o.DecisionDeviceID = appr.decisionDeviceID
 			if envelope := buildAuditEnvelope(o, vaultID, string(reporterRaw), auditRecips); envelope != nil {
 				audit.UploadBestEffort(cl, envelope)
 			}
 		},
 	}
 	return exec.Run(req)
+}
+
+// approvalAudit collects the two approval facts one exec's audit event
+// needs (design §7.7, v0.8 §14.5): whether an approval round ran, and
+// which device signed the decision — the owner or the delegated decider
+// (protocol §6.22 decision_device_id). Both stay empty/true-independent
+// for runs that never reached the approval flow.
+type approvalAudit struct {
+	used             bool
+	decisionDeviceID string
 }
 
 // approvalResultOf maps the outcome into the audit event's approval
@@ -709,8 +756,8 @@ func approvalResultOf(policyState string, approvalUsed bool) string {
 // and value are destroyed by exec.Run after the single exec — neither
 // reaches the keyring or the cache (design.md §15).
 func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
-	auditRecips []audit.OwnerRecipient, opts execOptions, rr *exec.ResolvedRef, itemID string, approvalUsed *bool) (*secret.Plaintext, int, string) {
-	*approvalUsed = true
+	auditRecips []audit.OwnerRecipient, opts execOptions, rr *exec.ResolvedRef, itemID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
+	appr.used = true
 	it, ok, err := st.GetItem(itemID)
 	if err != nil || !ok {
 		fmt.Fprintln(opts.Stderr, "keyref: item missing from cache; run keyref sync")
@@ -738,7 +785,7 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 			Timeout:   opts.Timeout,
 			Client:    cl,
 			Stderr:    opts.Stderr,
-		})
+		}, &appr.decisionDeviceID)
 		if value == nil {
 			return nil, code, state
 		}
@@ -759,7 +806,7 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 		Timeout:   opts.Timeout,
 		Client:    cl,
 		Stderr:    opts.Stderr,
-	})
+	}, &appr.decisionDeviceID)
 	if key == nil {
 		return nil, code, state
 	}
@@ -770,6 +817,59 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 		return nil, exitcode.UnwrapFailed, "unwrap-failed"
 	}
 	return value, 0, ""
+}
+
+// resolveMessageViaApproval runs the §14.5 consumption round for one
+// sms:<message_id> ref. The decision delivers the message PLAINTEXT JSON
+// (the message key never leaves the owner/decider domain), so the only
+// thing this function keeps is its `body`: the code the agent needs, and
+// the only value that enters the injection and redaction set. The JSON
+// buffer is destroyed immediately; nothing reaches the keyring or the
+// cache (design §16).
+func resolveMessageViaApproval(vaultID, deviceID string, id *device.Identity, cl *client.Client,
+	auditRecips []audit.OwnerRecipient, opts execOptions, rr *exec.ResolvedRef,
+	messageID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
+	appr.used = true
+	value, code, state := approval.RequestMessage(&approval.Options{
+		VaultID:   vaultID,
+		DeviceID:  deviceID,
+		Identity:  id,
+		Owners:    auditRecips,
+		MessageID: messageID,
+		Ref:       rr.Ref,
+		Argv:      opts.Argv,
+		Refs:      refsOf(opts),
+		Injection: injectionModes(opts),
+		Timeout:   opts.Timeout,
+		Client:    cl,
+		Stderr:    opts.Stderr,
+	}, &appr.decisionDeviceID)
+	if value == nil {
+		return nil, code, state
+	}
+	defer value.Destroy()
+	body, err := messageBody(value.Bytes())
+	if err != nil {
+		fmt.Fprintln(opts.Stderr, "keyref: message payload is malformed")
+		return nil, exitcode.UnwrapFailed, "sms-payload"
+	}
+	return body, 0, ""
+}
+
+// messageBody pulls the `body` field out of the §3.9 message plaintext
+// JSON ({"v","sender","body","sim","received_at"}).
+func messageBody(raw []byte) (*secret.Plaintext, error) {
+	var m struct {
+		V    int    `json:"v"`
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	if m.V != 1 || m.Body == "" {
+		return nil, errors.New("message payload has no usable body")
+	}
+	return secret.NewPlaintextFromBytes([]byte(m.Body))
 }
 
 // refsOf lists every ref of an exec for the approval request transcript.
@@ -941,16 +1041,17 @@ func buildAuditEnvelope(o *exec.Outcome, vaultID, reporterDeviceID string, recip
 		return nil
 	}
 	evt := audit.Event{
-		Time:           time.Now().UnixMilli(),
-		DeviceID:       reporterDeviceID,
-		Refs:           o.Refs,
-		Injection:      o.Injection,
-		Argv:           o.Argv,
-		AllowArgv:      o.AllowArgv,
-		PolicyResult:   o.PolicyState,
-		ApprovalResult: o.ApprovalResult,
-		ChildExit:      o.ChildExit,
-		Redactions:     o.Redactions,
+		Time:             time.Now().UnixMilli(),
+		DeviceID:         reporterDeviceID,
+		Refs:             o.Refs,
+		Injection:        o.Injection,
+		Argv:             o.Argv,
+		AllowArgv:        o.AllowArgv,
+		PolicyResult:     o.PolicyState,
+		ApprovalResult:   o.ApprovalResult,
+		DecisionDeviceID: o.DecisionDeviceID,
+		ChildExit:        o.ChildExit,
+		Redactions:       o.Redactions,
 	}
 	evtJSON, err := json.Marshal(evt)
 	if err != nil {
@@ -978,4 +1079,83 @@ func (m *multiFlag) String() string { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error {
 	*m = append(*m, v)
 	return nil
+}
+
+// ---- decider (design v0.8 §14.8) ----
+
+// cmdDecider runs the auto-approval delegate. It deliberately refuses to
+// start without a review API: the design makes the review mandatory and
+// forbids a "nothing could check, so approve" branch.
+func cmdDecider(args []string) int {
+	if len(args) == 0 || args[0] != "run" {
+		fmt.Fprintln(os.Stderr, "usage: keyref decider run --review-api <url> [--once] [--interval 3s]")
+		return 2
+	}
+	fs := flag.NewFlagSet("decider run", flag.ContinueOnError)
+	reviewAPI := fs.String("review-api", "", "decision API URL (mandatory)")
+	once := fs.Bool("once", false, "run one poll cycle and exit")
+	interval := fs.Duration("interval", 3*time.Second, "poll interval (>= 2s, the server's polling floor)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if *reviewAPI == "" {
+		fmt.Fprintln(os.Stderr, "keyref: --review-api is required: the review gate cannot be disabled (design §14.8)")
+		return 2
+	}
+	if *interval < 2*time.Second {
+		*interval = 2 * time.Second
+	}
+
+	st := mustStore()
+	id := mustIdentity()
+	vaultRaw, ok, _ := st.GetKV(session.KVVaultID)
+	if !ok || len(vaultRaw) == 0 {
+		return fatalf(1, "not paired; run keyref pair --kind decider first")
+	}
+	ownerPub, err := syncing.OwnerSignPub(st)
+	if err != nil {
+		return fatalf(1, "owner signing key unavailable: %v", err)
+	}
+	cl := newClient(st, id)
+	mgr := session.New(st, cl, id)
+	deviceID, err := mgr.DeviceID()
+	if err != nil {
+		return fatalf(1, "not paired; run keyref pair --kind decider first")
+	}
+
+	d, err := decider.New(decider.Config{
+		VaultID:            string(vaultRaw),
+		DeviceID:           deviceID,
+		Identity:           id,
+		Client:             cl,
+		OwnerSignPublicKey: ownerPub,
+		Reviewer:           &decider.HTTPReviewer{URL: *reviewAPI},
+		Logger:             log.New(os.Stderr, "", log.LstdFlags),
+	})
+	if err != nil {
+		return fatalf(1, "%v", err)
+	}
+
+	runOnce := func() {
+		n, err := d.RunOnce(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "keyref: decider: %v\n", err)
+			return
+		}
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "keyref: decider: auto-approved %d\n", n)
+		}
+	}
+	if *once {
+		runOnce()
+		return 0
+	}
+
+	fmt.Fprintf(os.Stderr, "keyref: decider running (review API %s, interval %s)\n", *reviewAPI, *interval)
+	ticker := time.NewTicker(*interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		runOnce()
+	}
+	return 0
 }

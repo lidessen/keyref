@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/lidessen/keyref/proto/wire"
@@ -65,6 +66,19 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field") // never strand the vault without an owner
 		return
 	}
+	// Receiver roles (design v0.8 §14.4): at most one primary receiver
+	// per vault. Role values for non-ios devices are rejected by the
+	// transcript validator itself.
+	primaries := 0
+	for _, d := range parsed.Devices {
+		if d.ReceiverRole == wire.ReceiverRolePrimary {
+			primaries++
+		}
+	}
+	if primaries > 1 {
+		writeError(w, "invalid_receiver_role")
+		return
+	}
 
 	// Plan device ceilings apply to directory updates too (design §10.5,
 	// §11 item 6): a directory may not raise the active device count
@@ -75,6 +89,7 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 			limits := s.quota.LimitsFor(plan)
 			ios, cli, err := s.st.CountActiveDevicesAfterDirectory(r.Context(), ac.vault.ID, parsed.Devices)
 			if err != nil {
+				log.Printf("api: directory device count: %v", err)
 				writeError(w, "internal")
 				return
 			}
@@ -93,6 +108,7 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "revision_conflict") // lost a concurrent update race
 			return
 		}
+		log.Printf("api: directory update: %v", err)
 		writeError(w, "internal")
 		return
 	}

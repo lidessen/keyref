@@ -20,6 +20,7 @@ Agent 写下的是稳定引用 `openai-prod`，不是密钥本身。`keyref` 在
 | [server/](server/) | 密文同步服务，Go + SQLite，官方托管和自托管同一二进制 |
 | [cli/](cli/) | Agent 用的 `keyref` CLI，Go（v0.4 起与服务器同语言） |
 | [ios/](ios/) | iOS 管理端，Swift / SwiftUI，已实现 |
+| [android/](android/) | 短信验证码采集端（design v0.8 §14 的 `source` 设备），Kotlin，未编译验证 |
 | [scripts/](scripts/) | 本地开发脚本：安装 CLI、起开发服务器、docker compose |
 
 三端均已实现。server / cli / proto / tools 的 `go vet` + `go test` 与 CLI 端到端测试（对着真实拉起的服务器走通建库、配对、同步、exec）在 CI 门禁里（[.github/workflows/ci.yml](.github/workflows/ci.yml)）；iOS 的 KeyrefCore / KeyrefUI 测试在模拟器与 macOS 上本地运行（见 [ios/README.md](ios/README.md)），CI 暂无 iOS job。

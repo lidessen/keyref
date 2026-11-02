@@ -1,8 +1,10 @@
 # keyref 设计文档
 
-状态：草案 v0.7。本文是规格，不是实现记录。仓库里的 `ios/`、`cli/`、`server/` 已有 Phase 1/2 的非 iOS 实现与 iOS app。
+状态：草案 v0.8。本文是规格，不是实现记录。仓库里的 `ios/`、`cli/`、`server/` 已有 Phase 1/2 的非 iOS 实现与 iOS app。
 
 日期：2026-10-25。
+
+v0.8：新增 §14「短信验证码采集」——多台 Android 以 `source` 设备上传端到端加密的验证码消息，owner 在 iOS 收件箱查看，agent 经审批一次性消费 `sms:<message_id>`；消息 24 小时过期即焚，通知复用 §8.3 的 APNs 管道。可选地，owner 可把消息消费的 decision 签署权委托给 `decider` 设备（例如本地部署的 JEV 决策服务），委托策略由 owner 签名、只能缩小不能扩大（§14.8）。原「开放问题」「实现时保持不变的约束」顺延为 §15、§16。
 
 v0.7：新增存储类别（§6.6：同步 / 仅本机，创建时二选一，仅本机条目的 secret 密文不上服务器、每次审批投递密文本身）；仅本机条目的 iCloud 整文件加密副本（§6.7，恢复码 + iCloud = 全部找回）；可选的定期密钥轮换仪式（§8.4，原子完成、无失效窗口）。
 
@@ -36,7 +38,8 @@ v0.2：自托管是一等部署，和官方托管共用一份服务器。费用�
 | 技术栈 | iOS：Swift / SwiftUI，最低 iOS 26，界面用 Liquid Glass。CLI 与服务器：Go |
 | 身份 | MVP 没有邮箱账号。保险库由第一台 iPhone 创建，恢复靠高熵恢复码（内含 `vault_id`，兼作恢复签名权威，见 §8.5） |
 | 费用 | 托管按一台小机器的固定月租规划。免费档有硬配额（存储口径含审计与待审批字节，超额只读加删除、不自动删数据）。Plus 的推荐标价是 $6/月或 $48/年，按苹果抽成 30% 的压力情形仍然高于边际成本。自托管免费、不校验收据 |
-| 待确认 | 默认要不要每次审批、MVP 要不要沙箱、Windows、团队共享、标价与付款渠道。MCP 已定（Phase 2，§7.8）；官方域名已给推荐并标记为 Phase 1 发布前必须敲定（§14.12） |
+| 短信验证码 | 多台 Android 以 `source` 设备上传端到端加密消息（只上传、永不读取）；人看 iOS 收件箱，agent 经审批一次性消费 `sms:<message_id>`；消息 24 小时过期即焚；审批默认由人签署，可委托 `decider` 设备按 owner 签名的策略自动签署（§14） |
+| 待确认 | 默认要不要每次审批、MVP 要不要沙箱、Windows、团队共享、标价与付款渠道。MCP 已定（Phase 2，§7.8）；官方域名已给推荐并标记为 Phase 1 发布前必须敲定（§15.12） |
 
 ## 1. 背景
 
@@ -88,6 +91,8 @@ keyref 把两件事分开：
 | Agent | 写命令的模型，以及调用工具的 harness | `ref`、掩码、已脱敏的命令输出 |
 | CLI 设备 | 装在 agent 机器上的 `keyref` 进程 | 自己的 X25519 / Ed25519 私钥；被授权条目的密钥 |
 | 同步服务 | 官方托管或用户自己运行的 `keyref-server` | 密文、设备公钥、授权关系、会话令牌哈希、配额计数 |
+| 采集设备（§14） | 装了采集 App 的 Android 手机 | 自己的 Ed25519/X25519 私钥；只上传，什么都不读 |
+| 决策器（§14.8，可选） | owner 委托的自动审批服务，例如本地部署的 decision API | 消息密钥（TTL 内）；owner 签名的委托策略 |
 | 子进程 | `exec` 真正启动的程序，例如 `curl` | 这一次被注入的秘密 |
 
 Owner 设备是 `kind = ios`。Agent 设备是 `kind = cli`。只有 owner 设备会拿到 VMK 的包裹。
@@ -105,6 +110,7 @@ Owner 设备是 `kind = ios`。Agent 设备是 `kind = cli`。只有 owner 设�
 | A5 | 偷到上锁 iPhone 的人 | 没有 Face ID / 密码就解不开 Secure Enclave 里的包裹 |
 | A6 | 偷到服务器备份、但没有手机也没有恢复码的人 | 与 A2 相同 |
 | A7 | 把用户骗去扫别人的配对二维码 | 配对码要在手机和终端两边对得上；授予范围默认是空的，要人逐条勾选 |
+| A8 | 被攻破的短信采集设备（§14），或偷到它签名私钥的人 | 只能向收件箱上传垃圾或伪造消息（待处理上限按设备计、上传另有独立每日上限），读不到任何条目密文，也影响不了 items 与授权；伪造内容要到达 agent 必须经审批——人工，或命中 owner 签署委托策略并通过 decision API 复核的自动决策（§14.8） |
 
 ### 4.2 明确不承诺挡住的情况
 
@@ -120,6 +126,8 @@ Owner 设备是 `kind = ios`。Agent 设备是 `kind = cli`。只有 owner 设�
 | B6 | 已经解开过条目密钥的 CLI 副本，在撤销之后继续使用本地缓存，并且二进制被改掉、不再遵守过期时间 | 撤销要配合轮换条目密钥。只删服务器上的授权，挡不住已经拷走的密钥 |
 | B7 | 操作系统或 Secure Enclave 自身被攻破 | 超出应用层设计 |
 | B8 | 秘密很短，或被拆成几段分别打印，脱敏无法靠整串匹配发现 | 靠拒绝 shell 和解释器来缩小这个口子，不靠脱敏器万能 |
+| B9 | 被攻破的采集设备把伪造的「验证码」灌进收件箱，误导人或模型 | 锁屏通知不带内容；列表与审批界面显示来源设备 label 与 sender（sender 本身可伪装，只作参考不作凭据）；消费必经审批（人工，或命中 owner 签署策略的决策器，§14.8）。人批准了一条伪造验证码，归入 B3 的同类残余 |
+| B10 | 决策器（§14.8）被攻破，或其外部决策 API 被操纵 | 它本来就持有 TTL 内的消息明文，损失止于此：拿不到 VMK 与条目密钥，碰不了 items 与授权；委托策略 owner 签名、只能缩小。伪造内容被自动放行的前提是命中该策略并通过 decision API 复核；正文进入决策 API 时按不可信数据段隔离（§14.8） |
 
 ### 4.3 集成要求
 
@@ -252,6 +260,8 @@ Secret（由 item key 加密）：
 
 无人值守的 agent 用 `standard`。生产密钥、邮箱密码、云账号根密钥建议用 `approval`。默认值见开放问题；设计里的推荐默认是 `standard` 加上 `deny-shells`，避免产品第一天就无法无人使用。
 
+短信采集设备（§14）是这条立场更进一步的形态：它连审批都不参与——只上传，永不读取。
+
 `approval` 档位有第二个用途：**弱端点**。移动端、共享设备、或任何无法像工作机一样安全持有长期密钥的平台，配对成 cli 设备时把长期授予保持空集、要用的条目全部设为 `approval`——设备每次使用都向手机要 60 秒一次性包裹（§8.3），它本身在任何时刻都不持有可用的长期密钥。设备丢了，攻击者得到的是「每次用都要手机点头」的通道，而不是一把钥匙。这是协议内建的能力，不需要为弱端点新造机制。
 
 ### 6.2 标识
@@ -273,6 +283,8 @@ CREATE TABLE vaults (
   recovery_sign_pub   BLOB NOT NULL, -- 恢复码派生的 Ed25519 公钥，只用于验证接管誊本（§8.5）
   directory_revision  INTEGER NOT NULL,
   directory_signed    BLOB NOT NULL,
+  delegation_signed   BLOB, -- owner 签名的自动审批委托策略（§14.8）；NULL = 未委托
+  delegation_revision INTEGER NOT NULL DEFAULT 0,
   plan                TEXT NOT NULL DEFAULT 'unlimited', -- free | plus | unlimited
   plan_expires_at     INTEGER,
   frozen_at           INTEGER -- 托管部署的闲置冻结时间；自托管恒为 NULL
@@ -281,7 +293,7 @@ CREATE TABLE vaults (
 CREATE TABLE devices (
   device_id       TEXT PRIMARY KEY,
   vault_id        TEXT NOT NULL,
-  kind            TEXT NOT NULL, -- ios | cli
+  kind            TEXT NOT NULL, -- ios | cli | source | decider
   status          TEXT NOT NULL, -- pending | active | revoked
   hpke_kem        TEXT NOT NULL, -- P-256 | X25519
   hpke_public_key BLOB NOT NULL,
@@ -324,13 +336,27 @@ CREATE TABLE approvals (
   approval_id          TEXT PRIMARY KEY,
   vault_id             TEXT NOT NULL,
   cli_device_id        TEXT NOT NULL,
-  item_id              TEXT NOT NULL,
+  subject              TEXT NOT NULL, -- item:<item_id> / message:<message_id>（§14.5）
+  cli_ephemeral_public_key BLOB NOT NULL, -- 请求的临时公钥，公开材料，随审批明文下发（§14.8）
   request_ciphertext   BLOB NOT NULL,
   request_signature    BLOB NOT NULL, -- CLI Ed25519，覆盖请求誊本（§8.3）
   status               TEXT NOT NULL, -- pending | approved | denied | expired | consumed
   one_time_wrap        BLOB,
   expires_at           INTEGER NOT NULL,
   created_at           INTEGER NOT NULL
+);
+
+CREATE TABLE messages (
+  vault_id          TEXT NOT NULL,
+  message_id        TEXT NOT NULL,
+  source_device_id  TEXT NOT NULL,
+  status            TEXT NOT NULL, -- active | consumed
+  envelope          BLOB NOT NULL, -- 消息密文 + 逐 active owner 的 HPKE 密钥包裹（§14.3）
+  request_signature BLOB NOT NULL, -- source 设备 Ed25519，覆盖上传誊本（§14.3）
+  received_at       INTEGER NOT NULL, -- 短信到达采集设备的时间（设备自报）
+  created_at        INTEGER NOT NULL,
+  expires_at        INTEGER NOT NULL, -- 服务器按固定 TTL 写入，客户端声明无效
+  PRIMARY KEY (vault_id, message_id)
 );
 
 CREATE TABLE audit_events (
@@ -397,7 +423,8 @@ CREATE TABLE pair_sessions (
 - `vault_id`、`device_id`、`item_id`、`revision`、tombstone 标记
 - 设备种类、状态、公钥、算法标识
 - 哪台设备被授予了哪个 `item_id`（授权图）
-- 审批单的状态和过期时间，以及 CLI 对请求的签名（签名只用于验证来源，不泄露请求内容）
+- 审批单的状态和过期时间，以及 CLI 对请求的签名（签名只用于验证来源，不泄露请求内容）；`subject` 前缀说明它指向条目还是消息（§14.5）
+- 短信消息的路由元数据：`message_id`、来源设备、`status`、服务器收包与过期时间；正文在密文里（§14.3）
 - 密文长度、服务器收到的时间
 - 设备的 `label`（来自配对时 CLI 自报的名字，最多 32 字节，owner 可以改）。它是明文，方便在另一台设备的列表里显示「哪一台」。想隐藏机器名字时再把它挪进加密目录，MVP 不这么做
 - 托管部署上的 `plan`、到期时间、闲置冻结时间和每日请求计数。这是配额，不是秘密。自托管不使用这些字段做访问控制
@@ -614,7 +641,7 @@ argv0 的检查不能只看字面：`execve` 遇到以 `#!` 开头的可执行�
 | --- | --- |
 | 子进程自身的码 | 策略已通过并且脱敏完成 |
 | 10 | 策略拒绝（命令或解释器、`--allow-argv`、`--reply`、`--env`/`--pass` 非法变量名），子进程没有启动 |
-| 11 | 未知 `ref`，或此设备没有 view 授权 |
+| 11 | 未知 `ref`，或此设备没有 view 授权；`sms:` 引用未知、已过期或已消费（§14.5） |
 | 12 | 本地会话锁着，密钥环里没有可用的设备私钥 |
 | 13 | 审批被拒绝或超时 |
 | 14 | 脱敏失败，原始输出已丢弃 |
@@ -760,7 +787,7 @@ HPKE 的 `info` 做域分离，UTF-8 字符串，字段用 ASCII unit separator�
 keyref v1 <US> <purpose> <US> <vault_id> <US> <recipient_device_id>
 ```
 
-`purpose` 取 `vmk`、`meta-key`、`item-key`、`one-time-item-key`、`audit-event-key`、`approval-request`。`one-time-item-key` 的 info 在这串后面再接 `approval_id` 与请求誊本的 SHA-256（§8.3）。
+`purpose` 取 `vmk`、`meta-key`、`item-key`、`one-time-item-key`、`audit-event-key`、`approval-request`、`source-message`、`one-time-message-key`。`one-time-item-key` 的 info 在这串后面再接 `approval_id` 与请求誊本的 SHA-256（§8.3）。
 
 条目密文的 AAD 用同一套分隔，避免拼接歧义。AAD **不含 `revision`**：轮换要求「换包裹、不重加密」（§8.4）时密文原样保留，防回滚由签名誊本里的 `revision` 和服务器端的严格递增校验承担，不靠 AAD：
 
@@ -818,6 +845,8 @@ flowchart TB
 ```
 
 VMK 不到 CLI，也不到服务器。CLI 被妥协时，损失限于已经授予它的 `use` 条目，不是整个保险库。
+
+短信消息密钥（§14.3）是这条层次的同构延伸：消息密钥只包给 active 的 owner 与有效委托期内的决策器（§14.8），不进 CLI 的长期持有，也不进服务器；CLI 消费拿到的是 decision 直接投递的明文（§14.5），用完即清。
 
 Secure Enclave 只能生成和使用 NIST P-256，不能生成 X25519，也不能把已有的私钥导入隔区。所以 owner 的包裹和签名走 P-256。CLI 没有隔区，用软件里的 X25519 和 Ed25519，私钥放在操作系统密钥环。
 
@@ -985,12 +1014,12 @@ docker run -d --name keyref \
 #### 怎样保证不亏
 
 1. 托管的账单是这台机器的月租，加上域名、备份和苹果年费。不使用会按请求自动加价的平台来跑官方服务。
-2. 免费档有硬配额。所有免费保险库还共享一个全局预算：合计存储 2 GB，合计每天 100 万次请求。存储口径包含条目密文、审计密文与待审批密文（§7.7、§8.3）。触顶之后拒绝新的免费保险库，并拒绝已有免费保险库**增长用量的写入**。付费用户不受影响。没有「免费用户把机器写满就自动买第二台」这回事。100 万次/天大约是每秒 12 次，留在这台机器的舒适区间里。
+2. 免费档有硬配额。所有免费保险库还共享一个全局预算：合计存储 2 GB，合计每天 100 万次请求。存储口径包含条目密文、审计密文、待审批密文与短信消息密文（§7.7、§8.3、§14）。触顶之后拒绝新的免费保险库，并拒绝已有免费保险库**增长用量的写入**。付费用户不受影响。没有「免费用户把机器写满就自动买第二台」这回事。100 万次/天大约是每秒 12 次，留在这台机器的舒适区间里。
 3. 超额的处理是拒绝（`429`，错误码 `quota_exceeded` 或 `rate_limited`），不是按量加钱。用户不会收到意外账单，我们也不会。
 4. 标价下限：月付标价 × (1 − 0.30) 不低于 $4。30% 是未加入 Small Business Program 时美国店的标准抽成，拿来做压力测试。预期抽成是 15%：Small Business Program 覆盖上年收益不超过 100 万美元的开发者，新账号也可以加入。2026 年部分店面更低（中国大陆自 2026-03-15 起标准 25%、小企业 12%；欧盟自 2026-10-01 起店内购标准 26%、小企业 15%）。按 30% 规划，这些店面不会更差。
 5. 升级机器是人的决定，不是自动策略。只有过去 30 天的付费净收入大于新配置月租的两倍时，才换更大的固定规格。在那之前，用免费档熔断来保付费用户。
 6. 内购上线之前，托管只有免费档。不提供无限档，也不为了内测把配额关掉。没有收入的日子，成本停在已经付费的那台机器上。
-7. 超额（全局预算触顶、免费档超个人配额、Plus 过期回落）时的允许操作集合固定：**读**（`sync`、`account`）、**删除**（条目 tombstone、grants、设备目录、整个保险库）和审批决定永远可用；其余写入按 `quota_exceeded` 拒绝。这样「删条目降回限额内」和「撤销被入侵的 CLI」（§8.4，全部由删除和重签组成）在超额状态下仍然走得通。Plus 过期回落 free 后，超出免费档限额的保险库进入同一状态：只读加删除，iOS 显示原因，删到限额以下即恢复。
+7. 超额（全局预算触顶、免费档超个人配额、Plus 过期回落）时的允许操作集合固定：**读**（`sync`、`account`、`messages`）、**删除**（条目 tombstone、grants、设备目录、整个保险库）和审批决定永远可用；其余写入按 `quota_exceeded` 拒绝。这样「删条目降回限额内」和「撤销被入侵的 CLI」（§8.4，全部由删除和重签组成）在超额状态下仍然走得通。Plus 过期回落 free 后，超出免费档限额的保险库进入同一状态：只读加删除，iOS 显示原因，删到限额以下即恢复。
 8. 闲置只冻结、不删除：免费档连续 180 天没有任何已登录设备成功访问，保险库转为 `frozen`（只读，含下载与删除，`frozen_at` 记在表上），任何一次成功登录即解冻。服务器永远不自动删除用户数据——删除只有主人显式一个入口（`DELETE /v1/vaults`，§11）。frozen 库仍占存储，这是「绝不悄悄删密文」的代价，记在这里。
 9. 注册门槛：按 IP（IPv4 每 /32、IPv6 每 /64）限制之外，创建保险库要求客户端完成一个小工作量证明（约 2^21 次 SHA-256，服务器验证成本可忽略），托管默认开启、自托管默认关闭。它挡不住有 GPU 的对手，但把「脚本一天开两千个库占满免费预算」变成要花钱的事。设备签名密钥加这两道，就是没有邮箱时的全部准入。
 
@@ -1009,6 +1038,9 @@ docker run -d --name keyref \
 | 条目 | 20 | 500 |
 | 存储 | 1 MB | 50 MB |
 | 审计 | 7 天，最多 100 条 | 30 天，最多 5,000 条 |
+| 短信消息 | 待处理 20 条 | 待处理 200 条 |
+| 采集设备（§14） | 1 台 | 3 台 |
+| 决策器（§14.8） | 1 台 | 3 台 |
 | 请求 | 每天 500 次，每分钟 30 次 | 每天 5,000 次，每分钟 60 次 |
 | 审批轮询 | 间隔至少 2 秒；不计入每日次数（§8.3） | 同样 |
 
@@ -1037,7 +1069,7 @@ docker run -d --name keyref \
 
 ## 11. 服务端 API
 
-基址由客户端配置。官方托管预填 `https://sync.example/v1`，自托管则是用户自己的 origin。全部请求走 HTTPS（开发构建访问本机除外）。正文是 JSON，二进制字段用标准 Base64。请求正文上限：单条 item 256 KiB（远大于 64 KiB 的秘密上限加上密文开销）、审计 4 KiB（§7.7）、审批 8 KiB（§8.3）。
+基址由客户端配置。官方托管预填 `https://sync.example/v1`，自托管则是用户自己的 origin。全部请求走 HTTPS（开发构建访问本机除外）。正文是 JSON，二进制字段用标准 Base64。请求正文上限：单条 item 256 KiB（远大于 64 KiB 的秘密上限加上密文开销）、审计 4 KiB（§7.7）、审批 8 KiB（§8.3）、消息 16 KiB（§14，4 KiB 明文加逐 owner 包裹之后）。
 
 除了配对登记、创建保险库和拉取恢复材料（按 IP 与按 vault 限流，§8.5），请求都带 `Authorization: Bearer <token>`。
 
@@ -1061,10 +1093,15 @@ docker run -d --name keyref \
 | `PUT /v1/grants` | iOS owner | 写入或更新包裹 |
 | `DELETE /v1/grants` | iOS owner | 删除授予 |
 | `PUT /v1/directory` | iOS owner | 更新签名过的设备目录 |
+| `PUT /v1/delegation` | iOS owner | 更新自动审批委托策略（owner 签名，§14.8） |
+| `GET /v1/delegation` | 已登录设备 | 取当前委托策略；未委托返回空 |
 | `POST /v1/approvals` | CLI | 提交加密的审批请求 |
-| `GET /v1/approvals?status=pending` | iOS owner | 拉取待审批 |
-| `POST /v1/approvals/:id/decision` | iOS owner | 同意（附一次性包裹）或拒绝 |
+| `GET /v1/approvals?status=pending` | iOS owner；决策器仅见 message subject（§14.8） | 拉取待审批 |
+| `POST /v1/approvals/:id/decision` | iOS owner 或决策器（§14.8） | 同意（附一次性包裹）或拒绝 |
 | `GET /v1/approvals/:id` | 发起的那台 CLI | 轮询；取走后服务器清掉包裹 |
+| `POST /v1/messages` | source 设备 | 上传一条加密验证码（§14） |
+| `GET /v1/messages?since=` | iOS owner 或决策器（§14.8） | 拉取未过期、未消费的消息；不进 changes 日志（§14.4） |
+| `DELETE /v1/messages/:message_id` | iOS owner | 删除单条消息（§14.4） |
 | `POST /v1/audit` | 已登录设备 | 追加一条加密审计 |
 | `GET /v1/audit?cursor=` | iOS owner | 拉取审计密文 |
 | `GET /v1/account` | iOS owner | 返回 `plan`、到期时间、已用配额。自托管在不强制配额时返回 `unlimited` |
@@ -1075,11 +1112,14 @@ docker run -d --name keyref \
 
 - 设备属于这个 vault。写操作和目录/审批之外的读要求 `status = active`；revoked 设备只放行 §10.6 列出的目录与删除类读取
 - `kind = cli` 的令牌调用 `PUT /v1/items`、`DELETE /v1/items`、`PUT /v1/directory`、`PUT /v1/vault/recovery`、`DELETE /v1/vaults` 时返回 `403`
+- `kind = source` 的令牌只能调用 `POST /v1/messages`、会话续期和 `GET /v1/sync`（仅设备目录）；其余一律 `403`。消息的 `expires_at` 由服务器按固定 TTL 写入，待处理条数不超过档位（§14）
+- `kind = decider` 的令牌只能调用 `GET /v1/messages`、`GET /v1/delegation`、`GET /v1/approvals?status=pending`（仅 message subject）和 `POST /v1/approvals/:id/decision`（服务器强制校验 subject 为 `message:` 前缀）；其余一律 `403`（§14.8）
+- 同一条消息同时最多一个未终结的审批；decision 落库与该消息 `consumed` 置位在同一事务（§14.3、§14.5）
 - 签名字段存在，且在该设备当前公钥下验证通过；审批请求额外要求 CLI 签名覆盖请求誊本（§8.3）；恢复接管要求 recovery_sign_pub 验证（§8.5）
 - item 与 grant 的 revision 严格递增，签名各自覆盖 §9.1 的誊本
-- body 大小：item ≤ 256 KiB、审计 ≤ 4 KiB、审批 ≤ 8 KiB；`ref` 不在服务器上出现（服务器也不去解密检查）
+- body 大小：item ≤ 256 KiB、审计 ≤ 4 KiB、审批 ≤ 8 KiB、消息 ≤ 16 KiB；`ref` 不在服务器上出现（服务器也不去解密检查）
 - 请求速率和每日次数不超过该保险库的档位（第 10.5 节）。审批轮询不得快于每 2 秒，但不计入每日次数（§8.3）
-- 官方托管上，条目数、active 设备数、存储字节（含审计与待审批）和审计条数不超过档位。超出时按 §10.5 第 7 条的允许操作集合放行或拒绝，错误码 `quota_exceeded`，不自动升级、不按量计费
+- 官方托管上，条目数、active 设备数、存储字节（含审计、待审批与短信消息）和审计条数不超过档位。超出时按 §10.5 第 7 条的允许操作集合放行或拒绝，错误码 `quota_exceeded`，不自动升级、不按量计费
 - 创建保险库要求工作量证明，且按 IP（IPv4 /32、IPv6 /64）限额；配对登记另有每分钟上限
 
 服务器不做的事情：解密、根据名称去重、给 CLI 一份「所有条目的列表」。去重 `ref` 是 owner 在本地加密前做的。两台 owner 离线时可能造出相同 `ref`，同步之后由 iOS 显示冲突。
@@ -1120,10 +1160,13 @@ Swift 与 SwiftUI，最低 iOS 26。系统栏、Tab 栏与工具栏由系统给�
 3. 详情里可以编辑名称、描述、`ref`（仅创建时）、值、策略（`allowArgv`、`commandPolicy`、`allowCommands`、`allowedHosts` 的基础编辑都在 MVP；Phase 2 再做命令搜索、覆盖默认拒绝时的风险提示这类精细界面）。查看明文需要再验证一次 Face ID。保存时校验名称和描述里没有粘贴秘密值或它的常见编码（与 §7.4 同一套匹配器）——meta 会直达 agent 的上下文，这道检查挡的是人自己的手滑。
 4. 扫 CLI 的二维码，核对指纹，勾选条目，确认。
 5. 设备列表里撤销（默认动作含轮换，见 §8.4），并管理每台设备的条目授权——追加或收回，对应 `PUT` / `DELETE /v1/grants`。
-6. 审批单上能看清命令（含 `--allow-argv` / `--reply` 模式）、条目名称和发起设备。
+6. 审批单上能看清命令（含 `--allow-argv` / `--reply` 模式）、条目名称和发起设备。验证码消费请求（§14）额外显示短信全文、来源设备、sender 和剩余有效期。
 7. 审计列表由本机解密。
 8. 恢复入口：输入恢复码，走 §8.5 的接管或本机重建。
 9. 设置里可以删除整个保险库（两步确认，服务器级联清空）。
+10. 验证码收件箱（§14）：按来源设备分组，显示 sender、到达时间与剩余有效期，支持单条删除和清空；新消息依赖 APNs 通知，未配置时打开应用即拉取。
+11. 设置里可以配对采集设备（§14）：展示二维码供 Android 采集端扫描，确认页面写明「这台设备只能上传短信，读不到任何内容」。
+12. 决策器管理（§14.8）：配对决策器（Face ID + 明示「这台设备将看到全部短信明文」）、签署与编辑委托策略（sender 白名单、年龄与频次上限、允许的 CLI）、一键撤回委托；审批与审计里能看到每条自动决策的来源与命中条目。
 
 分析 SDK、崩溃上报默认不加。若以后要加，上传前必须去掉用户内容和密钥材料，这是另一项设计，不在 MVP 里顺手开启。
 
@@ -1149,7 +1192,7 @@ wifi-home    Home Wi-Fi          password ***
 
 `keyref get openai-prod` 打印同一组字段。未知 `ref` 退出 `11`，输出里看不出这个保险库里还有哪些别的 `ref`（避免把「猜 ref」变成枚举；不过 `list` 本身会列出已授予的全部 `ref`，所以这只影响没有 view 授权的条目）。
 
-命令一览：`pair`、`status`、`lock`、`unlock`、`sync`、`list`、`get`、`exec`、`server`。没有创建、删除、轮换，也没有 reveal。`status` 额外报告每条 `use` 授予的剩余有效期，7 天内到期的在 stderr 警告（§8.4）。
+命令一览：`pair`、`status`、`lock`、`unlock`、`sync`、`list`、`get`、`exec`、`sms`、`server`。没有创建、删除、轮换，也没有 reveal。`keyref sms list` 打印消息的掩码视图（`message_id`、来源设备、sender、时间、状态），不含正文；消费只能通过 `exec` 里的 `sms:<message_id>` 引用（§14.5）。`status` 额外报告每条 `use` 授予的剩余有效期，7 天内到期的在 stderr 警告（§8.4）。
 
 `keyref server` 打印当前 origin。`keyref server set https://keys.example.com` 修改它，配置写在 `0700` 目录里。环境变量 `KEYREF_SERVER` 可以覆盖配置，方便 agent 的安装脚本指向自托管。未设置时使用编译进去的官方托管地址。`pair` 打出来的二维码必须带上当时的 origin。
 
@@ -1196,6 +1239,7 @@ Go。一个模块，入口是 `keyref-server`。HTTP 用标准库，SQLite 用�
 - 第二台 iPhone（旧手机在线配对；丢机恢复走 §8.5，属 Phase 1）
 - `keyref mcp`：工具只有 `list`、`get`、`exec`，exec 与 CLI 语义同构（§7.8），返回值与 CLI 相同，仍然没有明文
 - 弱端点（移动端等）以 approval-only 模式配对的支持落地：配对界面可以按设备类型预置「长期授予空集 + 全部 approval」（§6.1）
+- 短信验证码采集（§14）：`source` 设备配对、消息上传与收件箱、`sms:` 消费。可用性依赖 APNs 与弱端点配对，故与审批同批；APNs 未配置时按 §14.4 降级。决策器委托（§14.8）为可选项，同批或紧随上线
 
 MCP 放在 Phase 2 而不是 Phase 1，是因为 CLI 已经能被现有 agent 当成 shell 工具调用。若目标 agent 只能接 MCP、不能执行二进制，就把这一项提前。见开放问题。
 
@@ -1208,12 +1252,99 @@ MCP 放在 Phase 2 而不是 Phase 1，是因为 CLI 已经能被现有 agent �
 ### Phase 4 — 以后再考虑
 
 - 团队保险库和多个主人同时编辑
-- 文件、SSH 密钥、OTP
+- 文件、SSH 密钥、TOTP 生成器（短信验证码的收件箱已提前至 Phase 2，§14）
 - Windows
 - `ref` 重命名
 - 浏览器扩展
 
-## 14. 开放问题
+## 14. 短信验证码采集（v0.8）
+
+### 14.1 背景与定位
+
+验证码短信是一种**短效秘密**：它落在某台安卓手机的收件箱里，人需要在一台 iPhone 上看到它，agent 在登录流程里需要「使用」它。把这条链路放进 keyref，而不是接一个第三方推送服务，理由有三：
+
+- 「服务器只存密文」的既有不变量直接适用：消息从采集设备到收件箱全程端到端加密，不需要 Bark 这类明文中转；
+- 通知复用 §8.3 的 APNs 管道，不为这个功能新增任何凭据与推送依赖；
+- 「agent 用验证码」天然是一次性消费，正好落在审批与一次性投递的既有机制上（§6.6、§8.3）——这是独立转发工具给不了的能力。
+
+定位一句话：**多台 Android 以 `kind = source` 的设备上传端到端加密的消息；人在 iOS 收件箱里看；agent 经审批一次性消费。**
+
+### 14.2 采集设备：`kind = source`
+
+- 软件密钥：X25519 与 Ed25519。Android Keystore 不支持这两类算法，实现上用 Keystore 里的 AES 密钥加密私钥后落盘（有 StrongBox 则优先），保护弱于 CLI 的系统密钥环——可接受：这台设备本来就什么都不读，丢了只需撤销重配。它也没有任何条目密钥——不是「弱一点的 owner」，而是只上传的传感器。
+- 配对复用 §8.1 的全部机制，方向不变：采集端展示二维码，iPhone 扫描确认。没有 grants 勾选——它什么都不读，配对确认页只需要说明「这台设备从此只能向收件箱上传短信」。
+- 能力边界（服务器强制）：`POST /v1/messages`、会话续期、`GET /v1/sync`（仅设备目录，用来感知撤销和取 owner 的 HPKE 公钥）。其余端点一律 `403`。
+- **采集过滤是设备本地的明文配置**：号码白名单加「包含验证码」的特征匹配，命中的短信才上传。规则不上传也不加密——source 解不开任何密文，规则也没有同步的去处。不过滤的「整机收件箱」不进保险库（§15 第 16 项）。
+- 撤销语义与 §10.6 一致；被撤设备之后的上传直接被服务器拒绝。
+
+### 14.3 消息实体与加密
+
+一条消息的明文（≤ 4 KiB）：
+
+```json
+{
+  "v": 1,
+  "sender": "10086",
+  "body": "【XX银行】您的验证码 482913，5 分钟内有效。",
+  "sim": "备用卡1",
+  "received_at": 1761980000000
+}
+```
+
+加密与审计事件同构（§7.7）：随机 256 位消息密钥做 AES-256-GCM，密钥逐台 HPKE 包给当前每台 active 的 owner 设备**以及有效委托期内的决策器**（`purpose = source-message`，信封里每个包裹带目标 `device_id` 钉死对应关系）；上传请求由 source 的 Ed25519 覆盖誊本签名（同 §8.3 的请求签名），服务器验签后落库。表结构见 §6.3 的 `messages`，索引至少 `messages(vault_id, expires_at, status)`。决策器配对之前已落库的消息它解不开——与「后加入的 owner」同一个缺口，24 小时 TTL 自愈；要立即覆盖时，owner 经 `PUT /v1/messages/:id/wraps` 补包（protocol.md §6.30，差异登记 D17）。
+
+- **TTL 24 小时，服务器强制**：过期与审计同路径清理（§10.5）。客户端自报的 `expires_at` 不被接受。决策器配对前已落库的旧消息由 owner 经补投端点（protocol.md §6.30，差异登记 D17）显式覆盖，否则 24 小时自愈。
+- `consumed` 是单向标记：decision 落库与置位在同一事务，同一条消息不能被二次消费；同一条消息同时最多一个未终结的审批（§11）。密文本身等 TTL 删除，人也可以在收件箱里随时手动删。「待处理」配额只数 `status = active` 的行。
+- 消息不进 §10.6 的 changes 日志：90 天的滚动日志不该被 24 小时的消息污染，送达走专属端点（§14.4）。
+- 后加入的 owner 设备解不开加入之前的消息——与审计同样的缺口，24 小时 TTL 自愈，不额外处理。
+
+### 14.4 送达与收件箱（iOS）
+
+**接收端角色（v0.8 内新增）**：目录设备行新增 `receiver_role` 字节（目录誊本每个设备行末尾追加：`0x00` 无角色 / `0x01` 主接收端 / `0x02` 收件箱）。规则：每个保险库**至多一台主接收端**，本轮限定 `kind = ios`（安卓收件箱设备后面单独立项，协议位子已留好）；验证码与审批的推送目标 = 主接收端（无 token 时退回全部 owner 设备）。iOS 设备列表为每台 owner 设备提供「设为主接收端」，随目录 revision+1 重签。
+
+- `GET /v1/messages?since=`（owner 或决策器）：返回未过期、未消费的消息，按服务器 `created_at` 倒序，`since` 是同一单调游标；iOS 打开时拉取。设备自报的 `received_at` 只作展示参考，不作为策略与排序依据。
+- 新消息到达即经 APNs 通知**主接收端**（§8.3 同一管道）。**推送正文只有「收到新的验证码」**，不带 sender、也不带设备 label——锁屏是半公开表面（§14.6 的 B9）。
+- 收件箱按来源设备 label 分组（§6.4 的明文 label 正好承担「哪一台手机」的显示），每条显示 sender、到达时间、剩余有效期；支持单条删除与清空。
+- APNs 未配置（自托管默认）时，功能降级为「打开应用才看到」，与审批的降级方式相同（§8.3）。
+
+### 14.5 agent 消费：`sms:<message_id>`
+
+把这一条诚实地说在前面：**验证码的用途决定了模型最终要看见它**——agent 要把验证码填进登录表单。这个功能提供的边界不是「对模型保密」，而是「哪一条、什么时候、经谁批准、留下什么审计」；与 B3 同类，接受残余。
+
+- 语法：`sms:<message_id>` 的引用只存在于 `exec` 的注入位置（`--env` / `--stdin` / `--fd`）的**值里**，`list` 和 `get` 不认识它；`{{keyref:sms:…}}` 这样的 argv 占位符写法不存在。注入的值是该消息的 `body` 全文（验证码嵌在正文里，agent 自行读取）；注入后进入本次 `exec` 的脱敏集合，子进程输出里再出现时替换为 `<redacted:sms-ab12…>`。
+- **每次消费必经审批对象，没有 standard 档**；decision 默认由人签署，也可以按 §14.8 委托给决策器自动签署。`exec` 解析出消息引用后走 §8.3 的审批：请求誊本带 `message_id` 与注入方式；人工审批界面把命令原文与短信全文、来源设备、sender、剩余秒数并列——人独立确认的是「这次登录该用哪条短信」。sender 与设备 label 是参考信号，不是凭据（sender 可伪造，B9）。
+- 批准后，decision 的载荷是把**这条消息的明文 JSON** HPKE 包给 CLI 的临时公钥直接投递——正是 §6.6 为仅本机条目定义的「decision 直接投递密文」路径。消息密钥本身不出 owner 与决策器域：CLI 不需要、也没有端点去取 `messages.envelope`。`approvals` 的 `item_id` 相应扩展为 `subject`（`item:<id>` / `message:<id>`）。
+- 注入后，验证码值进入本次 `exec` 的脱敏集合，子进程输出里再出现时替换为 `<redacted:sms-ab12…>`（§7.4 的单冒号风格）。
+- 未知、已过期、已消费的消息一律退出码 `11`；审批被拒或超时 `13`。消费结束的内存清零同 §6.5。消费审计的明文含 `message_id`、decision 来源设备与命中的策略条目（§7.7 的消息版）。
+- `sms:` 引用与解出的验证码永不进入 CLI 的密钥环与 cache.sqlite（§16）。
+
+### 14.6 威胁模型增补
+
+A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设备可以往收件箱灌伪造的「验证码」（A8）；伪造内容要到达 agent，必经审批——人工审批时人核对的是「这次登录意图与哪条短信匹配」，sender 与设备 label 只是参考信号（sender 可伪造）；委托开启后由决策器按 owner 签署的策略加 decision API 复核把关（§14.8）。收件箱出现垃圾消息时，人在 iOS 里删除并撤销那台采集设备即可，不影响任何条目。
+
+### 14.7 配额与实现注记
+
+- 消息密文字节计入存储配额（§10.5 口径）；「待处理」只数 `status = active` 的行，上限按档位、按 source 设备独立计算，消息上传另有独立的每日上限（免费档 100 条/设备/日）——一台被攻破的采集设备灌满自己的配额，不影响其他设备、同步与审批（§15 第 18 项）。
+- Android 采集端是现有「短信转发」原型 App 的重写：`SMS_RECEIVED` 广播 → 本地过滤 → HPKE 加密 → 上传；离线时 WorkManager 队列补传（密文先落本地，天然安全）。跨语言 HPKE 复用 §9.2 的测试向量；Kotlin 侧实现或 gomobile 嵌 `proto` 模块二选一，倾向后者——协议代码与测试向量直接复用。
+- iOS 侧零新凭据：推送复用 `PUT /v1/devices/push-token` 与 §12.3 的 `KEYREF_APN_*`。
+
+### 14.8 自动审批委托（decision delegation，可选）
+
+默认路径不变：没有决策器时，每条消息的消费都等人按 Face ID。委托是 owner 显式开启的可选项，用于「验证码消费不必每次解锁手机」的场景——例如把决策器跑在一台常开的本地机器上，对接已有的 decision API（如本地模型做的 JEV 复核）。
+
+- **设备形态**：`kind = decider`，与 CLI 同流程配对、无 grants。它持有的东西要说透：**TTL 内全部消息的明文**（解密能力来自 §14.3 信封里逐台发给它的包裹）。密钥层次上它是消息域的受托人，不是弱一点的 owner——拿不到 VMK、条目密钥与目录签名权，碰不了 items、grants 与设备目录。妥协一个决策器的损失 = 当前 TTL 内的短信内容 + 按策略自动放行（B10）；妥协一个 owner 的损失是整个保险库，两者的差距就是这个设计的意义。
+- **委托策略**：owner 在 iOS 里签署的独立对象（`delegation_signed`，存在 vaults 行上、带 `delegation_revision`，与设备目录同风格的誊本，服务器只递送；端点 `PUT` / `GET /v1/delegation`）：允许的 sender 列表、消息最大年龄（按服务器时间）、每个 CLI 每小时/每日的自动批准上限、允许的 CLI 设备、decision API 复核参数。**复核必经，不可关闭**——sender 可伪造，结构策略命中只是必要条件。决策器只能缩小、不能扩大（与 §8.4 续期密钥同一哲学）；服务器没有签名权，无法伪造或放大。
+- **覆盖范围**：委托只覆盖 message subject 的审批。条目（item）消费的审批永远是人签——`approval` 条目不接入自动决策，这条边界不留给配置（服务器按 `kind = decider` 强制校验 decision 的 subject 前缀）。
+- **决策路径**：决策器拉取 message subject 的 pending 审批（CLI 的临时公钥作为公开材料列在审批单上，`approvals.cli_ephemeral_public_key`——决策器不需要、也解不开加密的 request_ciphertext），按策略评估；自动放行 = 结构策略命中 **且** decision API 复核未否决。通过则以与 iOS 相同的格式 `POST decision`，载荷按 §14.5（明文 JSON 包给 CLI 临时公钥，`purpose = one-time-message-key`；§8.3、§9.1 中绑定 `item_id` 的位置在消息消费时对应绑定 `message_id`）。审批单与审计里记录 decision 的 `device_id`——「这条是自动批的、来自哪台决策器、命中了策略哪一条」进审计明文（§7.7）。
+- **决策输入的卫生**：短信正文是攻击者可控输入——任何人都可以给你的手机发短信，sender 也可以伪装成合法服务（B9 只把它当参考）。决策器把正文交给外部 decision API 时，正文必须作为**不可信数据段**隔离：结构化元数据（命中的策略条目、sender、来源设备、年龄）为主，正文放显式标注的不可信块，提示词禁止把正文当指令解释。复核器的输出只能在一票否决与放行之间选择——它不产生新的授权，放行仍受全部结构上限约束。
+- **失败语义**：决策器离线、策略不命中、decision API 未配置/不可用/给出否决——一律视同否决，审批保持 pending，人工路径照旧（§8.3），CLI 按超时 `13` 结束。不存在「自动决策失败就自动放行」的分支。
+- **撤销**：撤回委托 = 签署新的空委托（`delegation_revision` 递增）；撤销决策器设备同 §8.4。两者立即生效于它尚未签署的审批；已投递的一次性包裹不受影响（本来就是 60 秒寿命）。决策器对撤销前已上传消息的明文残余，最长存续到各自 TTL（§14.3）——配对确认页与撤销 UI 都要写明这一点。配对确认页与 source 同规格：Face ID + 明示「这台设备将看到全部短信明文」。
+
+### 14.9 未决
+
+见 §15 第 16–20 项。
+
+## 15. 开放问题
 
 下面每一项都给了推荐，方便直接开工。推翻推荐会改变 Phase 1 的范围。
 
@@ -1228,12 +1359,17 @@ MCP 放在 Phase 2 而不是 Phase 1，是因为 CLI 已经能被现有 agent �
 9. **秘密类型。** 推荐：MVP 只有字符串。SSH 私钥、文件和 OTP 会带来新的注入和脱敏问题。
 10. **掩码的末四位。** 推荐：iOS 把 `sk-****abcd` 这种掩码放进 meta，`list` 不解密 secret，因此 `approval` 条目也能显示末四位。view 授权的 agent 会看见 API key 的末四位。若你不接受，就把 `masked` 一律设为 `***`。
 11. **审计保留。** 推荐：免费档 7 天且最多 100 条，Plus 30 天且最多 5,000 条，过期从 SQLite 删除。自托管默认不删，运行的人可以自己设上限。更长的托管保留会先变成磁盘问题，不在 MVP 里做。
-12. **产品名和域名（Phase 1 发布前必须敲定）。** 推荐：对外名称与仓库同名 `keyref`，官方托管用 `https://sync.keyref.app`（最终以能注册到的域名为准），二维码 scheme 用 `keyref://`。它是 14 项里唯一阻塞 Phase 1 发布的：两个客户端都要把默认 origin 编译进去。不可逆性已经被设计缓解——服务器 URL 本来就可配置，迁移与恢复（§8.5）不绑死 origin，编译进去的只是默认值。文中的 `https://sync.example` 仍是占位。
+12. **产品名和域名（Phase 1 发布前必须敲定）。** 推荐：对外名称与仓库同名 `keyref`，官方托管用 `https://sync.keyref.app`（最终以能注册到的域名为准），二维码 scheme 用 `keyref://`。它是 20 项里唯一阻塞 Phase 1 发布的：两个客户端都要把默认 origin 编译进去。不可逆性已经被设计缓解——服务器 URL 本来就可配置，迁移与恢复（§8.5）不绑死 origin，编译进去的只是默认值。文中的 `https://sync.example` 仍是占位。
 13. **付款渠道。** 推荐：只做 App Store 内购，由 `keyref-server` 调用 App Store Server API。网页支付能少给苹果抽成，但有审核和政策成本。「不亏钱」按内购、最高按 30% 抽成来算，不把网页支付算进前提。
 14. **公开注册还是邀请。** 推荐：免费档配额和全局熔断进入官方托管之前，不公开注册。公开之后也不要关掉免费档的硬顶。
 15. **仅本机条目的恢复托管逃生舱。** 背景：仅本机条目（§6.6）的密文不上服务器，手机丢了只有 iCloud 副本能救（§6.7）。可选做法是每条加一个勾选：密文用恢复码派生密钥再包一层后上传（服务器仍解不开，恢复码 + 服务器可取回）。推荐默认关——「仅本机」的用户就是冲着不上同步层来的，托管与否应在创建时显式选择。待拍板。
+16. **采集过滤规则放哪。** 已定：Android 端本地明文配置（号码白名单 + 「包含验证码」的特征匹配），不上传、不进保险库——source 解不开任何密文，规则也没有可加密同步的去处。不过滤会把手机的全部短信变成保险库内容，隐私面不可接受；采集在配对完成后由人显式开启。
+17. **消息 TTL。** 已定：固定 24 小时，服务器强制、不可按条延长；自托管可以用环境变量调整。收件箱支持手动删除，消费后标记 `consumed` 防重放。更长的「短信归档」不是这个功能的目标。
+18. **采集设备与决策器配额。** 已定：采集设备免费 1 台、Plus 3 台；决策器（§14.8）免费 1 台、Plus 3 台，与 CLI 名额分开计数；待处理消息免费档 20 条、Plus 200 条，字节计入存储配额（§10.5）。
+19. **收件箱要不要二次 Face ID。** 已定：不用——应用进入前台本来就要解锁（§9.5）；锁屏通知不带任何短信内容，列表页的风险与条目列表同级。
+20. **决策器的否决语义。** 已定：决策器只能缩小、不能扩大委托范围；策略不命中、本地 decision API 不可用或给出否决时，审批保持 pending 走人工路径，绝不自动放行。委托只覆盖 message subject，条目审批永远人工（§14.8）。
 
-## 15. 实现时保持不变的约束
+## 16. 实现时保持不变的约束
 
 这些句子是给以后写代码的人的，避免实现阶段把威胁模型做丢：
 
@@ -1253,3 +1389,9 @@ MCP 放在 Phase 2 而不是 Phase 1，是因为 CLI 已经能被现有 agent �
 - 撤销与授权收回的送达不依赖被撤设备「还有 grants」。
 - 模板校验、策略检查（含 shebang 解析）都在 spawn 之前完成，失败一律不启动子进程。
 - 跨工具的秘密传递只有 §7.8 的三种形态（exec / embed / proxy）；明文不进 harness 的上下文，也不作为参数传给非 keyref spawn 的工具。
+- 短信消息只有 `kind = source` 能写、只有 owner 与其显式委托的决策器（§14.8）能读；消息密钥不进 CLI 的密钥环与 cache.sqlite，消费永远走审批（人工或委托自动，§14.5）。
+- 自动审批委托只覆盖 message subject；委托策略必须由 owner 签名，决策器与服务器都不能扩大范围；decision API 复核是自动放行的必要步骤，不可关闭（§14.8）。
+- 决策器的消息明文只在内存里，不落盘、不进日志；正文交给外部决策 API 时按不可信数据段隔离（§14.8）。
+- 决策器的 decision 只接受 `message:` subject，服务器强制（§14.8）。
+- `sms:<message_id>` 不被 `list` / `get` 识别，只在 `exec` 注入中出现，且每次都审批。
+- 锁屏通知与推送正文不包含短信内容与 sender；内容只出现在已解锁的客户端里。

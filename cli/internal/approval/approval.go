@@ -57,11 +57,14 @@ var ErrDenied = errors.New("approval: denied or timed out")
 // by the owner; the server never sees it. The wire contract fixes the
 // field set; `reply` carries the full --reply patterns that design §7.1
 // requires the approval screen to display (see the segment report: this
-// field is the one addition beyond protocol §6.19's JSON).
+// field is the one addition beyond protocol §6.19's JSON). For a message
+// consumption (design §14.5) MessageID is set and ItemID empty; the
+// server-side subject becomes message:<id> (protocol D16).
 type request struct {
 	V                  int       `json:"v"`
 	CLIDeviceID        string    `json:"cli_device_id"`
-	ItemID             string    `json:"item_id"`
+	ItemID             string    `json:"item_id,omitempty"`
+	MessageID          string    `json:"message_id,omitempty"`
 	Argv               []string  `json:"argv"`
 	Refs               []string  `json:"refs"`
 	Injection          string    `json:"injection"`
@@ -79,6 +82,7 @@ type Options struct {
 	Identity  *device.Identity
 	Owners    []audit.OwnerRecipient // active owner devices; the first is used
 	ItemID    string
+	MessageID string // set for sms:<id> consumption (§14.5); ItemID empty then
 	Ref       string
 	Argv      []string // child argv in placeholder form (never secrets)
 	Refs      []string // every ref of the exec, sorted
@@ -92,9 +96,13 @@ type Options struct {
 
 // Result is the payload an approved decision delivered: exactly one
 // field is set, depending on the unwrap the caller asked for.
+// DecisionDeviceID names the device that signed the decision (protocol
+// §6.22) so the caller can put it in the audit event (design v0.8
+// §14.5/§14.8).
 type Result struct {
-	Key    *secret.Key       // synced approval items: the one-time item key
-	Secret *secret.Plaintext // local items: the secret value itself
+	Key              *secret.Key       // synced approval items: the one-time item key
+	Secret           *secret.Plaintext // local items: the secret value itself
+	DecisionDeviceID string            // the owner (kind=ios) or decider (kind=decider) that decided
 }
 
 // unwrapFunc opens the approved one-time wrap while the ephemeral
@@ -106,9 +114,11 @@ type unwrapFunc func(vaultID, deviceID, itemID, approvalID string,
 // returns the unwrapped item key in guarded memory. The caller must
 // Destroy the key after the single exec (design §8.3 step 5). The
 // returned exit code and deny state follow the exec convention (13 for
-// denied/expired/timeout).
-func RequestItemKey(opts *Options) (key *secret.Key, exitCode int, state string) {
-	res, code, st := run(opts, unwrapItemKey)
+// denied/expired/timeout). When decisionDevice is non-nil it receives
+// the deciding device id of the round (protocol §6.22), empty if the
+// round produced no decision — the caller forwards it to the audit event.
+func RequestItemKey(opts *Options, decisionDevice *string) (key *secret.Key, exitCode int, state string) {
+	res, code, st := run(opts, unwrapItemKey, decisionDevice)
 	if res == nil {
 		return nil, code, st
 	}
@@ -120,9 +130,9 @@ func RequestItemKey(opts *Options) (key *secret.Key, exitCode int, state string)
 // HPKE-sealed to the request's ephemeral public key under the same
 // one-time binding. The value lands in guarded memory; the caller must
 // Destroy it right after the injection — it never reaches the cache or
-// the keyring (design §15).
-func RequestSecret(opts *Options) (value *secret.Plaintext, exitCode int, state string) {
-	res, code, st := run(opts, unwrapSecret)
+// the keyring (design §15). See RequestItemKey for decisionDevice.
+func RequestSecret(opts *Options, decisionDevice *string) (value *secret.Plaintext, exitCode int, state string) {
+	res, code, st := run(opts, unwrapSecret, decisionDevice)
 	if res == nil {
 		return nil, code, st
 	}
@@ -151,9 +161,36 @@ func unwrapSecret(vaultID, deviceID, itemID, approvalID string,
 	return &Result{Secret: value}, nil
 }
 
+// RequestMessage runs one approval round for an sms:<id> consumption
+// (design v0.8 §14.5): the approved decision carries the message
+// plaintext JSON, HPKE-sealed to the request's ephemeral public key
+// under the one-time-message-key binding. The plaintext lands in
+// guarded memory; the caller extracts the body for the injection and
+// Destroys the buffer right after — sms values never reach the cache or
+// the keyring (design §16). See RequestItemKey for decisionDevice.
+func RequestMessage(opts *Options, decisionDevice *string) (value *secret.Plaintext, exitCode int, state string) {
+	res, code, st := run(opts, unwrapMessage, decisionDevice)
+	if res == nil {
+		return nil, code, st
+	}
+	return res.Secret, code, st
+}
+
+// unwrapMessage opens a one-time MESSAGE wrap (sms consumption).
+func unwrapMessage(vaultID, deviceID, messageID, approvalID string,
+	requestCiphertext, enc, wrapped, ephPrivate []byte) (*Result, error) {
+	value, err := itemcrypt.UnwrapOneTimeMessage(vaultID, deviceID, messageID, approvalID,
+		requestCiphertext, enc, wrapped, ephPrivate)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Secret: value}, nil
+}
+
 // run executes one approval round: request build, submission, polling
-// and the caller-chosen unwrap of the approved wrap.
-func run(opts *Options, unwrap unwrapFunc) (*Result, int, string) {
+// and the caller-chosen unwrap of the approved wrap. decisionDevice, when
+// non-nil, receives the deciding device id of the round (protocol §6.22).
+func run(opts *Options, unwrap unwrapFunc, decisionDevice *string) (*Result, int, string) {
 	if len(opts.Owners) == 0 {
 		fmt.Fprintln(opts.Stderr, "keyref: approval needs an active owner device; run keyref sync")
 		return nil, 1, "internal"
@@ -181,7 +218,8 @@ func run(opts *Options, unwrap unwrapFunc) (*Result, int, string) {
 	nowMs := time.Now().UnixMilli()
 	req := request{
 		V: 1, CLIDeviceID: opts.DeviceID, ItemID: opts.ItemID,
-		Argv: opts.Argv, Refs: sortedCopy(opts.Refs),
+		MessageID: opts.MessageID,
+		Argv:      opts.Argv, Refs: sortedCopy(opts.Refs),
 		Injection: strings.Join(sortedCopy(opts.Injection), ","),
 		Hosts:     opts.Hosts, Reply: opts.Reply,
 		EphemeralKEM:       wire.KEMX25519,
@@ -217,33 +255,62 @@ func run(opts *Options, unwrap unwrapFunc) (*Result, int, string) {
 		return nil, 1, "internal"
 	}
 
-	created, err := opts.Client.ApprovalCreate(&wire.ApprovalCreateRequest{
+	send := &wire.ApprovalCreateRequest{
 		ItemID:            opts.ItemID,
+		MessageID:         opts.MessageID,
 		RequestCiphertext: requestCiphertext,
 		RequestSignature:  signature,
 		ExpiresAt:         nowMs + timeout.Milliseconds(),
-	})
+	}
+	if opts.MessageID != "" {
+		// 临时公钥以明文随请求提交：决策器不解 request_ciphertext，靠它
+		// 构造一次性包裹（protocol §6.19、D16）。条目审批不带，保持 v1.1
+		// 的请求字节不变。
+		send.CLIEphemeralPublicKey = ephPublic
+	}
+	created, err := opts.Client.ApprovalCreate(send)
 	if err != nil {
-		if client.Code(err) == "quota_exceeded" {
+		switch client.Code(err) {
+		case "quota_exceeded":
 			fmt.Fprintln(opts.Stderr, "keyref: approval queue is full (10 pending); try again later")
 			return nil, 13, "approval-queue-full"
+		case "not_found":
+			// The subject is gone: for an item that is an unknown ref
+			// (§7.6), for a message it is "unknown, expired or already
+			// consumed" and design §14.5 pins exit 11.
+			if opts.MessageID != "" {
+				fmt.Fprintln(opts.Stderr, "keyref: message is unknown, expired or already consumed")
+			} else {
+				fmt.Fprintf(opts.Stderr, "keyref: unknown ref %q\n", opts.Ref)
+			}
+			return nil, 11, "unknown-ref"
+		case "approval_not_pending":
+			// One live approval per message (§14.3): another consumption
+			// of the same message is in flight.
+			fmt.Fprintln(opts.Stderr, "keyref: another consumption of this message is already pending")
+			return nil, 13, "approval-busy"
 		}
 		fmt.Fprintln(opts.Stderr, "keyref: cannot submit approval request")
 		return nil, 1, "approval-submit"
 	}
 	fmt.Fprintf(opts.Stderr, "keyref: approval requested for %s (waiting up to %s)\n", opts.Ref, timeout.Truncate(time.Second))
 
-	return pollAndWait(opts, created.ApprovalID, requestCiphertext, ephPrivate, timeout, unwrap)
+	return pollAndWait(opts, created.ApprovalID, requestCiphertext, ephPrivate, timeout, unwrap, decisionDevice)
 }
 
 // pollAndWait polls the approval at the 2-second floor until the wrap
 // arrives, the owner denies, the request expires or the caller's
-// deadline passes (exit 13 on all of those, design §7.6).
-func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate []byte, timeout time.Duration, unwrap unwrapFunc) (*Result, int, string) {
+// deadline passes (exit 13 on all of those, design §7.6). Every terminal
+// answer that carries a decision_device_id (§6.22) is forwarded to
+// decisionDevice and, on approval, onto the Result — the audit event
+// names who decided (design v0.8 §14.5/§14.8).
+func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate []byte, timeout time.Duration,
+	unwrap unwrapFunc, decisionDevice *string) (*Result, int, string) {
 	deadline := time.Now().Add(timeout)
 	// The first poll may run immediately; every later poll waits out the
 	// server's 2-second floor.
 	first := true
+	var decidedBy string
 	for {
 		if !first {
 			if time.Now().Add(PollInterval).After(deadline) {
@@ -269,6 +336,12 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 			}
 			continue // transient network errors retry until the deadline
 		}
+		if resp.DecisionDeviceID != "" {
+			decidedBy = resp.DecisionDeviceID
+			if decisionDevice != nil {
+				*decisionDevice = decidedBy
+			}
+		}
 		switch resp.Status {
 		case wire.ApprovalStatusPending:
 			continue
@@ -283,12 +356,20 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 			fmt.Fprintln(opts.Stderr, "keyref: approval wrap already consumed")
 			return nil, 13, "approval-consumed"
 		case wire.ApprovalStatusApproved:
-			res, err := unwrap(opts.VaultID, opts.DeviceID, opts.ItemID, approvalID,
+			// The binding subject is the message for an sms: consumption
+			// (protocol §3.7 one-time-message-key) and the item
+			// otherwise.
+			subjectID := opts.ItemID
+			if opts.MessageID != "" {
+				subjectID = opts.MessageID
+			}
+			res, err := unwrap(opts.VaultID, opts.DeviceID, subjectID, approvalID,
 				requestCiphertext, resp.OneTimeEnc, resp.OneTimeWrappedKey, ephPrivate)
 			if err != nil {
-				fmt.Fprintln(opts.Stderr, "keyref: one-time wrap did not open (request or item mismatch)")
+				fmt.Fprintln(opts.Stderr, "keyref: one-time wrap did not open (request or subject mismatch)")
 				return nil, 13, "approval-unwrap"
 			}
+			res.DecisionDeviceID = decidedBy
 			return res, 0, ""
 		default:
 			fmt.Fprintln(opts.Stderr, "keyref: unexpected approval status")

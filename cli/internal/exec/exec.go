@@ -28,6 +28,34 @@ type ResolvedRef struct {
 	Ref   string
 	Meta  *itemcrypt.Meta
 	Value *secret.Plaintext // guarded; destroyed by Run
+	// Message marks an sms:<message_id> ref (design v0.8 §14.5). Such a
+	// ref has no item meta and no item policy: its only gate is the
+	// per-consumption approval round, so every item-level check below
+	// skips it.
+	Message bool
+}
+
+// MessageRefPrefix introduces an SMS consumption reference. Message
+// refs exist only in exec injection values (--env / --stdin / --fd):
+// `list` and `get` do not know them, and there is no argv placeholder
+// form (design v0.8 §14.5).
+const MessageRefPrefix = "sms:"
+
+// ParseMessageRef reports whether ref is a well-formed
+// sms:<message_id> (protocol §1.1: 16 random bytes as 32 lowercase
+// hex).
+func ParseMessageRef(ref string) (string, bool) {
+	id, ok := strings.CutPrefix(ref, MessageRefPrefix)
+	if !ok || len(id) != 32 {
+		return "", false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return "", false
+		}
+	}
+	return id, true
 }
 
 // Outcome reports what happened during one exec; the command layer
@@ -35,16 +63,19 @@ type ResolvedRef struct {
 // "deny:<reason>" — every attempted exec, including rejections,
 // produces exactly one outcome (design.md §7.7). ApprovalResult carries
 // the §7.7 approval outcome ("approved" or the deny reason) when the
-// run went through the approval flow.
+// run went through the approval flow, and DecisionDeviceID names the
+// device that signed that decision (design v0.8 §14.5/§14.8) — empty
+// when no approval decided the run.
 type Outcome struct {
-	ChildExit      int
-	Redactions     int
-	Injection      []string
-	Refs           []string
-	Argv           []string
-	AllowArgv      bool
-	PolicyState    string
-	ApprovalResult string
+	ChildExit        int
+	Redactions       int
+	Injection        []string
+	Refs             []string
+	Argv             []string
+	AllowArgv        bool
+	PolicyState      string
+	ApprovalResult   string
+	DecisionDeviceID string
 }
 
 // childNotStarted marks outcomes whose child never ran.
@@ -174,7 +205,21 @@ func run(req *Request) (int, *Outcome) {
 		return code, outcome.deny(state)
 	}
 
+	// design §14.5: there is no argv placeholder form for a message —
+	// {{keyref:sms:…}} does not exist, and silently handing the literal
+	// text to the child would look like an injection that never
+	// happened. Reject it before anything else can accept it.
+	if HasMessagePlaceholder(req.Argv) {
+		fmt.Fprintln(req.Stderr, "keyref: sms: refs cannot be argv placeholders; use --env, --stdin or --fd")
+		return deny(10, "sms-argv")
+	}
+
 	for r, rr := range req.Refs {
+		if rr.Message {
+			// No item meta, no item policy: an sms: ref is gated by its
+			// own approval round and nothing else (design v0.8 §14.5).
+			continue
+		}
 		if rr.Meta == nil {
 			return deny(1, "internal")
 		}
@@ -193,6 +238,11 @@ func run(req *Request) (int, *Outcome) {
 			return deny(10, "allow-argv-flag")
 		}
 		for _, ref := range outcome.Refs {
+			if req.Refs[ref].Message {
+				// Message refs reach the child through injection values
+				// only; they never take the argv path (design §14.5).
+				continue
+			}
 			if !req.Refs[ref].Meta.Policy.AllowArgv {
 				fmt.Fprintf(req.Stderr, "keyref: item %s does not allow argv injection (policy.allowArgv)\n", ref)
 				return deny(10, "allow-argv-policy")
@@ -217,6 +267,10 @@ func run(req *Request) (int, *Outcome) {
 		if !ok {
 			fmt.Fprintf(req.Stderr, "keyref: unknown ref %q\n", rp.Ref)
 			return deny(11, "unknown-ref")
+		}
+		if rr.Message {
+			fmt.Fprintln(req.Stderr, "keyref: --reply requires an item ref, not an sms: ref")
+			return deny(10, "reply-message-ref")
 		}
 		if rr.Meta.Policy.Sensitivity != "approval" {
 			fmt.Fprintf(req.Stderr, "keyref: --reply requires item %s to have sensitivity=approval\n", rp.Ref)
@@ -288,6 +342,9 @@ func run(req *Request) (int, *Outcome) {
 		return deny(18, "cannot-start")
 	}
 	for _, ref := range outcome.Refs {
+		if req.Refs[ref].Message {
+			continue // no item policy to intersect (design §14.5)
+		}
 		for _, layer := range resolved.Layers {
 			if !ItemAllowsCommand(layer, req.Refs[ref].Meta.Policy.AllowCommands) {
 				fmt.Fprintf(req.Stderr, "keyref: command %q is not allowed by item %s (allowCommands)\n", layer, ref)
@@ -296,6 +353,9 @@ func run(req *Request) (int, *Outcome) {
 		}
 	}
 	for _, ref := range outcome.Refs {
+		if req.Refs[ref].Message {
+			continue
+		}
 		if err := allowedHostsFromArgv(req.Argv, req.Refs[ref].Meta.Policy.AllowedHosts); err != nil {
 			fmt.Fprintln(req.Stderr, "keyref:", err)
 			return deny(10, "policy-hosts")

@@ -584,6 +584,7 @@ func main() {
 				HPKEKEM: wire.KEMX25519, HPKEPublicKey: cliXPub,
 				SignAlg: wire.SignAlgEd25519, SignPublicKey: cliPub,
 				GrantsDigest: cliDigest,
+				ReceiverRole: wire.ReceiverRoleNone,
 			},
 			{
 				DeviceID: ownerDevID, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
@@ -591,6 +592,7 @@ func main() {
 				SignAlg: wire.SignAlgECDSAP256, SignPublicKey: ownerPub,
 				RenewalSignPublicKey: ownerRenewalPub,
 				GrantsDigest:         emptyDigest,
+				ReceiverRole:         wire.ReceiverRolePrimary,
 			},
 		},
 	})
@@ -723,10 +725,10 @@ func main() {
 		Devices: []dirDeviceFields{
 			{DeviceID: cliDevID, Kind: "cli", Status: "active", HPKEKEM: "X25519",
 				HPKEPubHex: hx(cliXPub), SignAlg: "ed25519", SignPubHex: hx(cliPub),
-				RenewalPubHex: "", GrantsDigestHex: hx(cliDigest)},
+				RenewalPubHex: "", GrantsDigestHex: hx(cliDigest), ReceiverRole: 0},
 			{DeviceID: ownerDevID, Kind: "ios", Status: "active", HPKEKEM: "P-256",
 				HPKEPubHex: hx(ownerPPub), SignAlg: "ecdsa-p256", SignPubHex: hx(ownerPub),
-				RenewalPubHex: hx(ownerRenewalPub), GrantsDigestHex: hx(emptyDigest)},
+				RenewalPubHex: hx(ownerRenewalPub), GrantsDigestHex: hx(emptyDigest), ReceiverRole: 1},
 		},
 	}
 	v.Directory = tv(dirFields, dirTB, signOwner(dirTB), wire.SignAlgECDSAP256, hx(ownerPub), true)
@@ -799,4 +801,5 @@ type dirDeviceFields struct {
 	SignPubHex     string `json:"sign_public_key_hex"`
 	RenewalPubHex  string `json:"renewal_sign_public_key_hex"`
 	GrantsDigestHex string `json:"grants_digest_hex"`
+	ReceiverRole   uint8  `json:"receiver_role"`
 }

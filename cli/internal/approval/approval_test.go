@@ -45,7 +45,10 @@ type fakeOwner struct {
 	rateFirst       bool    // 429 on the first poll
 	failNext        bool    // transient network error on next poll
 	wrapWithWrongID bool    // bind the one-time wrap to another approval id
-	itemKey         []byte
+	// decisionDeviceID is what the fake server reports as the deciding
+	// device (protocol §6.22); "" = an older server that omits the key.
+	decisionDeviceID string
+	itemKey          []byte
 	// deliverSecret switches the fake owner to the LOCAL-item payload
 	// (design §6.6, v0.7): the decision wraps secretPayload — the secret
 	// value itself — instead of the 32-byte item key.
@@ -128,7 +131,8 @@ func (o *fakeOwner) handlePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if o.decision == "denied" {
-		json.NewEncoder(w).Encode(wire.ApprovalPollResponse{ApprovalID: o.approvalID, Status: wire.ApprovalStatusDenied})
+		json.NewEncoder(w).Encode(wire.ApprovalPollResponse{ApprovalID: o.approvalID, Status: wire.ApprovalStatusDenied,
+			DecisionDeviceID: o.decisionDeviceID})
 		return
 	}
 	// Approved: wrap the payload to the request's ephemeral public key
@@ -154,6 +158,7 @@ func (o *fakeOwner) handlePoll(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(wire.ApprovalPollResponse{
 		ApprovalID: o.approvalID, Status: wire.ApprovalStatusApproved,
 		OneTimeEnc: enc, OneTimeWrappedKey: wrapped, ExpiresAt: time.Now().Add(60 * time.Second).UnixMilli(),
+		DecisionDeviceID: o.decisionDeviceID,
 	})
 }
 
@@ -196,7 +201,7 @@ func TestRequestItemKeyHappyPath(t *testing.T) {
 	o.failNext = true  // and a transient failure retries too
 
 	cl := client.New(o.srv.URL, nil)
-	key, code, state := RequestItemKey(o.options(cl))
+	key, code, state := RequestItemKey(o.options(cl), nil)
 	if key == nil {
 		t.Fatalf("RequestItemKey failed: code %d state %s", code, state)
 	}
@@ -247,7 +252,7 @@ func TestRequestItemKeyDenied(t *testing.T) {
 	t.Cleanup(func() { PollInterval = oldInterval })
 
 	o := newFakeOwner(t, "denied")
-	key, code, state := RequestItemKey(o.options(client.New(o.srv.URL, nil)))
+	key, code, state := RequestItemKey(o.options(client.New(o.srv.URL, nil)), nil)
 	if key != nil || code != 13 || state != "approval-denied" {
 		t.Fatalf("denied flow: key=%v code=%d state=%s", key != nil, code, state)
 	}
@@ -262,7 +267,7 @@ func TestRequestItemKeyTimeout(t *testing.T) {
 	opts := o.options(client.New(o.srv.URL, nil))
 	opts.Timeout = 300 * time.Millisecond
 	start := time.Now()
-	key, code, state := RequestItemKey(opts)
+	key, code, state := RequestItemKey(opts, nil)
 	if key != nil || code != 13 || state != "approval-timeout" {
 		t.Fatalf("timeout flow: key=%v code=%d state=%s", key != nil, code, state)
 	}
@@ -275,7 +280,7 @@ func TestRequestItemKeyNoOwner(t *testing.T) {
 	o := newFakeOwner(t, "approved")
 	opts := o.options(client.New(o.srv.URL, nil))
 	opts.Owners = nil
-	key, code, state := RequestItemKey(opts)
+	key, code, state := RequestItemKey(opts, nil)
 	if key != nil || code != 1 || state != "internal" {
 		t.Fatalf("no-owner flow: key=%v code=%d state=%s", key != nil, code, state)
 	}
@@ -291,7 +296,7 @@ func TestRequestItemKeySubmitRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 	opts := o.options(client.New(srv.URL, nil))
-	key, code, state := RequestItemKey(opts)
+	key, code, state := RequestItemKey(opts, nil)
 	if key != nil || code != 13 || state != "approval-queue-full" {
 		t.Fatalf("queue-full flow: key=%v code=%d state=%s", key != nil, code, state)
 	}
@@ -311,7 +316,7 @@ func TestRequestItemKeyWrapBinding(t *testing.T) {
 	o.mu.Lock()
 	o.wrapWithWrongID = true
 	o.mu.Unlock()
-	key, code, state := RequestItemKey(o.options(client.New(o.srv.URL, nil)))
+	key, code, state := RequestItemKey(o.options(client.New(o.srv.URL, nil)), nil)
 	if key != nil || code != 13 || state != "approval-unwrap" {
 		t.Fatalf("misbound wrap opened: key=%v code=%d state=%s", key != nil, code, state)
 	}
@@ -328,7 +333,7 @@ func TestRequestItemKeyZeroizeOnDeny(t *testing.T) {
 	errBuf := &bytes.Buffer{}
 	opts := o.options(client.New(o.srv.URL, nil))
 	opts.Stderr = errBuf
-	key, _, _ := RequestItemKey(opts)
+	key, _, _ := RequestItemKey(opts, nil)
 	if key != nil {
 		t.Fatal("denied flow returned a key")
 	}
@@ -352,7 +357,7 @@ func TestRequestSecretLocalItem(t *testing.T) {
 	o.secretPayload = payload
 	o.mu.Unlock()
 
-	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)))
+	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)), nil)
 	if value == nil {
 		t.Fatalf("RequestSecret failed: code %d state %s", code, state)
 	}
@@ -385,7 +390,7 @@ func TestRequestSecretBinding(t *testing.T) {
 	o.wrapWithWrongID = true
 	o.mu.Unlock()
 
-	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)))
+	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)), nil)
 	if value != nil || code != 13 || state != "approval-unwrap" {
 		t.Fatalf("misbound secret opened: value=%v code=%d state=%s", value != nil, code, state)
 	}
@@ -403,9 +408,46 @@ func TestRequestSecretDenied(t *testing.T) {
 	o.secretPayload = []byte("sk-local-secret")
 	o.mu.Unlock()
 
-	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)))
+	value, code, state := RequestSecret(o.options(client.New(o.srv.URL, nil)), nil)
 	if value != nil || code != 13 || state != "approval-denied" {
 		t.Fatalf("denied local flow: value=%v code=%d state=%s", value != nil, code, state)
+	}
+}
+
+// TestRequestDecisionDeviceID pins protocol §6.22: the optional
+// decision_device_id of the poll answer reaches the caller, so the exec
+// audit event can name who approved (design v0.8 §14.5/§14.8). A server
+// that omits the key (v1.1 shape) leaves it empty.
+func TestRequestDecisionDeviceID(t *testing.T) {
+	oldInterval := PollInterval
+	PollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { PollInterval = oldInterval })
+
+	o := newFakeOwner(t, "approved")
+	o.mu.Lock()
+	o.decisionDeviceID = testOwnerID
+	o.mu.Unlock()
+
+	var decider string
+	key, code, state := RequestItemKey(o.options(client.New(o.srv.URL, nil)), &decider)
+	if key == nil {
+		t.Fatalf("RequestItemKey failed: code %d state %s", code, state)
+	}
+	key.Destroy()
+	if decider != testOwnerID {
+		t.Fatalf("decision device = %q, want %q", decider, testOwnerID)
+	}
+
+	// No decision_device_id in the response → the caller sees "".
+	plain := newFakeOwner(t, "approved")
+	var noDecider string
+	key, code, state = RequestItemKey(plain.options(client.New(plain.srv.URL, nil)), &noDecider)
+	if key == nil {
+		t.Fatalf("RequestItemKey failed: code %d state %s", code, state)
+	}
+	key.Destroy()
+	if noDecider != "" {
+		t.Fatalf("decision device = %q, want empty for a response without the key", noDecider)
 	}
 }
 

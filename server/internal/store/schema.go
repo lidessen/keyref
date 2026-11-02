@@ -6,7 +6,7 @@ import (
 )
 
 // SchemaVersion is the schema version stamp kept in PRAGMA user_version.
-const SchemaVersion = 3
+const SchemaVersion = 6
 
 type migration struct {
 	version int
@@ -153,6 +153,78 @@ var migrations = []migration{
 		version: 3,
 		stmts: []string{
 			`ALTER TABLE devices ADD COLUMN push_token TEXT`,
+		},
+	},
+	// v4 additions (design v0.8 §14, protocol v1.2 §5.28–§5.32): the SMS
+	// verification-code inbox.
+	//
+	//   - vaults.delegation_* store the owner-signed auto-approval
+	//     delegation policy (§14.8); NULL delegation_signed = no
+	//     delegation. The server only verifies and serves the bytes.
+	//   - approvals.subject is the D16 subject form ("item:<id>" /
+	//     "message:<id>"); item rows are backfilled so old and new rows
+	//     read uniformly. The wire keeps the v1.1 item_id field for
+	//     item subjects (protocol D16).
+	//   - approvals.cli_ephemeral_public_key carries the request's
+	//     one-time X25519 public key as plaintext for MESSAGE subjects
+	//     only: the decider never decrypts request_ciphertext (design
+	//     §14.8). Item approvals keep extracting it from the ciphertext.
+	//   - messages holds the encrypted verification-code inbox; messages
+	//     deliberately do NOT participate in the changes log (design
+	//     §14.3: a 90-day rolling log must not be polluted by 24h rows).
+	//   - message_usage_daily counts per-source-device uploads for the
+	//     hosted daily ceiling (design §14.7); inert on self-hosted.
+	{
+		version: 4,
+		stmts: []string{
+			`ALTER TABLE vaults ADD COLUMN delegation_signed BLOB`,
+			`ALTER TABLE vaults ADD COLUMN delegation_signature BLOB`,
+			`ALTER TABLE vaults ADD COLUMN delegation_revision INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE approvals ADD COLUMN subject TEXT`,
+			`UPDATE approvals SET subject = 'item:' || item_id WHERE subject IS NULL`,
+			`ALTER TABLE approvals ADD COLUMN cli_ephemeral_public_key BLOB`,
+			`CREATE TABLE messages (
+  vault_id          TEXT NOT NULL,
+  message_id        TEXT NOT NULL,
+  source_device_id  TEXT NOT NULL,
+  status            TEXT NOT NULL, -- active | consumed (design §14.3)
+  envelope          BLOB NOT NULL, -- §3.9 envelope: per-owner/decider wraps + AES blob
+  request_signature BLOB NOT NULL, -- source Ed25519 over the message-upload transcript
+  received_at       INTEGER NOT NULL, -- device-reported SMS arrival time; advisory
+  created_at        INTEGER NOT NULL, -- server clock; cursor + age policy basis
+  expires_at        INTEGER NOT NULL  -- server-stamped: created_at + 24h
+)`,
+			`CREATE INDEX idx_messages_vault_expires ON messages (vault_id, expires_at, status)`,
+			`CREATE INDEX idx_messages_vault_device ON messages (vault_id, source_device_id)`,
+			`CREATE TABLE message_usage_daily (
+  device_id TEXT NOT NULL,
+  day       TEXT NOT NULL, -- UTC YYYY-MM-DD
+  uploads   INTEGER NOT NULL,
+  PRIMARY KEY (device_id, day)
+)`,
+		},
+	},
+	{
+		// v5 addition (design v0.8 §14.4): devices.receiver_role mirrors
+		// the receiver_role byte of the signed directory record (0 none,
+		// 1 primary receiver — at most one per vault, 2 inbox). The
+		// directory is the authority; this column only serves push
+		// targeting (push the primary receiver).
+		version: 5,
+		stmts: []string{
+			`ALTER TABLE devices ADD COLUMN receiver_role INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
+	// v6 addition (design v0.8 §14.5/§14.8, protocol §6.22/D19): the
+	// approval row remembers WHICH device signed the decision — the owner
+	// (kind=ios) or the delegated decider (kind=decider). The CLI's poll
+	// response carries it (absent while pending) so the exec audit event
+	// can name the decider. NULL (rows written before v6) or '' = no
+	// decision yet; both read as the empty string on the wire.
+	{
+		version: 6,
+		stmts: []string{
+			`ALTER TABLE approvals ADD COLUMN decision_device_id TEXT`,
 		},
 	},
 }

@@ -197,6 +197,78 @@ func TestApprovalDenied(t *testing.T) {
 	}
 }
 
+// TestApprovalDecisionDeviceID pins protocol §6.22 / D19: the row
+// remembers which device signed the decision and every poll after it
+// carries that id, while a pending row omits the field entirely — the
+// CLI copies it into the exec audit event (design v0.8 §14.5/§14.8).
+func TestApprovalDecisionDeviceID(t *testing.T) {
+	f := newApprovalFixture(t)
+	if s, raw := f.submit(t, []byte("ct"), f.clock.t.UnixMilli()+60_000); s != 201 {
+		t.Fatalf("create: %d %s", s, raw)
+	}
+	id := f.pendingID(t)
+
+	// Pending: the key is absent, not empty.
+	f.clock.Advance(ApprovalPollMinInterval + time.Millisecond)
+	s, raw := f.e.do("GET", "/v1/approvals/"+id, f.cli.token, nil)
+	if s != 200 {
+		t.Fatalf("pending poll: %d", s)
+	}
+	if bytes.Contains(raw, []byte("decision_device_id")) {
+		t.Fatalf("pending poll carried decision_device_id: %s", raw)
+	}
+
+	// The owner approves: the owner's device id rides the approved
+	// answer, the consumed one, and the stored row.
+	enc, wrapped := randBytes(t, 32), randBytes(t, 48)
+	if s := f.decision(t, id, wire.ApprovalDecisionRequest{
+		Decision: wire.ApprovalStatusApproved, OneTimeEnc: enc, OneTimeWrappedKey: wrapped,
+	}); s != 204 {
+		t.Fatalf("approve: %d", s)
+	}
+	s, out := f.poll(t, id)
+	if s != 200 || out.Status != wire.ApprovalStatusApproved {
+		t.Fatalf("approved poll: %d %+v", s, out)
+	}
+	if out.DecisionDeviceID != f.owner.deviceID {
+		t.Fatalf("approved decision_device_id = %q, want owner %q", out.DecisionDeviceID, f.owner.deviceID)
+	}
+	s, out = f.poll(t, id)
+	if s != 200 || out.Status != wire.ApprovalStatusConsumed {
+		t.Fatalf("consumed poll: %d %+v", s, out)
+	}
+	if out.DecisionDeviceID != f.owner.deviceID {
+		t.Fatalf("consumed decision_device_id = %q, want owner %q", out.DecisionDeviceID, f.owner.deviceID)
+	}
+	row, err := f.e.st.GetApproval(context.Background(), f.owner.vaultID, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.DecisionDeviceID != f.owner.deviceID {
+		t.Fatalf("row decision_device_id = %q, want owner %q", row.DecisionDeviceID, f.owner.deviceID)
+	}
+
+	// A denial records its decider too — the endpoint accepted the
+	// decision — so a denied exec's audit event can name the phone.
+	if s, raw = f.submit(t, []byte("ct2"), f.clock.t.UnixMilli()+60_000); s != 201 {
+		t.Fatalf("create 2: %d %s", s, raw)
+	}
+	var created wire.ApprovalCreateResponse
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.decision(t, created.ApprovalID, wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusDenied}); s != 204 {
+		t.Fatalf("deny: %d", s)
+	}
+	s, out = f.poll(t, created.ApprovalID)
+	if s != 200 || out.Status != wire.ApprovalStatusDenied {
+		t.Fatalf("denied poll: %d %+v", s, out)
+	}
+	if out.DecisionDeviceID != f.owner.deviceID {
+		t.Fatalf("denied decision_device_id = %q, want owner %q", out.DecisionDeviceID, f.owner.deviceID)
+	}
+}
+
 func TestApprovalSignatureRequired(t *testing.T) {
 	f := newApprovalFixture(t)
 	expires := f.clock.t.UnixMilli() + 60_000

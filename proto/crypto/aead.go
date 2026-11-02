@@ -30,8 +30,12 @@ const (
 	PurposeMetaKey         = "meta-key"
 	PurposeItemKey         = "item-key"
 	PurposeOneTimeItemKey  = "one-time-item-key"
+	PurposeOneTimeMessage  = "one-time-message-key"
 	PurposeAuditEventKey   = "audit-event-key"
 	PurposeApprovalRequest = "approval-request"
+	// PurposeSourceMessage wraps one message key to an owner or a
+	// delegated decider (§3.7, design v0.8 §14.3).
+	PurposeSourceMessage = "source-message"
 )
 
 // AAD labels (docs/protocol.md §3.7).
@@ -92,6 +96,33 @@ func OneTimeItemKeyInfo(vaultID, recipientDeviceID, itemID, approvalID string, r
 	sum := sha256.Sum256(requestCiphertext)
 	b := append(base, unitSep())
 	b = append(b, itemID...)
+	b = append(b, unitSep())
+	b = append(b, approvalID...)
+	b = append(b, unitSep())
+	b = append(b, sum[:]...)
+	return b, nil
+}
+
+// OneTimeMessageKeyInfo builds the info of the one-time message wrap
+// (design v0.8 §14.5, protocol §3.7): the one-time base info under
+// purpose=one-time-message-key followed by
+//
+//	<US> message_id(hex) <US> approval_id(hex) <US> SHA-256(request_ciphertext)
+//
+// — the same binding shape as the item-key wrap, with the message id in
+// the item position, so an approved decision is usable only for the very
+// sms reference it answers.
+func OneTimeMessageKeyInfo(vaultID, recipientDeviceID, messageID, approvalID string, requestCiphertext []byte) ([]byte, error) {
+	base, err := Info(PurposeOneTimeMessage, vaultID, recipientDeviceID)
+	if err != nil {
+		return nil, err
+	}
+	if !validHexID(messageID) || !validHexID(approvalID) {
+		return nil, errors.New("crypto: info ids must be 32 lowercase hex characters")
+	}
+	sum := sha256.Sum256(requestCiphertext)
+	b := append(base, unitSep())
+	b = append(b, messageID...)
 	b = append(b, unitSep())
 	b = append(b, approvalID...)
 	b = append(b, unitSep())

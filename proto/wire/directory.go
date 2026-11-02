@@ -214,11 +214,11 @@ func (r *dirReader) deviceRecord() (*DirectoryDevice, error) {
 	}
 
 	tail := r.b[r.pos:]
-	renewal, digest, tailOK := parseRecordTail(tail)
+	renewal, digest, role, tailLen, tailOK := parseRecordTail(tail)
 	if !tailOK {
-		return fail(fmt.Errorf("%w: invalid record tail (renewal key / grants digest)", ErrInvalidField))
+		return fail(fmt.Errorf("%w: invalid record tail (renewal key / grants digest / receiver role)", ErrInvalidField))
 	}
-	r.pos += recordTailLen(renewal)
+	r.pos += tailLen
 
 	return &DirectoryDevice{
 		DeviceID:             string(deviceID),
@@ -230,33 +230,35 @@ func (r *dirReader) deviceRecord() (*DirectoryDevice, error) {
 		SignPublicKey:        append([]byte{}, signKey...),
 		RenewalSignPublicKey: append([]byte{}, renewal...),
 		GrantsDigest:         append([]byte{}, digest...),
+		ReceiverRole:         role,
 	}, nil
 }
 
-// parseRecordTail parses `renewal? NUL digest(32)` from the remaining
-// transcript bytes, trying both the empty-renewal and the
-// 32-byte-renewal interpretations. The interpretation is accepted only
-// when it is the unique one that parses: the remainder (after the
-// digest) must be empty or start with the record separator NUL, and if
-// both interpretations satisfy that, the tail is ambiguous and must be
-// rejected by the caller (ok=false).
-func parseRecordTail(tail []byte) (renewal, digest []byte, ok bool) {
-	if len(tail) < 1+SizeDigest {
-		return nil, nil, false
-	}
-	emptyOK := tail[0] == 0x00 && tailEndsRecord(tail[1+SizeDigest:])
-	presentOK := len(tail) >= SizeEd25519Key+1+SizeDigest &&
+// parseRecordTail parses `renewal? NUL digest(32) role(1)` from the
+// remaining transcript bytes, trying both the empty-renewal and the
+// 32-byte-renewal interpretations. After the digest comes exactly one
+// receiver_role byte (design v0.8 §14.4: 0 none, 1 primary, 2 inbox),
+// and the record must then end cleanly or be followed by the single NUL
+// separator. The interpretation is accepted only when it is the unique
+// one that parses to a clean end: anything ambiguous is rejected.
+func parseRecordTail(tail []byte) (renewal, digest []byte, role uint8, consumed int, ok bool) {
+	emptyLen := 1 + SizeDigest + 1
+	presentLen := SizeEd25519Key + 1 + SizeDigest + 1
+	emptyOK := len(tail) >= emptyLen &&
+		tail[0] == 0x00 &&
+		tailEndsRecord(tail[emptyLen:])
+	presentOK := len(tail) >= presentLen &&
 		tail[SizeEd25519Key] == 0x00 &&
-		tailEndsRecord(tail[SizeEd25519Key+1+SizeDigest:])
+		tailEndsRecord(tail[presentLen:])
 	switch {
 	case emptyOK && presentOK:
-		return nil, nil, false // ambiguous: reject rather than guess
+		return nil, nil, 0, 0, false // ambiguous: reject rather than guess
 	case emptyOK:
-		return nil, tail[1 : 1+SizeDigest], true
+		return nil, tail[1 : 1+SizeDigest], tail[1+SizeDigest], emptyLen, true
 	case presentOK:
-		return tail[:SizeEd25519Key], tail[SizeEd25519Key+1 : SizeEd25519Key+1+SizeDigest], true
+		return tail[:SizeEd25519Key], tail[SizeEd25519Key+1 : SizeEd25519Key+1+SizeDigest], tail[presentLen-1], presentLen, true
 	default:
-		return nil, nil, false
+		return nil, nil, 0, 0, false
 	}
 }
 
@@ -264,13 +266,4 @@ func parseRecordTail(tail []byte) (renewal, digest []byte, ok bool) {
 // transcript or introduce the next record with a single NUL separator.
 func tailEndsRecord(rest []byte) bool {
 	return len(rest) == 0 || rest[0] == 0x00
-}
-
-// recordTailLen returns how many tail bytes the chosen interpretation
-// consumes.
-func recordTailLen(renewal []byte) int {
-	if len(renewal) == 0 {
-		return 1 + SizeDigest
-	}
-	return SizeEd25519Key + 1 + SizeDigest
 }

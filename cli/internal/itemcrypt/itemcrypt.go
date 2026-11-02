@@ -125,6 +125,30 @@ func oneTimeInfo(vaultID, deviceID, itemID, approvalID string, requestCiphertext
 	return crypto.OneTimeItemKeyInfo(vaultID, deviceID, itemID, approvalID, requestCiphertext)
 }
 
+// UnwrapOneTimeMessage opens the decision payload of a MESSAGE approval
+// (design v0.8 §14.5): the approver HPKE-sealed the message plaintext
+// JSON — not a key — to the request's ephemeral public key under the
+// one-time-message-key binding (purpose + message, approval and request
+// digest). The plaintext lands directly in guarded memory; the caller
+// extracts the body, injects it and destroys the buffer (§16: sms
+// values never reach the cache or the keyring).
+func UnwrapOneTimeMessage(vaultID, deviceID, messageID, approvalID string, requestCiphertext, enc, wrappedKey, hpkePrivate []byte) (*secret.Plaintext, error) {
+	info, err := crypto.OneTimeMessageKeyInfo(vaultID, deviceID, messageID, approvalID, requestCiphertext)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	pt, err := crypto.UnwrapKey(wire.KEMX25519, hpkePrivate, info, enc, wrappedKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	value, err := secret.NewPlaintextFromBytes(pt)
+	if err != nil {
+		secret.Wipe(pt)
+		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	return value, nil
+}
+
 // Meta is the decrypted meta plaintext of an item (design.md §6.1).
 // list and get display these fields; they never decrypt the secret.
 type Meta struct {

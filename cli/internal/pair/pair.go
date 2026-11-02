@@ -39,6 +39,10 @@ const syncCursorKV = "cursor"
 
 // Options controls one pairing run.
 type Options struct {
+	// Kind declares the device kind on the QR (protocol §9.1 `t`):
+	// "cli" (default) or "decider" (design v0.8 §14.8). The owner's
+	// confirmation copy and the pair/complete device.kind follow it.
+	Kind         string
 	Name         string        // proposed device label (≤32 bytes)
 	PrintPayload bool          // also print the raw payload line for tests
 	PollTimeout  time.Duration // total wait for the human
@@ -52,9 +56,14 @@ type Options struct {
 //
 // with RFC 3986 percent-encoding of the base64 and UTF-8 fields
 // (docs/protocol.md §9.1).
-func Payload(origin string, hpkePub, signPub []byte, nonceHex, name string) string {
+func Payload(origin string, hpkePub, signPub []byte, nonceHex, name string, kind ...string) string {
 	v := url.Values{}
 	v.Set("v", "1")
+	// t is optional and defaults to cli; emit it only when it says
+	// something (old QR compatibility, protocol §9.1).
+	if len(kind) > 0 && kind[0] != "" && kind[0] != "cli" {
+		v.Set("t", kind[0])
+	}
 	v.Set("k", base64.StdEncoding.EncodeToString(hpkePub))
 	v.Set("s", base64.StdEncoding.EncodeToString(signPub))
 	v.Set("n", nonceHex)
@@ -109,7 +118,7 @@ func Run(st *store.Store, cl *client.Client, id *device.Identity, opts Options) 
 	}
 
 	origin := cl.Origin()
-	payload := Payload(origin, id.HPKEPublic, id.SignPublic, nonceHex, opts.Name)
+	payload := Payload(origin, id.HPKEPublic, id.SignPublic, nonceHex, opts.Name, opts.Kind)
 	if err := qr.Print(opts.Stdout, payload); err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@
 package wire
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -36,6 +37,12 @@ const (
 	SizeDigest     = 32
 	SizeChallenge  = 32
 	SizePairNonce  = 16
+	// SizeMessageWrappedKey is the HPKE ciphertext that wraps one 32-byte
+	// message key in a §3.9 envelope record: 32 bytes of ciphertext plus
+	// the 16-byte AEAD tag. It is an ordinary HPKE wrap (enc ‖ ct) like
+	// every other key wrap in §3.7 — no extra nonce, since HPKE derives
+	// one from the context.
+	SizeMessageWrappedKey = SizeX25519Key + 16
 )
 
 // Algorithm identifiers carried in the devices table and in JSON
@@ -48,10 +55,21 @@ const (
 	SignAlgECDSAP256 = "ecdsa-p256"
 )
 
-// Device kinds and statuses (design §6.3).
+// Device kinds and statuses (design §6.3; source/decider added in
+// design v0.8 §14 — the SMS collector and the optional auto-approval
+// delegate. Neither ever holds grants: its GrantsDigest is the SHA-256
+// of the empty string, §3.3).
 const (
-	DeviceKindIOS = "ios"
-	DeviceKindCLI = "cli"
+	DeviceKindIOS     = "ios"
+	DeviceKindCLI     = "cli"
+	DeviceKindSource  = "source"
+	DeviceKindDecider = "decider"
+
+	// Directory device receiver roles (design v0.8 §14.4), carried as one
+	// byte at the end of every directory device record.
+	ReceiverRoleNone    uint8 = 0
+	ReceiverRolePrimary uint8 = 1
+	ReceiverRoleInbox   uint8 = 2
 
 	DeviceStatusPending = "pending"
 	DeviceStatusActive  = "active"
@@ -329,7 +347,7 @@ func GrantsDigest(grants []GrantTranscript) ([]byte, error) {
 // (protocol §3.3).
 type DirectoryDevice struct {
 	DeviceID             string
-	Kind                 string // ios | cli
+	Kind                 string // ios | cli | source | decider
 	Status               string // pending | active | revoked
 	HPKEKEM              string // X25519 | P-256
 	HPKEPublicKey        []byte
@@ -337,6 +355,10 @@ type DirectoryDevice struct {
 	SignPublicKey        []byte
 	RenewalSignPublicKey []byte // Ed25519, zero length when the device has none
 	GrantsDigest         []byte // 32-byte SHA-256 from GrantsDigest
+	// ReceiverRole designates the SMS inbox role (design v0.8 §14.4):
+	// 0 none, 1 primary receiver (at most one per vault, kind ios only),
+	// 2 inbox. Every non-ios device row must carry 0.
+	ReceiverRole uint8
 }
 
 // DirectoryTranscript is the structured form of the signed device
@@ -351,8 +373,11 @@ func validateDirectoryDevice(d DirectoryDevice) error {
 	if err := requireID("device_id", d.DeviceID); err != nil {
 		return err
 	}
-	if d.Kind != DeviceKindIOS && d.Kind != DeviceKindCLI {
-		return fmt.Errorf("%w: kind must be %q or %q", ErrInvalidField, DeviceKindIOS, DeviceKindCLI)
+	switch d.Kind {
+	case DeviceKindIOS, DeviceKindCLI, DeviceKindSource, DeviceKindDecider:
+	default:
+		return fmt.Errorf("%w: kind must be one of %q %q %q %q", ErrInvalidField,
+			DeviceKindIOS, DeviceKindCLI, DeviceKindSource, DeviceKindDecider)
 	}
 	if d.Status != DeviceStatusPending && d.Status != DeviceStatusActive && d.Status != DeviceStatusRevoked {
 		return fmt.Errorf("%w: status must be %q, %q or %q", ErrInvalidField,
@@ -369,6 +394,15 @@ func validateDirectoryDevice(d DirectoryDevice) error {
 	}
 	if len(d.GrantsDigest) != SizeDigest {
 		return fmt.Errorf("%w: grants_digest must be %d bytes", ErrInvalidField, SizeDigest)
+	}
+	switch d.ReceiverRole {
+	case ReceiverRoleNone:
+	case ReceiverRolePrimary, ReceiverRoleInbox:
+		if d.Kind != DeviceKindIOS {
+			return fmt.Errorf("%w: receiver roles are reserved for ios devices", ErrInvalidField)
+		}
+	default:
+		return fmt.Errorf("%w: receiver_role must be 0, 1 or 2", ErrInvalidField)
 	}
 	return nil
 }
@@ -430,6 +464,7 @@ func BuildDirectoryTranscript(t DirectoryTranscript) ([]byte, error) {
 		b = append(b, d.RenewalSignPublicKey...)
 		b = appendSep(b)
 		b = append(b, d.GrantsDigest...)
+		b = append(b, d.ReceiverRole)
 	}
 	return b, nil
 }
@@ -598,4 +633,132 @@ func BuildVaultRecoveryTranscript(vaultID string, recoveryWrap []byte, recoveryK
 	b = appendSep(b)
 	b = append(b, recoverySignPub...)
 	return b, nil
+}
+
+// MessageStatus values of a stored SMS verification code (design v0.8
+// §14.3). consumed is a one-way flag set in the same transaction that
+// delivers the approval decision; the ciphertext itself is deleted at
+// TTL expiry.
+const (
+	MessageStatusActive   = "active"
+	MessageStatusConsumed = "consumed"
+)
+
+// MessageUploadTranscript is the structured form of the upload
+// transcript signed by the source device (protocol §3.9).
+type MessageUploadTranscript struct {
+	VaultID        string
+	SourceDeviceID string
+	ReceivedAt     uint64 // device-reported SMS arrival time (advisory only)
+	Envelope       []byte
+}
+
+// BuildMessageUploadTranscript assembles the signed transcript bytes:
+//
+//	"KEYREF1" NUL "message-upload" NUL vault_id(hex) NUL
+//	source_device_id(hex) NUL u64be(received_at) NUL envelope
+//
+// There is no trailing NUL. The envelope is opaque to the server; the
+// signature binds it to the vault and the uploading device so a stolen
+// bearer token alone cannot forge uploads (design §14.3).
+func BuildMessageUploadTranscript(t MessageUploadTranscript) ([]byte, error) {
+	if err := requireID("vault_id", t.VaultID); err != nil {
+		return nil, err
+	}
+	if err := requireID("source_device_id", t.SourceDeviceID); err != nil {
+		return nil, err
+	}
+	if len(t.Envelope) == 0 {
+		return nil, fmt.Errorf("%w: envelope must not be empty", ErrInvalidField)
+	}
+	b := beginTranscript("message-upload")
+	b = append(b, t.VaultID...)
+	b = appendSep(b)
+	b = append(b, t.SourceDeviceID...)
+	b = appendSep(b)
+	b = appendU64(b, t.ReceivedAt)
+	b = appendSep(b)
+	b = append(b, t.Envelope...)
+	return b, nil
+}
+
+// DelegationTranscript is the structured form of the owner-signed
+// auto-approval delegation policy (protocol §3.10, design v0.8 §14.8).
+// The policy JSON is plaintext by design: the decider must read it, the
+// server only verifies the signature (the one new plaintext surface the
+// feature adds, recorded in design §6.4).
+type DelegationTranscript struct {
+	VaultID            string
+	DelegationRevision uint64
+	PolicyJSON         string
+}
+
+// BuildDelegationTranscript assembles:
+//
+//	"KEYREF1" NUL "delegation" NUL vault_id(hex) NUL
+//	u64be(delegation_revision) NUL policy_json(utf-8)
+//
+// An empty delegation (revocation) is {"v":1} — no sender allowlist, so
+// nothing is ever auto-approved.
+func BuildDelegationTranscript(t DelegationTranscript) ([]byte, error) {
+	if err := requireID("vault_id", t.VaultID); err != nil {
+		return nil, err
+	}
+	if !utf8.ValidString(t.PolicyJSON) {
+		return nil, fmt.Errorf("%w: policy_json must be valid utf-8", ErrInvalidField)
+	}
+	if len(t.PolicyJSON) == 0 || len(t.PolicyJSON) > 16<<10 {
+		return nil, fmt.Errorf("%w: policy_json must be 1..16384 bytes", ErrInvalidField)
+	}
+	b := beginTranscript("delegation")
+	b = append(b, t.VaultID...)
+	b = appendSep(b)
+	b = appendU64(b, t.DelegationRevision)
+	b = appendSep(b)
+	b = append(b, t.PolicyJSON...)
+	return b, nil
+}
+
+// ParseDelegationTranscript rebuilds the structured form of a signed
+// delegation transcript and verifies it round-trips byte-for-byte (the
+// §1.5 rule: rebuild-and-compare, never trust a naive split). The parse
+// is positional, not split-based: the revision is fixed-width u64be and
+// its zero bytes would poison any NUL-counting splitter. The transcript
+// carries no binary fields beyond that — vault_id is lowercase hex,
+// policy_json is UTF-8 JSON whose strings escape control bytes — so a
+// tampered byte shows up as a rebuild mismatch or an invalid field.
+func ParseDelegationTranscript(signed []byte, wantVaultID string) (DelegationTranscript, error) {
+	var t DelegationTranscript
+	fail := func() (DelegationTranscript, error) {
+		return t, fmt.Errorf("%w: malformed delegation transcript", ErrInvalidField)
+	}
+	prefix := append(append([]byte{}, TranscriptPrefix...), fieldSep)
+	prefix = append(prefix, "delegation"...)
+	prefix = append(prefix, fieldSep)
+	if len(signed) < len(prefix)+1 || string(signed[:len(prefix)]) != string(prefix) {
+		return fail()
+	}
+	rest := signed[len(prefix):]
+	nul := bytes.IndexByte(rest, fieldSep)
+	if nul < 0 {
+		return fail()
+	}
+	vaultID := string(rest[:nul])
+	p := nul + 1
+	if len(rest) < p+8+1 || rest[p+8] != fieldSep {
+		return fail()
+	}
+	rev := binary.BigEndian.Uint64(rest[p : p+8])
+	policy := string(rest[p+9:])
+	if vaultID != wantVaultID {
+		return fail()
+	}
+	t.VaultID = vaultID
+	t.DelegationRevision = rev
+	t.PolicyJSON = policy
+	rebuilt, err := BuildDelegationTranscript(t)
+	if err != nil || !bytes.Equal(rebuilt, signed) {
+		return fail()
+	}
+	return t, nil
 }

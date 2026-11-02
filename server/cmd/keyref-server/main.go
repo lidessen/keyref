@@ -35,6 +35,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/lidessen/keyref/server/internal/api"
 	"github.com/lidessen/keyref/server/internal/apns"
@@ -130,13 +131,20 @@ func serve(args []string) error {
 	if push == nil {
 		log.Printf("keyref-server: push disabled: %s", pushWhy)
 	}
+	pairLimit := 0
+	if v := os.Getenv("KEYREF_PAIR_REGISTER_PER_MINUTE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			pairLimit = n
+		}
+	}
 	handler := api.New(st, quotas.NewManager(st), pow.NewIssuer(), api.Config{
-		EnforceQuotas: os.Getenv("KEYREF_ENFORCE_QUOTAS") == "1",
-		Version:       version,
-		Commit:        commit,
-		Origin:        origin,
-		DataDir:       dataDir(),
-		Push:          push,
+		EnforceQuotas:         os.Getenv("KEYREF_ENFORCE_QUOTAS") == "1",
+		PairRegisterPerMinute: pairLimit,
+		Version:               version,
+		Commit:                commit,
+		Origin:                origin,
+		DataDir:               dataDir(),
+		Push:                  push,
 	}).Handler()
 
 	return httpserver.Run(handler, st, httpserver.Options{

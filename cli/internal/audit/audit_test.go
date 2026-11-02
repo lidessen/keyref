@@ -128,6 +128,56 @@ func TestSealEnvelopeRoundtrip(t *testing.T) {
 	}
 }
 
+// TestEventDecisionDeviceID pins the optional decision_device_id of the
+// audit plaintext (design v0.8 §14.5/§14.8, protocol §6.23/D19): the key
+// carries the deciding device when an approval decided the run and is
+// omitted entirely otherwise. The consumed subject stays in refs as
+// sms:<id> — no second message-id field.
+func TestEventDecisionDeviceID(t *testing.T) {
+	decider := "99998888777766665555444433332211"
+	decided := Event{
+		Time: 1, DeviceID: "0123456789abcdef0123456789abcdef",
+		Refs:         []string{"sms:00112233445566778899aabbccddeeff"},
+		Injection:    []string{"env"},
+		Argv:         []string{"curl"},
+		PolicyResult: "allow", ApprovalResult: "approved",
+		DecisionDeviceID: decider, ChildExit: 0, Redactions: 1,
+	}
+	blob, err := json.Marshal(decided)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(blob, []byte(`"decision_device_id":"`+decider+`"`)) {
+		t.Fatalf("event lost decision_device_id: %s", blob)
+	}
+	if !bytes.Contains(blob, []byte(`"refs":["sms:00112233445566778899aabbccddeeff"]`)) {
+		t.Fatalf("subject must stay in refs: %s", blob)
+	}
+	if bytes.Contains(blob, []byte("message_id")) {
+		t.Fatalf("event must not add a second message-id field: %s", blob)
+	}
+
+	// A run no approval decided omits the key (omitempty), and the
+	// shape still decodes.
+	plain := decided
+	plain.ApprovalResult = ""
+	plain.DecisionDeviceID = ""
+	blob, err = json.Marshal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(blob, []byte("decision_device_id")) {
+		t.Fatalf("event without a decision carried the key: %s", blob)
+	}
+	var back Event
+	if err := json.Unmarshal(blob, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.DecisionDeviceID != "" || back.PolicyResult != "allow" {
+		t.Fatalf("decoded event: %+v", back)
+	}
+}
+
 func TestSealEnvelopeNeedsRecipient(t *testing.T) {
 	evtJSON := []byte(`{}`)
 	if _, err := SealEnvelope(evtJSON, "v", "d", nil); err == nil {
