@@ -50,6 +50,11 @@ type Redactor struct {
 // heap rather than being skipped — a missing needle would silently
 // weaken redaction, which is worse than a §12.2 residual.
 func NewRedactor(secrets map[string][]byte) *Redactor {
+	return newRedactor(secrets, nil)
+}
+
+// A fixed replacement avoids copying any reference into the stream.
+func newRedactor(secrets map[string][]byte, fixedReplacement []byte) *Redactor {
 	r := &Redactor{window: 16}
 	refs := make([]string, 0, len(secrets))
 	for ref := range secrets {
@@ -65,7 +70,10 @@ func NewRedactor(secrets map[string][]byte) *Redactor {
 			// spinning in place forever. Nothing to redact — skip it.
 			continue
 		}
-		replacement := []byte("<redacted:" + ref + ">")
+		replacement := fixedReplacement
+		if replacement == nil {
+			replacement = []byte("<redacted:" + ref + ">")
+		}
 		for _, variant := range guardedVariants(secret) {
 			dup := false
 			for _, n := range r.needles {

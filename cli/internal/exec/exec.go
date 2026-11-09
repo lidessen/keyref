@@ -1,20 +1,26 @@
 package exec
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+	"unicode/utf8"
 
 	osexec "os/exec"
 
 	"github.com/awnumar/memguard"
 
+	"github.com/lidessen/keyref/cli/internal/exitcode"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 	"github.com/lidessen/keyref/cli/internal/secret"
 )
@@ -25,9 +31,10 @@ import (
 // the policy checks pass — a rejected exec then never decrypts the
 // secret at all (design.md §7.3: all checks happen before spawn).
 type ResolvedRef struct {
-	Ref   string
-	Meta  *itemcrypt.Meta
-	Value *secret.Plaintext // guarded; destroyed by Run
+	Ref      string
+	Meta     *itemcrypt.Meta
+	Value    *secret.Plaintext // guarded; destroyed by Run
+	Username *secret.Plaintext // guarded; only resolved for --stdin-login
 	// Message marks an sms:<message_id> ref (design v0.8 §14.5). Such a
 	// ref has no item meta and no item policy: its only gate is the
 	// per-consumption approval round, so every item-level check below
@@ -90,6 +97,7 @@ type Request struct {
 	EnvRefs    []string // NAME=REF
 	PassNames  []string // NAME from the caller environment
 	StdinRef   string
+	LoginRef   string   // username then value from one synced item on stdin
 	FdRefs     []string // N=REF
 	FdTemplate string
 	FdRaw      bool
@@ -129,6 +137,7 @@ func Run(req *Request) int {
 	defer func() {
 		for _, rr := range req.Refs {
 			rr.Value.Destroy()
+			rr.Username.Destroy()
 		}
 	}()
 
@@ -157,6 +166,10 @@ func baseOutcome(req *Request) *Outcome {
 	if req.StdinRef != "" {
 		usedRefs[req.StdinRef] = true
 		injection["stdin"] = true
+	}
+	if req.LoginRef != "" {
+		usedRefs[req.LoginRef] = true
+		injection["stdin-login"] = true
 	}
 	if req.Pty {
 		injection["pty"] = true
@@ -203,6 +216,13 @@ func run(req *Request) (int, *Outcome) {
 	outcome := baseOutcome(req)
 	deny := func(code int, state string) (int, *Outcome) {
 		return code, outcome.deny(state)
+	}
+
+	if req.LoginRef != "" {
+		if reason := loginPreflight(req); reason != "" {
+			fmt.Fprintln(req.Stderr, "keyref:", reason)
+			return deny(exitcode.PolicyRejection, "login-policy")
+		}
 	}
 
 	// design §14.5: there is no argv placeholder form for a message —
@@ -386,6 +406,14 @@ func run(req *Request) (int, *Outcome) {
 		rr.Value = pt
 	}
 
+	if req.LoginRef != "" {
+		login := req.Refs[req.LoginRef]
+		if !validLoginLine(login.Username.Bytes()) || !validLoginLine(login.Value.Bytes()) {
+			fmt.Fprintln(req.Stderr, "keyref: --stdin-login requires two nonempty UTF-8 fields of at most 1024 bytes without CR, LF or NUL")
+			return deny(exitcode.InjectionInvalid, "login-fields")
+		}
+	}
+
 	// fd payloads (render + validate before spawn, design.md §15). The
 	// rendered template is a guarded buffer (design.md §12.2).
 	var fdPayloads map[int][]byte
@@ -474,7 +502,13 @@ func run(req *Request) (int, *Outcome) {
 			secrets[ref] = rr.Value.Bytes()
 		}
 	}
-	stdoutRed := NewRedactor(secrets)
+	var replacement []byte
+	if req.LoginRef != "" {
+		// A CLI argument cannot carry a NUL, so this key cannot collide with a ref.
+		secrets["\x00"] = req.Refs[req.LoginRef].Username.Bytes()
+		replacement = []byte("***")
+	}
+	stdoutRed := newRedactor(secrets, replacement)
 	defer stdoutRed.Destroy()
 	stdoutRed.Attach(req.Stdout)
 
@@ -529,7 +563,24 @@ func run(req *Request) (int, *Outcome) {
 		extra = append(extra, fill)
 	}
 
-	cmd := osexec.Command(argv[0], argv[1:]...)
+	var cmd *osexec.Cmd
+	if req.LoginRef != "" {
+		// Stay in the caller's group so a fixed launcher can cancel Keyref
+		// and its child together, even when using SIGKILL.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		cmd = osexec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.WaitDelay = time.Second
+		login := req.Refs[req.LoginRef]
+		cmd.Stdin = io.MultiReader(
+			bytes.NewReader(login.Username.Bytes()), strings.NewReader("\n"),
+			bytes.NewReader(login.Value.Bytes()), strings.NewReader("\n"),
+		)
+	} else {
+		cmd = osexec.Command(argv[0], argv[1:]...)
+		// This group lets a redaction failure kill the whole tree.
+		cmd.SysProcAttr = childSysProcAttr()
+	}
 	cmd.Env = childEnv
 	// Core dumps are disabled process-wide before the spawn and
 	// inherited by the child (design.md §7.2, §7.5).
@@ -543,7 +594,7 @@ func run(req *Request) (int, *Outcome) {
 		return runPtyChild(req, cmd, stdoutRed, secrets, extra, outcome, deny)
 	}
 
-	stderrRed := NewRedactor(secrets)
+	stderrRed := newRedactor(secrets, replacement)
 	defer stderrRed.Destroy()
 	stderrRed.Attach(req.Stderr)
 	cmd.ExtraFiles = extra
@@ -565,15 +616,6 @@ func run(req *Request) (int, *Outcome) {
 			_ = stdinPipe.Close()
 		}(req.StdinRef)
 	}
-	// own process group so a redaction failure kills the whole tree
-	// (design.md §7.4). Linux PR_SET_DUMPABLE=0 needs child-side
-	// support and is not claimed here (design.md §7.2).
-	cmd.SysProcAttr = childSysProcAttr()
-
-	if serr := cmd.Start(); serr != nil {
-		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %v\n", serr)
-		return deny(18, "cannot-start")
-	}
 	kill := func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -584,6 +626,11 @@ func run(req *Request) (int, *Outcome) {
 	}
 	stdoutRed.OnFail = kill
 	stderrRed.OnFail = kill
+
+	if serr := cmd.Start(); serr != nil {
+		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %v\n", serr)
+		return deny(18, "cannot-start")
+	}
 
 	werr := cmd.Wait()
 
@@ -621,6 +668,43 @@ func run(req *Request) (int, *Outcome) {
 	outcome.Redactions = stdoutRed.Count() + stderrRed.Count()
 	outcome.PolicyState = "allow"
 	return childExit, outcome
+}
+
+// loginPreflight requires explicit command consent and keeps both login fields
+// on stdin. An unrelated environment or fd injection remains independent.
+func loginPreflight(req *Request) string {
+	if req.StdinRef != "" || req.Pty {
+		return "--stdin-login cannot be combined with --stdin or --pty"
+	}
+	if strings.HasPrefix(req.LoginRef, MessageRefPrefix) {
+		return "--stdin-login requires a synchronized item"
+	}
+	if len(req.Argv) == 0 || !filepath.IsAbs(req.Argv[0]) || HasArgvPlaceholder(req.Argv[:1]) {
+		return "--stdin-login requires a literal absolute command path"
+	}
+	if rr := req.Refs[req.LoginRef]; rr != nil && rr.Meta != nil && len(rr.Meta.Policy.AllowCommands) == 0 {
+		return "--stdin-login requires an explicit allowCommands policy for the item"
+	}
+	for _, spec := range req.EnvRefs {
+		if _, ref, err := splitEnvSpec(spec); err == nil && ref == req.LoginRef {
+			return "--stdin-login cannot also inject the login item through --env"
+		}
+	}
+	for _, spec := range req.FdRefs {
+		if _, ref, err := splitFdSpec(spec); err == nil && ref == req.LoginRef {
+			return "--stdin-login cannot also inject the login item through --fd"
+		}
+	}
+	for _, ref := range ArgvPlaceholderRefs(req.Argv) {
+		if ref == req.LoginRef {
+			return "--stdin-login cannot also inject the login item in argv"
+		}
+	}
+	return ""
+}
+
+func validLoginLine(value []byte) bool {
+	return len(value) > 0 && len(value) <= 1024 && utf8.Valid(value) && bytes.IndexAny(value, "\r\n\x00") == -1
 }
 
 func (o *Outcome) addRef(ref string) {

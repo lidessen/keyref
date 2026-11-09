@@ -188,8 +188,12 @@ func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision app
 	if !foundRef {
 		t.Fatalf("approval transcript refs missing %q: %v", wantRef, rq.Refs)
 	}
-	if !strings.Contains(rq.Injection, "env") {
-		t.Fatalf("approval transcript injection: %q", rq.Injection)
+	wantInjection := "env"
+	if len(rq.Argv) > 1 && rq.Argv[1] == "login" {
+		wantInjection = "stdin-login"
+	}
+	if !containsString(strings.Split(rq.Injection, ","), wantInjection) {
+		t.Fatal("approval transcript has the wrong injection mode")
 	}
 	if len(rq.Hosts) != 1 || rq.Hosts[0] != "api.example.com" {
 		t.Fatalf("approval transcript hosts: %v", rq.Hosts)

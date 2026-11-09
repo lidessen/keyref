@@ -393,6 +393,11 @@ func (o *owner) putItem(t *testing.T, itemID, ref, masked, secretValue string) {
 // allowCommands and allowedHosts beyond the defaults.
 func (o *owner) putItemPolicy(t *testing.T, itemID, ref, masked, secretValue string, policy map[string]any) {
 	t.Helper()
+	o.putItemFields(t, itemID, ref, masked, "", secretValue, policy)
+}
+
+func (o *owner) putItemFields(t *testing.T, itemID, ref, masked, username, secretValue string, policy map[string]any) {
+	t.Helper()
 	metaKey, itemKey := make([]byte, 32), make([]byte, 32)
 	if _, err := rand.Read(metaKey); err != nil {
 		t.Fatal(err)
@@ -407,7 +412,7 @@ func (o *owner) putItemPolicy(t *testing.T, itemID, ref, masked, secretValue str
 	}
 	metaJSON, _ := json.Marshal(meta)
 	secretJSON, _ := json.Marshal(map[string]any{
-		"v": 1, "value": secretValue, "username": "", "notes": "", "fields": map[string]any{},
+		"v": 1, "value": secretValue, "username": username, "notes": "", "fields": map[string]any{},
 	})
 	metaAAD, _ := crypto.MetaAAD(o.vaultID, itemID)
 	secretAAD, _ := crypto.SecretAAD(o.vaultID, itemID)

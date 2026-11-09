@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/awnumar/memguard"
+
 	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 
@@ -197,23 +199,12 @@ func DecryptMeta(key *secret.Key, blob []byte, vaultID, itemID string) (*Meta, e
 // plaintext exists only during a single use; §12.2: no heap strings).
 // The caller must Destroy the returned value.
 func DecryptSecretValue(key *secret.Key, blob []byte, vaultID, itemID string) (*secret.Plaintext, error) {
-	aad, err := crypto.SecretAAD(vaultID, itemID)
+	jsonBuf, pt, err := openSecret(key, blob, vaultID, itemID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+		return nil, err
 	}
-	jsonBuf, err := secret.NewPlaintext(len(blob))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
-	}
-	// Open into the guarded buffer: AEAD.Open appends within capacity,
-	// so the plaintext never lands on the Go heap.
-	pt, err := crypto.OpenBlobInto(jsonBuf.Bytes()[:0], key.Bytes(), aad, blob)
-	if err != nil {
-		jsonBuf.Destroy()
-		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
-	}
+	defer jsonBuf.Destroy()
 	value, err := secret.ExtractStringField(pt, "value")
-	jsonBuf.Destroy() // wipes the full decrypted JSON
 	if err != nil {
 		if errors.Is(err, secret.ErrFieldNotFound) || errors.Is(err, secret.ErrSyntax) ||
 			errors.Is(err, secret.ErrNotAString) {
@@ -222,6 +213,44 @@ func DecryptSecretValue(key *secret.Key, blob []byte, vaultID, itemID string) (*
 		return nil, err
 	}
 	return value, nil
+}
+
+// DecryptLoginFields extracts the username and value from one decryption of a
+// synchronized item. The caller owns both guarded fields on success.
+func DecryptLoginFields(key *secret.Key, blob []byte, vaultID, itemID string) (username, value *secret.Plaintext, err error) {
+	jsonBuf, pt, err := openSecret(key, blob, vaultID, itemID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer jsonBuf.Destroy()
+	username, err = secret.ExtractStringField(pt, "username")
+	if err != nil {
+		return nil, nil, err
+	}
+	value, err = secret.ExtractStringField(pt, "value")
+	if err != nil {
+		username.Destroy()
+		return nil, nil, err
+	}
+	return username, value, nil
+}
+
+func openSecret(key *secret.Key, blob []byte, vaultID, itemID string) (*memguard.LockedBuffer, []byte, error) {
+	aad, err := crypto.SecretAAD(vaultID, itemID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	jsonBuf, err := secret.NewPlaintext(len(blob))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	// Open into guarded memory. Exclude any unused capacity from extraction.
+	pt, err := crypto.OpenBlobInto(jsonBuf.Bytes()[:0], key.Bytes(), aad, blob)
+	if err != nil {
+		jsonBuf.Destroy()
+		return nil, nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	return jsonBuf, pt, nil
 }
 
 // unmarshalStrict decodes JSON rejecting unknown fields, so a malformed

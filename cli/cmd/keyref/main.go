@@ -142,6 +142,8 @@ exec flags:
   --env NAME=REF            inject the secret as an environment variable
   --pass NAME               forward NAME from the caller environment
   --stdin REF               write the secret to the child's stdin
+  --stdin-login REF         write a synced item's username and value as two
+                            stdin lines, in that order, to an absolute command
   --fd N=REF --fd-template T | --fd-raw
                             write the (rendered) secret to fd N
   --allow-argv              allow {{keyref:REF}} placeholders in argv;
@@ -491,6 +493,8 @@ func cmdExec(args []string) int {
 	passes := multiFlag{}
 	fs.Var(&passes, "pass", "NAME forward a caller environment variable (repeatable)")
 	stdinRef := fs.String("stdin", "", "REF written to the child's stdin")
+	loginRefs := multiFlag{}
+	fs.Var(&loginRefs, "stdin-login", "REF whose username and value are written as two stdin lines")
 	fds := multiFlag{}
 	fs.Var(&fds, "fd", "N=REF write the (rendered) secret to fd N (repeatable)")
 	fdTemplate := fs.String("fd-template", "", "template with one {{keyref}} token (RFC 7230 header-value charset)")
@@ -510,6 +514,16 @@ func cmdExec(args []string) int {
 	if len(argv) == 0 {
 		return fatalf(2, "usage: keyref exec [flags] -- <argv>")
 	}
+	var loginRef string
+	if len(loginRefs) > 0 {
+		if len(loginRefs) != 1 || loginRefs[0] == "" || *stdinRef != "" || *pty {
+			return fatalf(exitcode.PolicyRejection, "--stdin-login requires one ref and cannot be combined with --stdin or --pty")
+		}
+		if *timeoutSecs < 1 || *timeoutSecs > 120 {
+			return fatalf(exitcode.PolicyRejection, "--stdin-login requires an approval timeout of 1 to 120 seconds")
+		}
+		loginRef = loginRefs[0]
+	}
 	var parsedReplies []exec.Reply
 	for _, spec := range replies {
 		rp, err := exec.ParseReply(spec)
@@ -519,7 +533,7 @@ func cmdExec(args []string) int {
 		parsedReplies = append(parsedReplies, rp)
 	}
 	return runExecCore(execOptions{
-		EnvRefs: envs, PassNames: passes, StdinRef: *stdinRef,
+		EnvRefs: envs, PassNames: passes, StdinRef: *stdinRef, LoginRef: loginRef,
 		FdRefs: fds, FdTemplate: *fdTemplate, FdRaw: *fdRaw,
 		AllowArgv: *allowArgv, Pty: *pty, Replies: parsedReplies,
 		Timeout: time.Duration(*timeoutSecs) * time.Second,
@@ -536,6 +550,7 @@ type execOptions struct {
 	EnvRefs    []string
 	PassNames  []string
 	StdinRef   string
+	LoginRef   string
 	FdRefs     []string
 	FdTemplate string
 	FdRaw      bool
@@ -636,6 +651,7 @@ func runExecCore(opts execOptions) int {
 		addRef(ref)
 	}
 	addRef(opts.StdinRef)
+	addRef(opts.LoginRef)
 	for _, rp := range opts.Replies {
 		addRef(rp.Ref)
 	}
@@ -689,13 +705,14 @@ func runExecCore(opts execOptions) int {
 		if m.Policy.Sensitivity == "approval" {
 			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, opts, refs[ref], itemIDs[ref], appr)
 		}
-		return resolveValueFor(st, id, vaultID, ownerPub, ref, itemIDs[ref])
+		return resolveValueFor(st, id, vaultID, ownerPub, refs[ref], itemIDs[ref], ref == opts.LoginRef)
 	}
 
 	req := &exec.Request{
 		EnvRefs:      opts.EnvRefs,
 		PassNames:    opts.PassNames,
 		StdinRef:     opts.StdinRef,
+		LoginRef:     opts.LoginRef,
 		FdRefs:       opts.FdRefs,
 		FdTemplate:   opts.FdTemplate,
 		FdRaw:        opts.FdRaw,
@@ -770,6 +787,10 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 	// Local item: the unwrap result IS the secret value (guarded); it is
 	// used once and wiped by exec.Run (design §6.6: 解开即用、即清).
 	if len(it.SecretCiphertext) == 0 {
+		if rr.Ref == opts.LoginRef {
+			fmt.Fprintln(opts.Stderr, "keyref: --stdin-login requires a synchronized item")
+			return nil, exitcode.InjectionInvalid, "login-not-synced"
+		}
 		value, code, state := approval.RequestSecret(&approval.Options{
 			VaultID:   vaultID,
 			DeviceID:  deviceID,
@@ -791,13 +812,17 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 		}
 		return value, 0, ""
 	}
+	displayRef := rr.Ref
+	if rr.Ref == opts.LoginRef {
+		displayRef = "the login item"
+	}
 	key, code, state := approval.RequestItemKey(&approval.Options{
 		VaultID:   vaultID,
 		DeviceID:  deviceID,
 		Identity:  id,
 		Owners:    auditRecips,
 		ItemID:    itemID,
-		Ref:       rr.Ref,
+		Ref:       displayRef,
 		Argv:      opts.Argv,
 		Refs:      refsOf(opts),
 		Injection: injectionModes(opts),
@@ -811,12 +836,7 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 		return nil, code, state
 	}
 	defer key.Destroy()
-	value, err := itemcrypt.DecryptSecretValue(key, it.SecretCiphertext, vaultID, itemID)
-	if err != nil {
-		fmt.Fprintf(opts.Stderr, "keyref: cannot decrypt secret for %s\n", rr.Ref)
-		return nil, exitcode.UnwrapFailed, "unwrap-failed"
-	}
-	return value, 0, ""
+	return decryptExecValue(opts.Stderr, key, it.SecretCiphertext, vaultID, itemID, rr, rr.Ref == opts.LoginRef)
 }
 
 // resolveMessageViaApproval runs the §14.5 consumption round for one
@@ -893,6 +913,7 @@ func refsOf(opts execOptions) []string {
 		}
 	}
 	add(opts.StdinRef)
+	add(opts.LoginRef)
 	for _, rp := range opts.Replies {
 		add(rp.Ref)
 	}
@@ -916,6 +937,9 @@ func injectionModes(opts execOptions) []string {
 	if opts.StdinRef != "" {
 		modes["stdin"] = true
 	}
+	if opts.LoginRef != "" {
+		modes["stdin-login"] = true
+	}
 	if opts.Pty {
 		modes["pty"] = true
 	}
@@ -933,9 +957,30 @@ func injectionModes(opts execOptions) []string {
 	return out
 }
 
+// decryptExecValue projects the authorized item into its requested fields.
+func decryptExecValue(stderr io.Writer, key *secret.Key, blob []byte, vaultID, itemID string, rr *exec.ResolvedRef, login bool) (*secret.Plaintext, int, string) {
+	var value *secret.Plaintext
+	var err error
+	if login {
+		rr.Username, value, err = itemcrypt.DecryptLoginFields(key, blob, vaultID, itemID)
+		if errors.Is(err, secret.ErrFieldNotFound) || errors.Is(err, secret.ErrNotAString) {
+			fmt.Fprintln(stderr, "keyref: --stdin-login requires string username and value fields")
+			return nil, exitcode.InjectionInvalid, "login-fields"
+		}
+	} else {
+		value, err = itemcrypt.DecryptSecretValue(key, blob, vaultID, itemID)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "keyref: cannot decrypt secret for %s\n", rr.Ref)
+		return nil, exitcode.UnwrapFailed, "unwrap-failed"
+	}
+	return value, 0, ""
+}
+
 // resolveValueFor decrypts the guarded secret value of one ref using
 // its live use grant. Exit codes follow §7.6: 16 unwrap failure.
-func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, ref, itemID string) (*secret.Plaintext, int, string) {
+func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, rr *exec.ResolvedRef, itemID string, login bool) (*secret.Plaintext, int, string) {
+	ref := rr.Ref
 	grants, err := st.Grants()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "keyref:", err)
@@ -963,13 +1008,8 @@ func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, owner
 			fmt.Fprintln(os.Stderr, "keyref: item missing from cache; run keyref sync")
 			return nil, 1, "internal"
 		}
-		value, err := itemcrypt.DecryptSecretValue(key, it.SecretCiphertext, vaultID, itemID)
-		key.Destroy()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "keyref: cannot decrypt secret for %s\n", ref)
-			return nil, exitcode.UnwrapFailed, "unwrap-failed"
-		}
-		return value, 0, ""
+		defer key.Destroy()
+		return decryptExecValue(os.Stderr, key, it.SecretCiphertext, vaultID, itemID, rr, login)
 	}
 	fmt.Fprintf(os.Stderr, "keyref: no usable item key for %s (approval items need the approval flow)\n", ref)
 	return nil, exitcode.UnwrapFailed, "no-item-key"

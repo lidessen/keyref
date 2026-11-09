@@ -15,12 +15,37 @@
 | `keyref sync` | 拉取授权范围内的密文 |
 | `keyref list` | 名称、描述、`ref`、掩码。没有明文 |
 | `keyref get <ref>` | 单条的同样视图 |
-| `keyref exec -- ...` | 把秘密注入子进程，脱敏 stdout/stderr；支持 `--env`、`--stdin`、`--fd`、`--pty`/`--reply` |
+| `keyref exec -- ...` | 把秘密注入子进程，脱敏 stdout/stderr；支持 `--env`、`--stdin`、`--stdin-login`、`--fd`、`--pty`/`--reply` |
 | `keyref server` | 查看或设置同步服务器的 URL |
 | `keyref mcp` | stdio 上的 JSON-RPC 2.0（MCP）：工具只有 `list` / `get` / `exec`，语义与 CLI 同构（design §7.8） |
 | `keyref local init\|set\|delete` | 显式管理独立的本地凭据库，不需要配对或同步 |
 
 没有 `reveal`、`export` 或 `--print`。`get` 的 JSON 里不设 `value` 字段。
+
+### 同步登录条目
+
+```sh
+keyref exec --stdin-login login-ref -- /absolute/path/to/consumer
+```
+
+CLI 需要已配对且已解锁，条目须可注入，并通过条目的显式 `allowCommands`
+策略。调用方提供受信子命令的绝对路径，Keyref 的条目策略检查命令名。
+Keyref 对该条目执行一次现有授权流程，
+包括在条目要求审批时等待一次 owner 决定。授权后从同一次解密中读取
+`username` 和 `value`，按此顺序通过子进程的匿名 stdin 管道分别写一行，
+每行以 LF 结束，随后关闭输入。两字段各须为 1 至 1024 字节的 UTF-8，
+不能包含 CR、LF 或 NUL。条目或字段缺失、不支持或验证失败时不启动子进程。
+两字段均加入子进程输出的字节流脱敏，替换标记为 `***`。替换作用于原始字节，
+可能改变 JSON 等机器可读内容。该入口只供 CLI 使用。
+
+`--stdin-login` 与 `--stdin`、`--pty` 互斥。同一条目不能同时用于其他注入
+位置。其他条目的 `--env` 和普通 `--pass` 按原规则处理。Keyref 校验命令策略，
+消费程序校验秘密的实际收值目标。
+
+`--timeout` 仍限定审批等待，不限定子进程运行时长。子进程留在调用方的进程组，
+调用方可以同时取消 Keyref 和子进程。子进程启动后向 Keyref 单独发 SIGINT 或
+SIGTERM 会终止该子进程。已发出的操作仍需按消费程序的回执结算。Keyref 不会在取消、
+超时或子进程退出后自动再发审批或重启子进程。
 
 ### 独立本地凭据库
 

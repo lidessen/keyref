@@ -8,7 +8,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -20,6 +23,20 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "exit42" {
 		os.Exit(42)
+	}
+	if len(os.Args) == 3 && os.Args[1] == "login" {
+		info, err := os.Stdin.Stat()
+		if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			os.Exit(29)
+		}
+		input, err := io.ReadAll(io.LimitReader(os.Stdin, 2051))
+		digest := sha256.Sum256(input)
+		if err != nil || hex.EncodeToString(digest[:]) != os.Args[2] {
+			os.Exit(30)
+		}
+		// The test captures the echo only through Keyref's redactors.
+		_, _ = os.Stdout.Write(input)
+		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "prompt" {
 		fmt.Print("Password: ")

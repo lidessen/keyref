@@ -37,6 +37,12 @@ func helperMain(args []string) {
 	case len(args) > 0 && args[0] == "print-stdin":
 		b, _ := io.ReadAll(os.Stdin)
 		fmt.Printf("STDIN=%s\n", strings.TrimRight(string(b), "\n"))
+	case len(args) > 0 && args[0] == "check-login":
+		checkLoginStdin()
+	case len(args) == 2 && args[0] == "run-login":
+		runLoginForCancellation(args[1])
+	case len(args) == 2 && args[0] == "hold-login":
+		holdLoginForCancellation(args[1])
 	case len(args) > 0 && args[0] == "print-fd3":
 		b, _ := io.ReadAll(os.NewFile(3, "/dev/fd/3"))
 		fmt.Printf("FD3=%s\n", string(b))
