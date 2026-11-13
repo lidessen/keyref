@@ -1,11 +1,14 @@
 package com.lidessen.keyref.source.crypto
 
 import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Byte-exact transcript builders and parsers (docs/protocol.md §3).
  * Everything here must match proto/wire byte-for-byte; the cross-language
- * golden vectors (design §9.2, proto/crypto/testdata) are the gate.
+ * golden vectors (ios/Tests/KeyrefCoreTests/Fixtures/vectors.json, design
+ * §9.2) are the gate — see CryptoVectorsTest.
  */
 object Transcripts {
 
@@ -18,33 +21,93 @@ object Transcripts {
         return out
     }
 
-    private fun begin(kind: String): ByteArray {
+    private fun MutableList<Byte>.put(bytes: ByteArray) {
+        addAll(bytes.toList())
+    }
+
+    private fun begin(kind: String): ArrayList<Byte> {
         val b = ArrayList<Byte>(128)
-        b.addAll(PREFIX.toList()); b.add(FS)
-        b.addAll(kind.toByteArray(Charsets.US_ASCII).toList()); b.add(FS)
-        return b.toByteArray()
+        b.put(PREFIX); b.add(FS)
+        b.put(kind.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        return b
     }
 
     /** §3.5 pair-register 誊本（source 的 Ed25519 签）。 */
     fun pairRegister(nonce: ByteArray, proposedName: String): ByteArray {
         val b = begin("pair-register")
-        b.addAll(nonce.toList()); b.add(FS)
-        b.addAll(proposedName.toByteArray(Charsets.UTF_8))
-        return b
+        b.put(nonce); b.add(FS)
+        b.put(proposedName.toByteArray(Charsets.UTF_8))
+        return b.toByteArray()
     }
 
     /** §3.6 session 誊本。 */
     fun session(deviceId: String, challenge: ByteArray): ByteArray {
         val b = begin("session")
-        b.addAll(deviceId.toByteArray(Charsets.US_ASCII)); b.add(FS)
-        b.addAll(challenge.toList())
-        return b
+        b.put(deviceId.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(challenge)
+        return b.toByteArray()
     }
 
     /**
-     * §3.9 message-upload 誊本（source 的 Ed25519 签，服务器落库前验证）。
-     * receivedAt 是设备自报的短信到达时间；envelope 原始字节直接跟在后面
-     * （二进制可含 NUL，誊本只写不读，§1.5）。
+     * §3.4 pair transcript with an EMPTY grant set: the count is zero and
+     * the trailing NUL separator is still present (BuildPairTranscript
+     * appends u64be(count) NUL before the concatenated grant transcripts).
+     * [nonceHex] enters as the 32 ASCII hex characters, unlike the raw
+     * 16 nonce bytes in §3.5 pair-register. This is also the byte string
+     * the §3.13 pairing MAC covers — the owner builds the same bytes on
+     * the other side of the QR.
+     */
+    fun pairTranscript(
+        vaultId: String,
+        ownerSignPub: ByteArray,
+        nonceHex: String,
+        deviceId: String,
+        kem: String,
+        hpkePub: ByteArray,
+        signAlg: String,
+        signPub: ByteArray,
+        label: String,
+    ): ByteArray {
+        val b = begin("pair")
+        b.put(vaultId.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(ownerSignPub); b.add(FS)
+        b.put(nonceHex.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(deviceId.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(kem.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(hpkePub); b.add(FS)
+        b.put(signAlg.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(signPub); b.add(FS)
+        b.put(label.toByteArray(Charsets.UTF_8)); b.add(FS)
+        b.put(u64be(0)) // grant_count = 0
+        b.add(FS)
+        return b.toByteArray()
+    }
+
+    /**
+     * §3.13 pairing confirmation MAC (protocol v2 D): the owner folds the
+     * QR-only secret c into the completion, and this device recomputes the
+     * same value before it pins the owner key. The server stores the MAC
+     * opaquely — it never sees c, so it cannot forge one.
+     */
+    fun pairConfirmMac(c: ByteArray, kind: String, pairTranscript: ByteArray): ByteArray {
+        require(c.size == 32) { "pairing secret must be 32 bytes" }
+        require(kind == "cli" || kind == "source" || kind == "decider") { "unknown device kind $kind" }
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(c, "HmacSHA256"))
+        mac.update("keyref v1 pair-confirm".toByteArray(Charsets.US_ASCII))
+        mac.update(byteArrayOf(FS))
+        mac.update(kind.toByteArray(Charsets.US_ASCII))
+        mac.update(byteArrayOf(FS))
+        mac.update(pairTranscript)
+        return mac.doFinal()
+    }
+
+    /**
+     * §3.9 message-upload 誊本（source 的 Ed25519 签，protocol v2 C）。
+     * receivedAt 是设备自报的短信到达时间。末字段是信封正文 blob 的
+     * SHA-256（正文由 Envelope.splitBody 按服务器同款严格切分得到），
+     * 包裹记录不签名——owner 之后补写决策器包裹不能使签名失效
+     * （§6.30）。誊本因此定长、与信封大小无关。
      */
     fun messageUpload(
         vaultId: String,
@@ -52,21 +115,22 @@ object Transcripts {
         receivedAt: Long,
         envelope: ByteArray,
     ): ByteArray {
+        val body = Envelope.splitBody(envelope)
         val b = begin("message-upload")
-        b.addAll(vaultId.toByteArray(Charsets.US_ASCII)); b.add(FS)
-        b.addAll(sourceDeviceId.toByteArray(Charsets.US_ASCII)); b.add(FS)
-        b.addAll(u64be(receivedAt).toList()); b.add(FS)
-        b.addAll(envelope.toList())
-        return b
+        b.put(vaultId.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(sourceDeviceId.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(u64be(receivedAt)); b.add(FS)
+        b.put(sha256(body))
+        return b.toByteArray()
     }
 
     /** §3.10 delegation 誊本（owner 已签；本机只验证）。 */
     fun delegation(vaultId: String, revision: Long, policyJson: String): ByteArray {
         val b = begin("delegation")
-        b.addAll(vaultId.toByteArray(Charsets.US_ASCII)); b.add(FS)
-        b.addAll(u64be(revision).toList()); b.add(FS)
-        b.addAll(policyJson.toByteArray(Charsets.UTF_8))
-        return b
+        b.put(vaultId.toByteArray(Charsets.US_ASCII)); b.add(FS)
+        b.put(u64be(revision)); b.add(FS)
+        b.put(policyJson.toByteArray(Charsets.UTF_8))
+        return b.toByteArray()
     }
 
     /**
@@ -79,13 +143,13 @@ object Transcripts {
      */
     fun parseDirectory(directorySigned: ByteArray): List<DeviceRecord> {
         fun fail(what: String): Nothing = throw IllegalArgumentException("bad directory: $what")
-        val prefix = begin("directory")
+        val prefix = begin("directory").toByteArray()
         if (directorySigned.size < prefix.size + 32 + 1 + 8 + 1 ||
             !directorySigned.copyOfRange(0, prefix.size).contentEquals(prefix)
         ) fail("bad prefix")
         var rest = directorySigned.copyOfRange(prefix.size, directorySigned.size)
         val vaultId = rest.copyOfRange(0, 32).toString(Charsets.US_ASCII)
-        if (!vaultId.matches(Regex("^[0-9a-f]{32}$")) || rest[32] != FS) fail("bad vault id")
+        if (!vaultId.matches(ID) || rest[32] != FS) fail("bad vault id")
         rest = rest.copyOfRange(33, rest.size)
         if (rest[8] != FS) fail("bad revision separator")
         rest = rest.copyOfRange(9, rest.size)
@@ -106,7 +170,7 @@ object Transcripts {
                 return b
             }
             val deviceId = str()
-            if (!deviceId.matches(Regex("^[0-9a-f]{32}$"))) fail("bad device id")
+            if (!deviceId.matches(ID)) fail("bad device id")
             val kind = str()
             val status = str()
             val kem = str()
@@ -145,6 +209,8 @@ object Transcripts {
         for (i in maxOf(from, 0) until size) if (this[i] == byte) return i
         return -1
     }
+
+    private val ID = Regex("^[0-9a-f]{32}$")
 
     fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
 }

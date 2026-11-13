@@ -7,7 +7,6 @@ import com.lidessen.keyref.source.crypto.Transcripts
 import com.lidessen.keyref.source.store.SourceState
 import java.security.Security
 import java.security.Signature
-import java.security.spec.ECPublicKeySpec
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -132,15 +131,29 @@ class ApiClient(private val ctx: Context) {
                 val vaultId = body.getString("vault_id")
                 val deviceId = body.getString("device_id")
                 // Pin: verify the §3.4 pair transcript (empty grant set) and
-                // the §3.3 directory signature under the returned owner key,
-                // then run the fail-closed directory shape check (§3.3).
-                val pairTB = buildPairTranscript(
-                    vaultId, ownerPub, hexBytes(nonceHex), deviceId,
+                // the §3.13 pairing MAC under the QR-only secret c, both
+                // before anything is trusted; then verify the §3.3
+                // directory signature under the returned owner key and run
+                // the fail-closed directory shape check (§3.3).
+                val pairTB = Transcripts.pairTranscript(
+                    vaultId, ownerPub, nonceHex, deviceId,
                     "X25519", identity.x25519Public, "ed25519", identity.ed25519Public,
                     "android-source"
                 )
                 if (!verifyOwnerSignature(pairTB, unb64(body.getString("pairing_signature")), ownerPub)) {
                     throw SecurityException("pairing signature verify failed")
+                }
+                // v2 D: the server saw pairing_mac only as an opaque 32-byte
+                // field — a match under our own c proves the device that
+                // completed the pairing had scanned our QR code. Constant-
+                // time compare; any failure aborts before we pin the key or
+                // write local state (§6.18, §3.13).
+                val pairSecret = SourceState.getPairSecret(ctx)
+                if (pairSecret.isEmpty()) throw SecurityException("pairing secret missing")
+                val mac = unb64(body.getString("pairing_mac"))
+                val want = Transcripts.pairConfirmMac(unb64(pairSecret), "source", pairTB)
+                if (!java.security.MessageDigest.isEqual(want, mac)) {
+                    throw SecurityException("pairing MAC verify failed")
                 }
                 if (!verifyOwnerSignature(dirSigned, dirSig, ownerPub)) {
                     throw SecurityException("directory signature verify failed")
@@ -150,35 +163,6 @@ class ApiClient(private val ctx: Context) {
             }
             else -> PairResult.Pending
         }
-    }
-
-    /**
-     * §3.4 pair transcript with an EMPTY grant set: the count is zero and
-     * the trailing NUL separator is still present (BuildPairTranscript
-     * appends u64be(count) NUL before the concatenated grant transcripts).
-     */
-    private fun buildPairTranscript(
-        vaultId: String, ownerSignPub: ByteArray, nonce: ByteArray, deviceId: String,
-        kem: String, hpkePub: ByteArray, signAlg: String, signPub: ByteArray, label: String,
-    ): ByteArray {
-        val FS: Byte = 0x00
-        val b = ArrayList<Byte>(160)
-        fun add(bytes: ByteArray) = b.addAll(bytes.toList())
-        fun addSep() = b.add(FS)
-        add("KEYREF1".toByteArray(Charsets.US_ASCII)); addSep()
-        add("pair".toByteArray(Charsets.US_ASCII)); addSep()
-        add(vaultId.toByteArray(Charsets.US_ASCII)); addSep()
-        add(ownerSignPub); addSep()
-        add(nonce); addSep()
-        add(deviceId.toByteArray(Charsets.US_ASCII)); addSep()
-        add(kem.toByteArray(Charsets.US_ASCII)); addSep()
-        add(hpkePub); addSep()
-        add(signAlg.toByteArray(Charsets.US_ASCII)); addSep()
-        add(signPub); addSep()
-        add(label.toByteArray(Charsets.UTF_8)); addSep()
-        add(Transcripts.u64be(0)) // grant_count = 0
-        addSep()
-        return b.toByteArray()
     }
 
     /** §6.7 session: challenge → signed §3.6 transcript → bearer token. */
@@ -240,8 +224,8 @@ class ApiClient(private val ctx: Context) {
             .map { it.deviceId to it.hpkePublicKey }
     }
 
-    /** §6.28 POST /v1/messages. Returns true on 201. */
-    fun uploadMessage(envelope: ByteArray, receivedAt: Long): Boolean {
+    /** §6.28 POST /v1/messages. Returns the HTTP status; 201 = stored. */
+    fun uploadMessage(envelope: ByteArray, receivedAt: Long): Int {
         val vaultId = SourceState.getVaultId(ctx)
         val deviceId = SourceState.getDeviceId(ctx)
         val tb = Transcripts.messageUpload(vaultId, deviceId, receivedAt, envelope)
@@ -258,7 +242,7 @@ class ApiClient(private val ctx: Context) {
             .build()
         http.newCall(req).execute().use { resp ->
             resp.body?.string()
-            return resp.code == 201
+            return resp.code
         }
     }
 }

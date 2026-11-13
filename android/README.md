@@ -1,13 +1,18 @@
 # keyref source (the Android verification-code collector)
 
-The `kind = source` device of design.md v0.8 §14: it reads the phone's own SMS, picks out verification codes with the phone's own filter rules, **encrypts them at the moment they arrive** (the envelope is addressed directly to the active owner plus any decider with a valid delegation, §14.3), and tops up the upload to the keyref server through a WorkManager queue. It only uploads and never reads — it does not even hold item keys (§14.2).
+The `kind = source` device of design.md v0.8 §14: it reads the phone's own SMS, picks out verification codes with the phone's own filter rules, **encrypts them at the moment they arrive** (the envelope is addressed to the active owners — the owner backfills a decider's wrap later, §6.30 — and tops up the upload to the keyref server through a WorkManager queue). It only uploads and never reads — it does not even hold item keys (§14.2).
 
 ## Build
 
-1. Open this directory with Android Studio (it bundles its own JDK/SDK) via `File → Open`, and wait for the Gradle sync.
-2. Run it on a test device, or `Build → Build APK(s)` to produce a sideloadable APK.
+On the macOS dev box:
 
-This machine (the macOS dev box) has no Android build environment, so this code has never been compiled here — send sync or compile errors straight to the maintainer.
+```sh
+scripts/dev/android-build.sh assembleDebug       # debug APK (app/build/outputs/apk/debug/)
+scripts/dev/android-build.sh testDebugUnitTest   # golden-vector gate (design §9.2)
+scripts/dev/android-build.sh lintDebug           # must report 0 errors
+```
+
+The script points `JAVA_HOME` at Homebrew's OpenJDK 17 (Gradle 8.9 cannot run on Android Studio's bundled JBR 25) and `ANDROID_HOME` at `~/Library/Android/sdk`, then runs the committed wrapper (Gradle 8.9, AGP 8.7.3, compileSdk 35). Opening this directory in Android Studio (`File → Open`, for device runs and `Build → Build APK(s)`) works alongside the CLI path.
 
 ## Use
 
@@ -20,12 +25,11 @@ The collection rule (design §14.2): the sender number must hit the allowlist **
 
 ## Implementation notes
 
-- **The HPKE interop surface**: `crypto/Envelope.kt` isolates BouncyCastle's RFC 9180 implementation (DHKEM(X25519) + HKDF-SHA256 + AES-256-GCM). It has to interoperate byte for byte with `proto/crypto` (circl) — the cross-language golden vectors of design §9.2 are the admission gate, so run the vectors before wiring this up to iOS.
-- **Transcripts**: `crypto/Transcripts.kt` implements §3.5 / §3.6 / §3.9 / §3.3 byte for byte; directory parsing uses the same strategy as the CLI's `audit.parseDirectory` (fixed length + rebuild comparison, fail-closed).
+- **The HPKE interop surface**: `crypto/Envelope.kt` isolates BouncyCastle's RFC 9180 Base mode (DHKEM + HKDF-SHA256 + AES-256-GCM; the KEM follows the recipient's §1.4 key length — X25519 or P-256). It has to interoperate byte for byte with `proto/crypto` (circl), and `CryptoVectorsTest` asserts exactly that against the cross-language golden vectors of design §9.2 (`ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`).
+- **Transcripts**: `crypto/Transcripts.kt` implements §3.4 / §3.5 / §3.6 / §3.9 / §3.10 / §3.13 / §3.3 byte for byte — including the §3.13 pairing confirmation MAC the completion is checked against before the owner key is pinned; directory parsing uses the same strategy as the CLI's `audit.parseDirectory` (fixed length + rebuild comparison, fail-closed).
 - **Private key at rest**: AndroidKeyStore does not support X25519 / Ed25519 (already stated in design §14.2), so the private key is encrypted with an AES-GCM key inside the Keystore and stored in a private file. Losing the device means revoking and pairing again — it never reads anything anyway.
-- **Queue**: the envelope is sealed and written to disk the moment the SMS arrives (the ciphertext lands locally first), and WorkManager tops the upload up with exponential backoff; a 401 retries once after renewing the session; quota-type 4xx responses are dropped and logged.
+- **Queue**: the envelope is sealed and written to disk the moment the SMS arrives (the ciphertext lands locally first). WorkManager tops the upload up with exponential backoff: network failures and 5xx retry with the entry still queued, a single 401 renews the session once, every other 4xx (quota, invalid request, revoked device) is dropped and logged.
 
 ## Known boundaries
 
-- The iOS inbox, approval screen and decider management (design §14.4, and the iOS side of §14.8) are implemented on the iOS side now, so a message uploaded by this app has a consumer — but this app itself has never been run against a real server, because it has never been compiled.
-- The BC ↔ circl interop vectors have not been generated or checked yet (the outstanding task from design §9.2).
+- The iOS inbox, approval screen and decider management (design §14.4, and the iOS side of §14.8) are implemented on the iOS side now, so a message uploaded by this app has a consumer — but the pairing → seal → upload loop has not been watched end to end on a real phone yet (that needs a device and an iOS scan; the byte formats themselves are pinned by the vectors).

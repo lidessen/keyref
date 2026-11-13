@@ -44,3 +44,5 @@ core.*
 
 # local workflow outputs
 out/
+tools/vectordump/vectordump
+.keyref-design-preview.html

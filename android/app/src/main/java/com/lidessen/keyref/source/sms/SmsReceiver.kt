@@ -4,13 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
-import androidx.work.BackoffPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
 import com.lidessen.keyref.source.crypto.Envelope
 import com.lidessen.keyref.source.net.ApiClient
 import com.lidessen.keyref.source.store.SourceState
-import java.util.concurrent.TimeUnit
 
 /**
  * The collector (design v0.8 §14.2): the system wakes this receiver for
@@ -76,21 +72,5 @@ class SmsReceiver : BroadcastReceiver() {
         }
         SourceState.enqueue(context, ApiClient.b64(envelope), receivedAt)
         UploadWorker.kick(context)
-    }
-}
-
-/** Schedules the upload worker with exponential backoff (design §14.7). */
-object UploadWorker {
-    const val NAME = "keyref-source-upload"
-
-    fun kick(context: Context) {
-        val req = OneTimeWorkRequestBuilder<UploadWorker>()
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .build()
-        WorkManager.getInstance(context).enqueueUniqueWork(
-            NAME,
-            androidx.work.ExistingWorkPolicy.REPLACE,
-            req
-        )
     }
 }

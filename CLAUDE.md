@@ -97,7 +97,15 @@ KEYREF_SERVER=http://127.0.0.1:8080 keyref pair
 
 Server environment: `KEYREF_DATA`, `KEYREF_LISTEN`, `KEYREF_ENFORCE_QUOTAS=1` (hosted behaviour: quotas on, PoW required), `KEYREF_DOMAIN` (ACME/HTTPS), `KEYREF_ACME_EMAIL`. CLI: `KEYREF_SERVER` (origin override), `KEYREF_KEYRING_DIR`.
 
-**Android** has no build environment on this machine — the Kotlin source has never been compiled here. Expect to hand the maintainer compile errors rather than to fix them locally.
+**Android** builds and tests on this machine through the committed Gradle wrapper (Gradle 8.9, AGP 8.7.3, compileSdk 35):
+
+```sh
+scripts/dev/android-build.sh assembleDebug       # debug APK
+scripts/dev/android-build.sh testDebugUnitTest   # golden-vector gate (design §9.2)
+scripts/dev/android-build.sh lintDebug           # must report 0 errors
+```
+
+The script points `JAVA_HOME` at Homebrew's OpenJDK 17 — Gradle 8.9 cannot run on Android Studio's bundled JBR 25 — and `ANDROID_HOME` at `~/Library/Android/sdk`. `CryptoVectorsTest` asserts the transcripts, the §3.13 pairing MAC, the AEAD blob and both HPKE KEMs byte-for-byte against `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`; a Kotlin failure means the code drifted, never the fixture. Running the app still needs a real phone (SMS broadcasts are not delivered on a simulator), so the pairing → seal → upload loop has not been watched end to end here.
 
 ## Architecture
 

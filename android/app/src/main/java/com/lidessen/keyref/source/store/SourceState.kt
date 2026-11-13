@@ -2,6 +2,7 @@ package com.lidessen.keyref.source.store
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Base64
 import com.lidessen.keyref.source.crypto.Keys
 import java.io.File
 import org.json.JSONArray
@@ -26,6 +27,7 @@ object SourceState {
     private const val KEY_DIRECTORY_SIGNED = "directory_signed_b64"
     private const val KEY_DIRECTORY_SIG = "directory_signature_b64"
     private const val KEY_PAIR_NONCE = "pair_nonce"
+    private const val KEY_PAIR_SECRET = "pair_secret_b64"
     private const val KEY_FILTER_SENDERS = "filter_senders"
     private const val KEY_COLLECT_ENABLED = "collect_enabled"
     private const val KEY_LOG = "log_tail"
@@ -48,8 +50,9 @@ object SourceState {
     fun getOwnerSignPubHex(ctx: Context): String = prefs(ctx).getString(KEY_OWNER_SIGN, "") ?: ""
     fun getToken(ctx: Context): String = prefs(ctx).getString(KEY_TOKEN, "") ?: ""
     fun getTokenExpires(ctx: Context): Long = prefs(ctx).getLong(KEY_TOKEN_EXPIRES, 0)
-    fun getDirectoryB64(ctx: Context): String = prefs(ctx).getString(KEY_DIRECTORY, "") ?: ""
     fun getPairNonce(ctx: Context): String = prefs(ctx).getString(KEY_PAIR_NONCE, "") ?: ""
+    /** §3.13 pairing secret c (b64, 32 bytes) — local only, never uploaded. */
+    fun getPairSecret(ctx: Context): String = prefs(ctx).getString(KEY_PAIR_SECRET, "") ?: ""
     fun isCollectEnabled(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_COLLECT_ENABLED, false)
     fun getSenders(ctx: Context): Set<String> = prefs(ctx).getStringSet(KEY_FILTER_SENDERS, emptySet()) ?: emptySet()
     fun getLogTail(ctx: Context): String = prefs(ctx).getString(KEY_LOG, "") ?: ""
@@ -69,6 +72,7 @@ object SourceState {
             .putString(KEY_DIRECTORY_SIGNED, directorySignedB64)
             .putString(KEY_DIRECTORY_SIG, directorySignatureB64)
             .putString(KEY_PAIR_NONCE, "")
+            .remove(KEY_PAIR_SECRET) // consumed by the §3.13 MAC check
             .apply()
     }
 
@@ -76,6 +80,7 @@ object SourceState {
         prefs(ctx).edit().putString(KEY_TOKEN, token).putLong(KEY_TOKEN_EXPIRES, expiresAt).apply()
 
     fun setPairNonce(ctx: Context, nonce: String) = prefs(ctx).edit().putString(KEY_PAIR_NONCE, nonce).apply()
+    fun setPairSecret(ctx: Context, b64: String) = prefs(ctx).edit().putString(KEY_PAIR_SECRET, b64).apply()
 
     fun setDirectory(ctx: Context, signed: ByteArray, signature: ByteArray) =
         prefs(ctx).edit()
@@ -106,7 +111,7 @@ object SourceState {
             .remove(KEY_VAULT).remove(KEY_DEVICE).remove(KEY_OWNER_SIGN)
             .remove(KEY_TOKEN).remove(KEY_TOKEN_EXPIRES)
             .remove(KEY_DIRECTORY_SIGNED).remove(KEY_DIRECTORY_SIG)
-            .remove(KEY_PAIR_NONCE)
+            .remove(KEY_PAIR_NONCE).remove(KEY_PAIR_SECRET)
             .apply()
         outboxFile(ctx).delete()
     }
@@ -123,14 +128,27 @@ object SourceState {
     @Synchronized
     fun queueSnapshot(ctx: Context): JSONArray = readOutbox(ctx)
 
+    /**
+     * Removes the first queued entry carrying [envelopeB64]. Envelopes are
+     * unique (fresh randomness per message), and matching by value keeps
+     * the upload loop correct while it walks a snapshot the file may have
+     * already shifted under — index-based removal skips and re-sends.
+     */
     @Synchronized
-    fun removeQueued(ctx: Context, index: Int) {
+    fun removeQueuedEnvelope(ctx: Context, envelopeB64: String) {
         val arr = readOutbox(ctx)
-        if (index in 0 until arr.length()) {
-            val next = JSONArray()
-            for (i in 0 until arr.length()) if (i != index) next.put(arr.get(i))
-            writeOutbox(ctx, next)
+        val next = JSONArray()
+        var removed = false
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i)
+            if (o == null) continue
+            if (!removed && o.optString("envelope") == envelopeB64) {
+                removed = true
+                continue
+            }
+            next.put(o)
         }
+        if (removed) writeOutbox(ctx, next)
     }
 
     private fun readOutbox(ctx: Context): JSONArray {

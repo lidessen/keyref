@@ -150,10 +150,15 @@ class MainActivity : AppCompatActivity() {
     /** §9.1 payload with t=source; QR rendered by zxing. */
     private fun startPairing(origin: String) {
         val identity = Keys.loadIdentity(SourceState.keysFile(this)) ?: return
-        val nonceHex = ApiClient.hexBytes(ByteArray(16).also {
-            java.security.SecureRandom().nextBytes(it)
-        }).let { bytes -> bytes.joinToString("") { "%02x".format(it) } }
+        val nonceHex = ByteArray(16)
+            .also { java.security.SecureRandom().nextBytes(it) }
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
         SourceState.setPairNonce(this, nonceHex)
+        // §3.13 / §9.1: the pairing secret c exists only in this QR — the
+        // owner folds it into the completion MAC, the server stores that
+        // MAC opaquely and never sees c itself.
+        val pairSecret = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+        SourceState.setPairSecret(this, ApiClient.b64(pairSecret))
         thread {
             try {
                 val status = ApiClient(this).pairRegister(origin, identity, nonceHex)
@@ -167,7 +172,8 @@ class MainActivity : AppCompatActivity() {
                     "&n=" + nonceHex +
                     "&name=" + enc("android-source") +
                     "&u=" + enc(origin) +
-                    "&t=source"
+                    "&t=source" +
+                    "&c=" + enc(ApiClient.b64(pairSecret))
                 runOnUiThread { showQr(payload) }
                 pollPairing(origin, nonceHex, identity)
             } catch (e: Exception) {
@@ -205,6 +211,16 @@ class MainActivity : AppCompatActivity() {
             Thread.sleep(2_000)
             val result = try {
                 client.pairStatus(origin, nonceHex, identity)
+            } catch (e: SecurityException) {
+                // §3.13 / §6.18: a failed §3.4 signature or pairing-MAC
+                // check is not a transient poll error — abort the pairing
+                // and pin nothing.
+                SourceState.appendLog(this, "pair verify: ${e.message}")
+                runOnUiThread {
+                    Toast.makeText(this, "配对校验失败：${e.message}", Toast.LENGTH_LONG).show()
+                    render()
+                }
+                return
             } catch (e: Exception) {
                 SourceState.appendLog(this, "poll: ${e.message}")
                 continue
