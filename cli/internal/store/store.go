@@ -220,6 +220,19 @@ func (s *Store) setItemRevisionFloor(vaultID, itemID string, revision uint64) er
 	return s.SetKV("item-floor:"+vaultID+":"+itemID, []byte(strconv.FormatUint(revision, 10)))
 }
 
+// RaiseItemRevisionFloor records revision as seen for itemID without ever
+// moving the floor backwards. Sync uses it for tombstones: the row is
+// deleted, but the floor must survive so a replayed deletion (or an older
+// live row) cannot roll the item back (design §6.2).
+func (s *Store) RaiseItemRevisionFloor(vaultID, itemID string, revision uint64) error {
+	if floor, ok, err := s.ItemRevisionFloor(vaultID, itemID); err != nil {
+		return err
+	} else if ok && revision <= floor {
+		return nil
+	}
+	return s.setItemRevisionFloor(vaultID, itemID, revision)
+}
+
 // PutGrant upserts a grant row for this device (the cache is
 // single-device, so device_id is stored for transcript rebuilds only).
 // Revision monotonicity is caller-checked (see GrantRevisionFloor).

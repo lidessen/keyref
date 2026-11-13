@@ -188,15 +188,19 @@ require (
 
 以下 `<NUL>` = 单字节 `0x00`；`u64be(x)` = 8 字节大端；hex 字段是 ASCII 小写 hex 字节串；其余字段按原文原始字节。所有誊本以 ASCII `KEYREF1` 开头。除特别说明，结尾**没有**尾随 `<NUL>`。
 
-### 3.1 item 誊本（design §9.1，逐字实现）
+### 3.1 item 誊本（design §9.1，protocol v2 E）
 
 ```text
 "KEYREF1" <NUL> "item" <NUL> vault_id(hex) <NUL> item_id(hex) <NUL>
-u64be(revision) <NUL> meta_ciphertext <NUL> secret_ciphertext <NUL>
-vault_wrapped_meta_key <NUL> vault_wrapped_item_key <NUL> writer_device_id(hex)
+u64be(revision) <NUL> tombstone(1 字节) <NUL> H(meta_ciphertext) <NUL>
+H(secret_ciphertext) <NUL> H(vault_wrapped_meta_key) <NUL>
+H(vault_wrapped_item_key) <NUL> writer_device_id(hex)
 ```
 
-- 签名者：owner（ECDSA P-256，ASN.1 DER）。tombstone 行的四个密文字段是**零长度字节串**，其余规则不变。
+- 签名者：owner（v2 F：`writer_device_id` 所指、目录里 `kind = ios`、`status = active` 的设备；ECDSA P-256，ASN.1 DER）。
+- `H(x)` = SHA-256(x)，空字段按 `H("")` 计，恒为 32 字节。
+- `tombstone` 一个原始字节（紧跟 `u64be(revision)` 之后的字段，后面的 `<NUL>` 照常）：`0x00` 活条目，`0x01` tombstone。tombstone 的四个密文字段必须全空，因此不再与「四个字段全空的活条目」字节相同；两种行用同一个构造函数。
+- 验证（CLI 与 iOS，每一条 item 行，包括 tombstone）：对每个在场的（非空）字段要求 `H(field) == digest`；用 `ItemData` 的四个摘要字段构造上面的誊本并验签。为 CLI 裁剪过的行（§8.3）仍带四个摘要，签名可验而密文不可见。服务器仍从 PUT / DELETE 请求体的完整字段重建誊本。
 - `vault_wrapped_*` = AES-256-GCM(VMK) blob（§1.5），AAD = `keyref v1 <US> vault-meta-key <US> <vault_id> <US> <item_id>` 与 `... vault-item-key ...`（US = `0x1f`）。
 
 ### 3.2 grant 誊本
@@ -209,6 +213,7 @@ hpke_enc <NUL> wrapped_key
 
 - 签名者：owner。删除授权的誊本同样格式：`expires_at = 0`、`hpke_enc` 与 `wrapped_key` 为零长度。
 - `hpke_enc`/`wrapped_key` 是 HPKE(X25519, recipient=CLI) 对 32 字节 meta key（view）或 item key（use）的封装，info 见 §3.7，AAD 空。
+- 在场（非空）的 `hpke_enc` 必须恰好是该 KEM 的封装长度（X25519 为 32，P-256 为 65），`wrapped_key` 恰好 48 字节（v2 E，避免变长尾字段被任意字节伪造）。
 
 ### 3.3 directory 誊本
 
@@ -533,7 +538,7 @@ pairing_mac = HMAC-SHA256(key = c,
 
 ### 6.9 `GET /v1/items/:item_id` — 按需单条
 
-响应行 = §8.3 的 item `data` 对象，按调用者身份过滤（owner 全量；CLI 有 view 授予给 `meta_ciphertext`，有 use 授予再给 `secret_ciphertext`；`vault_wrapped_*` 只给 owner）。错误：`not_found`、`forbidden`（CLI 无 view 授予）。
+响应行 = §8.3 的 item `data` 对象，按调用者身份过滤（owner 全量；CLI 有 view 授予给 `meta_ciphertext`，有 use 授予再给 `secret_ciphertext`；`vault_wrapped_*` 只给 owner）。四个 `*_digest` 字段始终在场，按落库的行计算（v2 E）。错误：`not_found`、`forbidden`（CLI 无 view 授予）。
 
 ### 6.10 `PUT /v1/items/:item_id` — 上传新 revision（owner）
 
@@ -547,13 +552,13 @@ pairing_mac = HMAC-SHA256(key = c,
 }
 ```
 
-服务器要求 `revision == 已存值 + 1` 且签名通过，否则 `409 revision_conflict` / `403 bad_signature`。响应 `200 {"revision":4,"updated_at":1790000000000}`。条目更新追加一条 `item:` 变更；**不**自动追加合成 grant 变更（grant 写入时才有合成 item 变更，design §6.3），CLI 靠本条 item 变更刷新本地行。错误信息不得回显密文字段。
+服务器要求 `revision == 已存值 + 1`，并从未裁剪的请求体重建 §3.1 v2 誊本验签，否则 `409 revision_conflict` / `403 bad_signature`。响应 `200 {"revision":4,"updated_at":1790000000000}`。条目更新追加一条 `item:` 变更；**不**自动追加合成 grant 变更（grant 写入时才有合成 item 变更，design §6.3），CLI 靠本条 item 变更刷新本地行。错误信息不得回显密文字段。
 
 **仅本机条目**（design v0.7 §6.6）：`secret_ciphertext` 与 `vault_wrapped_item_key` 省略（或为零长度），行内只落 meta——密文只在 owner 手机本地。仅本机条目不得拥有 `use` 授予：`PUT /v1/grants` 对该条目建/续 `use` → `400 local_item_grant_conflict`；带 `use` 授权的条目改为本地 → 同错误。
 
 ### 6.11 `DELETE /v1/items/:item_id` — tombstone（owner）
 
-请求 `{"revision":5,"signature":"<b64 §3.1 誊本，密文字段为零长度>"}` → `204`。服务器置 tombstone、**删除该条全部 grants**、逐设备追加 `grant:` 删除变更与 `item:` 变更（design §6.3）。
+请求 `{"revision":5,"signature":"<b64 §3.1 v2 誊本，tombstone 标志字节 0x01，四个密文字段为零长度>"}` → `204`。服务器置 tombstone、**删除该条全部 grants**、逐设备追加 `grant:` 删除变更与 `item:` 变更（design §6.3）。
 
 ### 6.12 `PUT /v1/grants` — 写入/更新授予（owner）
 
@@ -804,14 +809,14 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 
 ### 8.3 `data` 形状（按调用者过滤）
 
-- item（owner 全量；CLI：`meta_ciphertext` 需 view、`secret_ciphertext` 需 use、`vault_wrapped_*` 不给 CLI）：
-  `{ "vault_id":"…","item_id":"…","revision":4,"tombstone":false,"meta_ciphertext":"…","secret_ciphertext":"…","vault_wrapped_meta_key":"…","vault_wrapped_item_key":"…","writer_device_id":"…","signature":"…","updated_at":… }`
+- item（owner 全量；CLI：`meta_ciphertext` 需 view、`secret_ciphertext` 需 use、`vault_wrapped_*` 不给 CLI；四个 `*_digest` 字段**始终在场**，按落库的行计算，v2 E）：
+  `{ "vault_id":"…","item_id":"…","revision":4,"tombstone":false,"meta_ciphertext":"…","secret_ciphertext":"…","vault_wrapped_meta_key":"…","vault_wrapped_item_key":"…","meta_digest":"…","secret_digest":"…","vault_wrapped_meta_key_digest":"…","vault_wrapped_item_key_digest":"…","writer_device_id":"…","signature":"…","updated_at":… }`
 - grant：`{ "device_id":"…","item_id":"…","kind":"use","hpke_enc":"…","wrapped_key":"…","expires_at":…,"revision":3,"signature":"…" }`；删除行为 `{ "device_id":"…","item_id":"…","kind":"use","deleted":true,"revision":4 }`。
 - device：`{ "device_id":"…","kind":"cli","status":"revoked","label":"…","created_at":…,"revoked_at":… }`。
 - directory：`{ "directory_revision":8,"directory_signed":"<b64>","directory_signature":"<b64>" }`。
 - approval：`{ "approval_id":"…","status":"consumed" }`。
 
-可见性（design §10.6）：active CLI 见自己的 grants、指向的 items、目录、相关审批；active owner 见全部 items/grants/目录/审批；**revoked 设备**只目录、tombstone 与指向自己的 grant 删除——其余端点一律 `403 device_revoked`。客户端在解密前验签；验签失败停止应用本批并保留旧数据。
+可见性（design §10.6）：active CLI 见自己的 grants、指向的 items、目录、相关审批；active owner 见全部 items/grants/目录/审批；**revoked 设备**只目录、tombstone 与指向自己的 grant 删除——其余端点一律 `403 device_revoked`。客户端在解密前验签（v2 F 的 owner 密钥链：item 按 `writer_device_id` 选 key，grant 逐个试 active owner key，新目录按已保存目录里的 active owner key；没有已保存目录时只认 pin 住的 key）。CLI 验不过的行跳过并在 stderr 打一行警告，验不过的目录中止本次同步；iOS 抛 `SyncError.tampered`（本地不存在的条目的 tombstone 直接忽略），并保留旧数据。
 
 ---
 

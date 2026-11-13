@@ -1817,9 +1817,14 @@ public final class LiveBackend: AppBackend {
             for row in stateStore.allItems() where !row.tombstone {
                 if let meta = try? decryptMeta(row, vmk: vmk, vaultID: prep.vaultID),
                    let secret = try? decryptSecret(row, vmk: vmk, vaultID: prep.vaultID) {
-                    try? await reencryptItem(row, meta: meta, value: secret.value,
-                                             vaultID: prep.vaultID, owner: owner,
-                                             deviceID: deviceID)
+                    // v2 F: after a recovery takeover the old owner is
+                    // revoked, so every item must be re-signed under the
+                    // new owner key. A failure here is fatal — swallowing
+                    // it would leave rows no client (including this one)
+                    // can ever verify again.
+                    try await reencryptItem(row, meta: meta, value: secret.value,
+                                            vaultID: prep.vaultID, owner: owner,
+                                            deviceID: deviceID)
                 }
                 remaining = max(0, remaining - 1)
                 await progress(.rotateItems(remaining: remaining))

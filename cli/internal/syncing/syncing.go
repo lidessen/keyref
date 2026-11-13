@@ -3,8 +3,12 @@
 // and directory entities. Tombstones and grants deleted for this
 // device drop the corresponding cache rows; a revoked device directory
 // entry triggers local cleanup and refusal (exit 17 path). Signature
-// verification happens before anything is applied; on verification
-// failure the batch is abandoned and the old data stays.
+// verification follows the v2 F owner key chain: item rows are verified
+// under the key of the device named by writer_device_id, grant rows
+// under any active owner key, and a new directory under the previously
+// saved directory's active owner keys. A failed row is skipped with a
+// one-line warning; a failed directory aborts the sync and the old data
+// stays.
 package syncing
 
 import (
@@ -46,7 +50,7 @@ func Run(st *store.Store, cl *client.Client, deviceID string) (Result, error) {
 	if raw, ok, _ := st.GetKV("cursor"); ok {
 		cursor, _ = strconv.ParseInt(string(raw), 10, 64)
 	}
-	ownerPub, err := OwnerSignPub(st)
+	chain, err := loadOwnerChain(st)
 	if err != nil {
 		return res, err
 	}
@@ -67,7 +71,7 @@ func Run(st *store.Store, cl *client.Client, deviceID string) (Result, error) {
 			return res, fmt.Errorf("sync: fetch: %w", err)
 		}
 		for i := range resp.Changes {
-			applied, deleted, err := applyChange(st, vaultID, deviceID, ownerPub, &resp.Changes[i])
+			applied, deleted, err := applyChange(st, vaultID, deviceID, chain, &resp.Changes[i])
 			if err != nil {
 				return res, err
 			}
@@ -86,25 +90,39 @@ func Run(st *store.Store, cl *client.Client, deviceID string) (Result, error) {
 		}
 	}
 
-	if err := reconcileGrants(st, cl, vaultID, deviceID, ownerPub); err != nil {
+	if err := reconcileGrants(st, cl, vaultID, deviceID, chain); err != nil {
 		return res, err
 	}
 	return res, nil
 }
 
-func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch *wire.SyncChange) (applied, deleted int, err error) {
+func applyChange(st *store.Store, vaultID, deviceID string, chain *ownerChain, ch *wire.SyncChange) (applied, deleted int, err error) {
 	switch ch.Entity {
 	case wire.EntityItem:
 		var it wire.ItemData
 		if err := json.Unmarshal(ch.Data, &it); err != nil {
 			return 0, 0, fmt.Errorf("sync: item decode: %w", err)
 		}
+		// Every item row — live or tombstone — must carry a writer
+		// signature that verifies under an active owner device (v2 E/F).
+		// A failed row is not applied; the previous local state stays.
+		if err := chain.verifyItem(&it); err != nil {
+			warnSkipped("item", it.ItemID, err)
+			return 0, 0, nil
+		}
 		if it.Tombstone {
 			// Tombstone: drop the row, its grants and any local wraps
-			// (design.md §6.3, §6.5). The revision floor survives in the
-			// store, so a later replay of a lower-revision row (or of a
-			// second tombstone at a lower revision) is rejected.
+			// (design.md §6.3, §6.5). A stale tombstone replay must not
+			// delete a newer local row, and the floor must survive the
+			// deletion so this or an older revision stays rejected
+			// (design §6.2).
+			if floor, ok, _ := st.ItemRevisionFloor(vaultID, it.ItemID); ok && it.Revision <= floor {
+				return 0, 0, nil
+			}
 			if err := st.DeleteItem(it.ItemID); err != nil {
+				return 0, 0, err
+			}
+			if err := st.RaiseItemRevisionFloor(vaultID, it.ItemID, it.Revision); err != nil {
 				return 0, 0, err
 			}
 			return 0, 1, nil
@@ -131,6 +149,17 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 		if err := json.Unmarshal(ch.Data, &g); err != nil {
 			return 0, 0, fmt.Errorf("sync: grant decode: %w", err)
 		}
+		// Every grant row — live, revoked or item-cascade deletion — must
+		// verify under an active owner key (v2 F); otherwise a malicious
+		// server could revoke local capabilities without an owner.
+		if err := chain.verifyGrant(&g, vaultID); err != nil {
+			warnSkipped("grant", g.ItemID+"/"+g.Kind, err)
+			return 0, 0, nil
+		}
+		if g.DeviceID != deviceID {
+			// Rows for other devices should not be delivered; ignore.
+			return 0, 0, nil
+		}
 		if g.Deleted || (len(g.HPKEEnc) == 0 && len(g.WrappedKey) == 0) {
 			// Grant revoked (pointing at ourselves) or item deletion cascade: clear local wrap.
 			// The revision floor survives (PutGrant on the deletion form raises it), so a
@@ -147,13 +176,6 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 				return 0, 0, err
 			}
 			return 0, 1, nil
-		}
-		if g.DeviceID != deviceID {
-			// Rows for other devices should not be delivered; ignore.
-			return 0, 0, nil
-		}
-		if err := g.VerifyOwnerSignature(vaultID, ownerPub); err != nil {
-			return 0, 0, fmt.Errorf("%w: grant %s", ErrTampered, g.ItemID)
 		}
 		// Anti-resurrection replay guard: a correctly signed but stale
 		// live row (revision at or below the deletion watermark) is
@@ -172,8 +194,11 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 		if err := json.Unmarshal(ch.Data, &d); err != nil {
 			return 0, 0, fmt.Errorf("sync: directory decode: %w", err)
 		}
-		if err := wire.VerifyOwnerSignature(d.Signed, d.Signature, ownerPub); err != nil {
-			return 0, 0, fmt.Errorf("%w: directory", ErrTampered)
+		// A directory that does not verify under the saved directory's
+		// active owner keys aborts the sync (v2 F); a tampered directory
+		// must never be stored.
+		if err := chain.verifyDirectory(d.Signed, d.Signature); err != nil {
+			return 0, 0, err
 		}
 		// Revision monotonicity: a correctly signed but stale directory
 		// (e.g. replayed by a malicious server to hide a revocation) is
@@ -192,6 +217,8 @@ func applyChange(st *store.Store, vaultID, deviceID string, ownerPub []byte, ch 
 		if err := st.SetKV(pair.KVDirectoryRev, []byte(strconv.FormatUint(d.DirectoryRevision, 10))); err != nil {
 			return 0, 0, err
 		}
+		// Later rows in this batch verify against the new directory.
+		chain.reloadSaved(d.Signed)
 		// Revocation delivery for CLI devices rides on the directory
 		// (the device entity is owner-only): check our own status
 		// (design.md §8.4, §10.6).
@@ -239,8 +266,12 @@ func cleanupRevoked(st *store.Store) {
 
 // reconcileGrants cross-checks the local grant set against
 // GET /v1/grants/self and the directory digest (design.md §9.1, §10.6):
-// a suppressed or forged grant set disables use (fail closed).
-func reconcileGrants(st *store.Store, cl *client.Client, vaultID, deviceID string, ownerPub []byte) error {
+// a suppressed or forged grant set disables use (fail closed). Unlike a
+// sync row, a grants/self row that fails the v2 F verification aborts
+// the reconciliation: the digest comparison below trusts the delivered
+// set, so accepting an unverified set would let a malicious server
+// suppress capabilities by forging one row.
+func reconcileGrants(st *store.Store, cl *client.Client, vaultID, deviceID string, chain *ownerChain) error {
 	self, err := cl.GrantsSelf()
 	if err != nil {
 		// Offline-tolerated: reconciliation needs the network.
@@ -248,7 +279,7 @@ func reconcileGrants(st *store.Store, cl *client.Client, vaultID, deviceID strin
 	}
 	for i := range self.Grants {
 		g := self.Grants[i]
-		if err := g.VerifyOwnerSignature(vaultID, ownerPub); err != nil {
+		if err := chain.verifyGrant(&g, vaultID); err != nil {
 			return fmt.Errorf("%w: grants/self row", ErrTampered)
 		}
 		if err := st.PutGrant(&g); err != nil {

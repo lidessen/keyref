@@ -96,6 +96,9 @@ const LabelNameMaxBytes = 32
 var (
 	ErrInvalidField = errors.New("wire: invalid transcript field")
 	ErrBadSignature = errors.New("wire: signature verification failed")
+	// ErrDigestMismatch reports a §3.1 v2 per-field digest mismatch: a
+	// delivered ciphertext field does not hash to its digest (v2 E).
+	ErrDigestMismatch = errors.New("wire: field does not match its digest")
 )
 
 // ValidID reports whether s is a 16-byte identifier encoded as 32
@@ -202,12 +205,16 @@ func appendU64(b []byte, v uint64) []byte {
 }
 
 // ItemTranscript is the structured form of the item transcript
-// (protocol §3.1). A tombstone row carries four zero-length ciphertext
-// fields; every other rule is unchanged.
+// (protocol §3.1, v2 E). The signer holds the raw ciphertext fields; they
+// enter the transcript only as SHA-256 digests, and the tombstone flag is
+// a signed byte, so the encoding is injective and a deletion row can no
+// longer collide with a live row of empty fields. A tombstone requires
+// all four fields to be empty (§6.11).
 type ItemTranscript struct {
 	VaultID             string
 	ItemID              string
 	Revision            uint64 // >= 1, monotonically increasing (design §6.2)
+	Tombstone           bool   // v2 E: 0x01 deletion row; four fields must be empty
 	MetaCiphertext      []byte
 	SecretCiphertext    []byte
 	VaultWrappedMetaKey []byte
@@ -215,15 +222,41 @@ type ItemTranscript struct {
 	WriterDeviceID      string
 }
 
-// BuildItemTranscript assembles the signed transcript bytes:
+// ItemDigestTranscript is the verifier's form of the §3.1 v2 transcript:
+// the four ciphertext fields are already digests. A pruned row (§8.3 CLI
+// view) carries the digests of fields it cannot see, so the verifier
+// rebuilds the same bytes the signer produced without ever holding the
+// pruned material (protocol v2 E).
+type ItemDigestTranscript struct {
+	VaultID                   string
+	ItemID                    string
+	Revision                  uint64
+	Tombstone                 bool
+	MetaDigest                []byte
+	SecretDigest              []byte
+	VaultWrappedMetaKeyDigest []byte
+	VaultWrappedItemKeyDigest []byte
+	WriterDeviceID            string
+}
+
+// FieldDigest is the per-field digest of the item transcript (v2 E):
+// SHA-256 of the field, with an empty field hashing as SHA-256("").
+func FieldDigest(field []byte) []byte {
+	sum := sha256.Sum256(field)
+	return sum[:]
+}
+
+// BuildItemDigestTranscript assembles the signed transcript bytes from
+// digests (protocol §3.1, v2 E):
 //
 //	"KEYREF1" NUL "item" NUL vault_id(hex) NUL item_id(hex) NUL
-//	u64be(revision) NUL meta_ciphertext NUL secret_ciphertext NUL
-//	vault_wrapped_meta_key NUL vault_wrapped_item_key NUL
-//	writer_device_id(hex)
+//	u64be(revision) NUL tombstone(1 byte) NUL H(meta_ciphertext) NUL
+//	H(secret_ciphertext) NUL H(vault_wrapped_meta_key) NUL
+//	H(vault_wrapped_item_key) NUL writer_device_id(hex)
 //
-// There is no trailing NUL.
-func BuildItemTranscript(t ItemTranscript) ([]byte, error) {
+// There is no trailing NUL. Every digest must be 32 bytes; a tombstone
+// must carry the empty-field digests SHA-256("") for all four fields.
+func BuildItemDigestTranscript(t ItemDigestTranscript) ([]byte, error) {
 	for _, f := range []struct{ name, id string }{
 		{"vault_id", t.VaultID},
 		{"item_id", t.ItemID},
@@ -236,6 +269,24 @@ func BuildItemTranscript(t ItemTranscript) ([]byte, error) {
 	if t.Revision < 1 {
 		return nil, fmt.Errorf("%w: revision must be >= 1", ErrInvalidField)
 	}
+	digests := []struct {
+		name   string
+		digest []byte
+	}{
+		{"meta_digest", t.MetaDigest},
+		{"secret_digest", t.SecretDigest},
+		{"vault_wrapped_meta_key_digest", t.VaultWrappedMetaKeyDigest},
+		{"vault_wrapped_item_key_digest", t.VaultWrappedItemKeyDigest},
+	}
+	emptyDigest := FieldDigest(nil)
+	for _, d := range digests {
+		if len(d.digest) != SizeDigest {
+			return nil, fmt.Errorf("%w: %s must be %d bytes", ErrInvalidField, d.name, SizeDigest)
+		}
+		if t.Tombstone && !bytes.Equal(d.digest, emptyDigest) {
+			return nil, fmt.Errorf("%w: tombstone rows must carry the empty digests (field %s is not empty)", ErrInvalidField, d.name)
+		}
+	}
 	b := beginTranscript("item")
 	b = append(b, t.VaultID...)
 	b = appendSep(b)
@@ -243,16 +294,40 @@ func BuildItemTranscript(t ItemTranscript) ([]byte, error) {
 	b = appendSep(b)
 	b = appendU64(b, t.Revision)
 	b = appendSep(b)
-	b = append(b, t.MetaCiphertext...)
+	if t.Tombstone {
+		b = append(b, 0x01)
+	} else {
+		b = append(b, 0x00)
+	}
 	b = appendSep(b)
-	b = append(b, t.SecretCiphertext...)
-	b = appendSep(b)
-	b = append(b, t.VaultWrappedMetaKey...)
-	b = appendSep(b)
-	b = append(b, t.VaultWrappedItemKey...)
-	b = appendSep(b)
+	for _, d := range digests {
+		b = append(b, d.digest...)
+		b = appendSep(b)
+	}
 	b = append(b, t.WriterDeviceID...)
 	return b, nil
+}
+
+// BuildItemTranscript assembles the signed transcript bytes from the raw
+// ciphertext fields by hashing them into the digest form (v2 E): the same
+// constructor covers live rows and tombstones; a tombstone with any
+// non-empty field is rejected.
+func BuildItemTranscript(t ItemTranscript) ([]byte, error) {
+	if t.Tombstone && (len(t.MetaCiphertext) > 0 || len(t.SecretCiphertext) > 0 ||
+		len(t.VaultWrappedMetaKey) > 0 || len(t.VaultWrappedItemKey) > 0) {
+		return nil, fmt.Errorf("%w: tombstone rows must leave all four ciphertext fields empty", ErrInvalidField)
+	}
+	return BuildItemDigestTranscript(ItemDigestTranscript{
+		VaultID:                   t.VaultID,
+		ItemID:                    t.ItemID,
+		Revision:                  t.Revision,
+		Tombstone:                 t.Tombstone,
+		MetaDigest:                FieldDigest(t.MetaCiphertext),
+		SecretDigest:              FieldDigest(t.SecretCiphertext),
+		VaultWrappedMetaKeyDigest: FieldDigest(t.VaultWrappedMetaKey),
+		VaultWrappedItemKeyDigest: FieldDigest(t.VaultWrappedItemKey),
+		WriterDeviceID:            t.WriterDeviceID,
+	})
 }
 
 // GrantTranscript is the structured form of the grant transcript
@@ -294,6 +369,22 @@ func BuildGrantTranscript(t GrantTranscript) ([]byte, error) {
 	}
 	if (len(t.HPKEEnc) == 0) != (len(t.WrappedKey) == 0) {
 		return nil, fmt.Errorf("%w: hpke_enc and wrapped_key must be both empty (deletion form) or both present", ErrInvalidField)
+	}
+	// Fixed crypto-field sizes (v2 E): a present hpke_enc must be a valid
+	// encapsulation for one of the two KEMs (X25519 32 bytes, P-256 65)
+	// and a present wrapped_key an HPKE wrap of a 32-byte key (48 bytes),
+	// so the variable-length tail of the transcript cannot be forged from
+	// arbitrary bytes.
+	if len(t.HPKEEnc) > 0 {
+		switch len(t.HPKEEnc) {
+		case SizeX25519Key, SizeP256Key:
+		default:
+			return nil, fmt.Errorf("%w: hpke_enc must be %d (X25519) or %d (P-256) bytes",
+				ErrInvalidField, SizeX25519Key, SizeP256Key)
+		}
+		if len(t.WrappedKey) != SizeMessageWrappedKey {
+			return nil, fmt.Errorf("%w: wrapped_key must be %d bytes", ErrInvalidField, SizeMessageWrappedKey)
+		}
 	}
 	b := beginTranscript("grant")
 	b = append(b, t.VaultID...)

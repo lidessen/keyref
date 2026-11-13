@@ -1,6 +1,6 @@
 # keyref 协议变更规格（v2）
 
-状态：**A、B、C、D、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
+状态：**A、B、C、D、E、F、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
 
 兼容性：**破坏性变更，不兼容旧客户端**（已确认没有需要兼容的存量部署）。直接原地修改格式，不加版本协商和回退分支。
 
@@ -103,6 +103,8 @@ NUL H(body)
 
 ## E. item 誊本 v2
 
+**已实现**（proto/wire `ItemTranscript`/`ItemDigestTranscript`/`ItemData.VerifyItemSignature`、server 从落库行渲染四个摘要、CLI `internal/syncing` 逐行验签、iOS `ItemTranscript`/`ItemCrypto.verifyItemSignature`；protocol.md §3.1/§3.2/§6.9/§6.10/§6.11/§8.3；向量见 `item_transcript` 与 `item_tombstone_transcript`）。
+
 ```text
 P("item") vault_id NUL item_id NUL u64be(revision) NUL tombstone(1 字节：
 0x00 活条目，0x01 tombstone) NUL H(meta_ciphertext) NUL
@@ -118,6 +120,8 @@ H(vault_wrapped_item_key) NUL writer_device_id
 修掉的问题：变长字段用单个 NUL 分隔导致编码不是单射；tombstone 标志不在签名内；CLI 拿到的是裁剪过的行，无法重建誊本，因此现状完全不验 item 签名。
 
 ## F. owner 密钥链（多 owner）
+
+**已实现**（CLI `internal/syncing/chain.go`、iOS `SyncEngine` 的 `activeOwnerKeys`/`verifyItem`/`verifyGrant`/`verifyDirectory`、`LiveBackend` 恢复接管的重签失败改为向上抛；protocol.md §8.3 末尾的验证规则；CLI 跳过行、iOS 抛 `SyncError.tampered`）。
 
 客户端不再只认一把 pin 住的 owner 公钥。
 

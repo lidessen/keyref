@@ -254,13 +254,31 @@ final class CryptoTests: XCTestCase {
         let sealed = try ItemCrypto.sealItem(vaultID: vaultID, itemID: itemID, revision: 1,
                                              writerDeviceID: ownerDev, vmk: vmk,
                                              signer: signer, meta: meta, secret: secret)
-        let row = ItemData(vaultID: vaultID, itemID: itemID, revision: 1, tombstone: false,
+        var row = ItemData(vaultID: vaultID, itemID: itemID, revision: 1, tombstone: false,
                            metaCiphertext: sealed.transcript.metaCiphertext,
                            secretCiphertext: sealed.transcript.secretCiphertext,
                            vaultWrappedMetaKey: sealed.transcript.vaultWrappedMetaKey,
                            vaultWrappedItemKey: sealed.transcript.vaultWrappedItemKey,
                            writerDeviceID: ownerDev, signature: sealed.signature, updatedAt: 1)
-        try ItemCrypto.verifyItemSignature(row, vaultID: vaultID, ownerSignPublicKey: signer.signPublicKey)
+        row.fillDigests()
+        try ItemCrypto.verifyItemSignature(row, vaultID: vaultID,
+                                           signAlg: SignAlg.ecdsaP256,
+                                           signPublicKey: signer.signPublicKey)
+        // v2 E: a tampered field no longer matches its digest.
+        var tampered = row
+        tampered.metaCiphertext[0] ^= 1
+        XCTAssertThrowsError(try ItemCrypto.verifyItemSignature(
+            tampered, vaultID: vaultID, signAlg: SignAlg.ecdsaP256,
+            signPublicKey: signer.signPublicKey))
+        // v2 E: a live row and a tombstone with empty fields produce
+        // different transcripts (the flag byte is signed).
+        let liveEmpty = try ItemTranscript(vaultID: vaultID, itemID: itemID, revision: 1,
+                                           metaCiphertext: Data(), secretCiphertext: Data(),
+                                           vaultWrappedMetaKey: Data(), vaultWrappedItemKey: Data(),
+                                           writerDeviceID: ownerDev).buildBytes()
+        let tomb = try ItemTranscript.tombstone(vaultID: vaultID, itemID: itemID, revision: 1,
+                                                writerDeviceID: ownerDev).buildBytes()
+        XCTAssertNotEqual(liveEmpty, tomb)
         // VMK unwraps the vault-wrapped keys.
         let metaKey = try ItemCrypto.unwrapMetaKey(vmk: vmk, blob: sealed.transcript.vaultWrappedMetaKey,
                                                    vaultID: vaultID, itemID: itemID)

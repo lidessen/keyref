@@ -123,6 +123,13 @@ public struct ItemData: Codable, Equatable, Sendable {
     public var secretCiphertext: Data
     public var vaultWrappedMetaKey: Data
     public var vaultWrappedItemKey: Data
+    /// Per-field digests of the four fields above (protocol §3.1 v2 E).
+    /// ALWAYS present on delivered rows, including rows pruned for a CLI
+    /// device: they are what the writer's signature covers.
+    public var metaDigest: Data = Data()
+    public var secretDigest: Data = Data()
+    public var vaultWrappedMetaKeyDigest: Data = Data()
+    public var vaultWrappedItemKeyDigest: Data = Data()
     public var writerDeviceID: String
     public var signature: Data
     public var updatedAt: Int64
@@ -136,6 +143,10 @@ public struct ItemData: Codable, Equatable, Sendable {
         case secretCiphertext = "secret_ciphertext"
         case vaultWrappedMetaKey = "vault_wrapped_meta_key"
         case vaultWrappedItemKey = "vault_wrapped_item_key"
+        case metaDigest = "meta_digest"
+        case secretDigest = "secret_digest"
+        case vaultWrappedMetaKeyDigest = "vault_wrapped_meta_key_digest"
+        case vaultWrappedItemKeyDigest = "vault_wrapped_item_key_digest"
         case writerDeviceID = "writer_device_id"
         case signature
         case updatedAt = "updated_at"
@@ -165,9 +176,22 @@ public extension ItemData {
         secretCiphertext = try field(.secretCiphertext)
         vaultWrappedMetaKey = try field(.vaultWrappedMetaKey)
         vaultWrappedItemKey = try field(.vaultWrappedItemKey)
+        metaDigest = try field(.metaDigest)
+        secretDigest = try field(.secretDigest)
+        vaultWrappedMetaKeyDigest = try field(.vaultWrappedMetaKeyDigest)
+        vaultWrappedItemKeyDigest = try field(.vaultWrappedItemKeyDigest)
         writerDeviceID = try c.decode(String.self, forKey: .writerDeviceID)
         signature = try field(.signature)
         updatedAt = try c.decodeIfPresent(Int64.self, forKey: .updatedAt) ?? 0
+    }
+
+    /// Recomputes the four v2 E field digests from the row's own
+    /// ciphertext fields (empty fields hash as SHA-256("")).
+    mutating func fillDigests() {
+        metaDigest = itemFieldDigest(metaCiphertext)
+        secretDigest = itemFieldDigest(secretCiphertext)
+        vaultWrappedMetaKeyDigest = itemFieldDigest(vaultWrappedMetaKey)
+        vaultWrappedItemKeyDigest = itemFieldDigest(vaultWrappedItemKey)
     }
 }
 

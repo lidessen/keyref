@@ -160,8 +160,52 @@ func (o *Owner) SealItem(itemID, writerDev, ref, name, masked, secretValue strin
 	if err != nil {
 		o.TB.Fatal(err)
 	}
+	it.FillDigests()
 	it.Signature = o.Sign(tb)
 	return &SealedItem{Data: it, MetaKey: metaKey, ItemKey: itemKey}
+}
+
+// TombstoneRow builds a signed tombstone row for itemID (protocol §3.1
+// v2: the tombstone flag is inside the signed transcript).
+func (o *Owner) TombstoneRow(itemID, writerDev string, revision uint64) wire.ItemData {
+	o.TB.Helper()
+	it := wire.ItemData{
+		VaultID:        o.VaultID,
+		ItemID:         itemID,
+		Revision:       revision,
+		Tombstone:      true,
+		WriterDeviceID: writerDev,
+		UpdatedAt:      1790000000000,
+	}
+	it.FillDigests()
+	tb, err := wire.BuildItemTranscript(wire.ItemTranscript{
+		VaultID: o.VaultID, ItemID: itemID, Revision: revision,
+		Tombstone: true, WriterDeviceID: writerDev,
+	})
+	if err != nil {
+		o.TB.Fatal(err)
+	}
+	it.Signature = o.Sign(tb)
+	return it
+}
+
+// DeleteGrantRow builds a signed grant deletion row (protocol §3.2
+// deletion form).
+func (o *Owner) DeleteGrantRow(deviceID, itemID, kind string, revision uint64) wire.GrantData {
+	o.TB.Helper()
+	g := wire.GrantData{
+		DeviceID: deviceID,
+		ItemID:   itemID,
+		Kind:     kind,
+		Revision: revision,
+		Deleted:  true,
+	}
+	tb, err := wire.BuildGrantTranscript(g.Transcript(o.VaultID))
+	if err != nil {
+		o.TB.Fatal(err)
+	}
+	g.Signature = o.Sign(tb)
+	return g
 }
 
 func mustAAD(o *Owner, label, itemID string) []byte {

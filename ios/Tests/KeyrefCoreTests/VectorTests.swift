@@ -174,6 +174,7 @@ private struct VectorFile: Decodable, Sendable {
     enum RawJSONValue: Decodable, Sendable {
         case string(String)
         case number(UInt64)
+        case bool(Bool)
         case object([String: RawJSONValue])
         case array([RawJSONValue])
 
@@ -181,6 +182,7 @@ private struct VectorFile: Decodable, Sendable {
             let c = try decoder.singleValueContainer()
             if let s = try? c.decode(String.self) { self = .string(s); return }
             if let n = try? c.decode(UInt64.self) { self = .number(n); return }
+            if let b = try? c.decode(Bool.self) { self = .bool(b); return }
             if let o = try? c.decode([String: RawJSONValue].self) { self = .object(o); return }
             if let a = try? c.decode([RawJSONValue].self) { self = .array(a); return }
             throw DecodingError.dataCorruptedError(in: c, debugDescription: "unsupported JSON value")
@@ -188,6 +190,7 @@ private struct VectorFile: Decodable, Sendable {
 
         var stringValue: String? { if case .string(let s) = self { return s }; return nil }
         var numberValue: UInt64? { if case .number(let n) = self { return n }; return nil }
+        var boolValue: Bool? { if case .bool(let b) = self { return b }; return nil }
     }
 
     let generator: String
@@ -209,6 +212,7 @@ private struct VectorFile: Decodable, Sendable {
     let recovery: RecoveryVector
 
     let item_transcript: TranscriptVector
+    let item_tombstone_transcript: TranscriptVector
     let grant_view_transcript: TranscriptVector
     let grant_use_transcript: TranscriptVector
     let grant_delete_transcript: TranscriptVector
@@ -407,18 +411,24 @@ final class VectorTests: XCTestCase {
 
     // MARK: transcripts — rebuild bytes and verify signatures (§3)
 
-    func testItemTranscript() throws {
-        let t = v.item_transcript
-        XCTAssertEqual(t.sign_alg, SignAlg.ecdsaP256)
+    private func itemTranscript(_ t: VectorFile.TranscriptVector) throws -> ItemTranscript {
         let f = t.fields
-        let tr = ItemTranscript(
+        return ItemTranscript(
             vaultID: f["vault_id"]?.stringValue ?? "", itemID: f["item_id"]?.stringValue ?? "",
             revision: f["revision"]?.numberValue ?? 0,
             metaCiphertext: hex(f["meta_ciphertext_hex"]?.stringValue ?? ""),
             secretCiphertext: hex(f["secret_ciphertext_hex"]?.stringValue ?? ""),
             vaultWrappedMetaKey: hex(f["vault_wrapped_meta_key_hex"]?.stringValue ?? ""),
             vaultWrappedItemKey: hex(f["vault_wrapped_item_key_hex"]?.stringValue ?? ""),
-            writerDeviceID: f["writer_device_id"]?.stringValue ?? "")
+            writerDeviceID: f["writer_device_id"]?.stringValue ?? "",
+            tombstone: f["tombstone"]?.boolValue ?? false)
+    }
+
+    func testItemTranscript() throws {
+        let t = v.item_transcript
+        XCTAssertEqual(t.sign_alg, SignAlg.ecdsaP256)
+        XCTAssertEqual(t.fields["tombstone"]?.boolValue, false)
+        let tr = try itemTranscript(t)
         let bytes = try tr.buildBytes()
         XCTAssertEqual(bytes, hex(t.bytes_hex))
         try verifyOwnerSignature(transcript: bytes, signature: hex(t.signature_hex),
@@ -427,6 +437,22 @@ final class VectorTests: XCTestCase {
         XCTAssertThrowsError(try verifyOwnerSignature(transcript: hex(t.tampered_bytes_hex ?? ""),
                                                       signature: hex(t.signature_hex),
                                                       ownerSignPublicKey: hex(t.signer_public_hex)))
+    }
+
+    /// v2 E: the signed tombstone flag byte distinguishes a deletion row
+    /// from a live row with four empty fields.
+    func testItemTombstoneTranscript() throws {
+        let t = v.item_tombstone_transcript
+        XCTAssertEqual(t.fields["tombstone"]?.boolValue, true)
+        let tr = try itemTranscript(t)
+        XCTAssertTrue(tr.tombstone)
+        let bytes = try tr.buildBytes()
+        XCTAssertEqual(bytes, hex(t.bytes_hex))
+        try verifyOwnerSignature(transcript: bytes, signature: hex(t.signature_hex),
+                                 ownerSignPublicKey: hex(t.signer_public_hex))
+        var liveEmpty = try itemTranscript(t)
+        liveEmpty.tombstone = false
+        XCTAssertNotEqual(try liveEmpty.buildBytes(), bytes)
     }
 
     private func grantTranscript(_ t: VectorFile.TranscriptVector) throws -> (GrantTranscript, Data) {

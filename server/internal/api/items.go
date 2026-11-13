@@ -67,7 +67,10 @@ func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
 // itemWireData renders an item row per §8.3. CLI devices never receive
 // vault_wrapped_*; meta follows the view grant and the secret
 // ciphertext follows any grant — see handleGetItem for why view alone
-// carries the secret ciphertext (the approval flow).
+// carries the secret ciphertext (the approval flow). The four per-field
+// digests (v2 E) are rendered from the stored row before pruning, so
+// every recipient can verify the owner signature even when it cannot
+// see the pruned bytes.
 func itemWireData(it *store.Item, forOwner, hasView, hasUse bool) wire.ItemData {
 	d := wire.ItemData{
 		VaultID:        it.VaultID,
@@ -78,6 +81,10 @@ func itemWireData(it *store.Item, forOwner, hasView, hasUse bool) wire.ItemData 
 		Signature:      it.Signature,
 		UpdatedAt:      it.UpdatedAt,
 	}
+	d.MetaDigest = wire.FieldDigest(it.MetaCiphertext)
+	d.SecretDigest = wire.FieldDigest(it.SecretCiphertext)
+	d.VaultWrappedMetaKeyDigest = wire.FieldDigest(it.VaultWrappedMetaKey)
+	d.VaultWrappedItemKeyDigest = wire.FieldDigest(it.VaultWrappedItemKey)
 	if forOwner || hasView {
 		d.MetaCiphertext = it.MetaCiphertext
 	}
@@ -241,11 +248,11 @@ func (s *Server) handlePutItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteItem implements DELETE /v1/items/:item_id (protocol
-// §6.11). The tombstone signature covers the §3.1 transcript with four
-// zero-length ciphertext fields; the cascade removes the item's grants
-// (converted to deletion rows) with per-device change entries and the
-// item change (design §6.3). Deletion is always allowed over quota and
-// from frozen vaults (§10.5 item 7).
+// §6.11). The tombstone signature covers the §3.1 v2 transcript with the
+// tombstone flag set and four empty ciphertext fields; the cascade
+// removes the item's grants (converted to deletion rows) with per-device
+// change entries and the item change (design §6.3). Deletion is always
+// allowed over quota and from frozen vaults (§10.5 item 7).
 func (s *Server) handleDeleteItem(w http.ResponseWriter, r *http.Request) {
 	ac, ok := s.authorize(w, r, false)
 	if !ok {
@@ -282,6 +289,7 @@ func (s *Server) handleDeleteItem(w http.ResponseWriter, r *http.Request) {
 		VaultID:        ac.vault.ID,
 		ItemID:         itemID,
 		Revision:       req.Revision,
+		Tombstone:      true,
 		WriterDeviceID: ac.device.ID,
 	})
 	if err != nil {

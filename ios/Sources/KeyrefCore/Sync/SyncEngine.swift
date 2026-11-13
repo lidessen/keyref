@@ -2,7 +2,9 @@
 // server, verifies signatures before applying anything, applies items,
 // grants, devices and the signed directory to local state, and
 // reconciles the grant set against GET /v1/grants/self and the directory
-// digest. Verification failure abandons the batch and keeps old data.
+// digest. Verification follows the v2 F owner key chain — the pinned
+// owner key plus the active iOS signing keys of the saved directory — and
+// a failure abandons the batch and keeps old data.
 import Foundation
 
 public enum SyncError: Error, Equatable {
@@ -137,30 +139,26 @@ public final class SyncEngine: Sendable {
 
     private enum ChangeResult { case applied, deleted, skipped }
 
-    /// Applies an item change. Tombstones cascade (design §6.3, §6.5);
-    /// stale revisions are skipped, not applied (design §6.2).
+    /// Applies an item change. Every row — live or tombstone — must carry
+    /// a writer signature that verifies under the active owner device
+    /// named by writer_device_id (v2 E/F); tombstones cascade (design
+    /// §6.3, §6.5); stale revisions are skipped, not applied (§6.2).
     private func applyItem(_ row: ItemData, store: SyncStateStore) throws -> ChangeResult {
         let vaultID = try vaultIDOf(store)
         if row.tombstone {
-            // The owner signs the §3.1 transcript with four zero-length
-            // ciphertext fields (ItemCrypto.signTombstone); the server keeps
-            // writer_device_id and signature on tombstone rows, so rebuild
-            // and verify before deleting anything.
-            // Only a tombstone that would actually delete a local row is
-            // checked: tombstones signed by a previous owner key (before a
-            // recovery takeover) still arrive on bootstrap and must not
-            // abort the sync when there is nothing to delete.
-            if let ownerKey = try store.pinnedOwnerKey(), !ownerKey.isEmpty,
-               try store.item(row.itemID) != nil {
-                do {
-                    let t = ItemTranscript.tombstone(vaultID: vaultID, itemID: row.itemID,
-                                                     revision: row.revision,
-                                                     writerDeviceID: row.writerDeviceID)
-                    try verifyOwnerSignature(transcript: try t.buildBytes(), signature: row.signature,
-                                             ownerSignPublicKey: ownerKey)
-                } catch {
-                    throw SyncError.tampered("item \(row.itemID) tombstone signature")
-                }
+            // The v2 E tombstone transcript signs the flag byte and the
+            // four empty-field digests (ItemCrypto.signTombstone). A
+            // tombstone for an item we do not hold is ignored outright:
+            // tombstones signed by a previous owner key (before a recovery
+            // takeover) still arrive on bootstrap and must not abort the
+            // sync when there is nothing to delete (v2 F).
+            if try store.item(row.itemID) == nil {
+                return .skipped
+            }
+            do {
+                try verifyItem(row, vaultID: vaultID, store: store)
+            } catch {
+                throw SyncError.tampered("item \(row.itemID) tombstone signature")
             }
             try store.deleteItem(row.itemID)  // drops grants and cached wraps
             return .deleted
@@ -171,15 +169,13 @@ public final class SyncEngine: Sendable {
             // the UI, not silently overwritten.
             return .skipped
         }
-        // Owner rows carry the full §3.1 fields — verify before applying
-        // (design §10.6: trust comes from signatures, not the cursor).
-        if let ownerKey = try store.pinnedOwnerKey(), !ownerKey.isEmpty,
-           !row.vaultWrappedMetaKey.isEmpty || !row.vaultWrappedItemKey.isEmpty {
-            do {
-                try ItemCrypto.verifyItemSignature(row, vaultID: vaultID, ownerSignPublicKey: ownerKey)
-            } catch {
-                throw SyncError.tampered("item \(row.itemID) signature")
-            }
+        // The stored pins and directory are the trust anchor, not the
+        // cursor (design §10.6): verify before applying. Pruned rows are
+        // covered by their per-field digests (v2 E).
+        do {
+            try verifyItem(row, vaultID: vaultID, store: store)
+        } catch {
+            throw SyncError.tampered("item \(row.itemID) signature")
         }
         try store.upsertItem(row)
         return .applied
@@ -190,20 +186,20 @@ public final class SyncEngine: Sendable {
     /// needs them for §8.4 renewal and the grant lists (the server's sync
     /// feed only carries all-vault grants to owner devices — CLI feeds are
     /// filtered to the device's own rows server-side, sync.go isOwner).
-    /// A foreign row that fails verification still fails the whole batch.
+    /// Every row, including the deletion form, must verify under an active
+    /// owner key (v2 F); a failure fails the whole batch.
     private func applyGrant(_ row: GrantData, store: SyncStateStore) throws -> ChangeResult {
         let vaultID = try vaultIDOf(store)
+        do {
+            try verifyGrant(row, vaultID: vaultID, store: store)
+        } catch {
+            throw SyncError.tampered("grant \(row.itemID)/\(row.kind) signature")
+        }
         if row.deleted || (row.hpkeEnc.isEmpty && row.wrappedKey.isEmpty) {
             // Grant revoked (pointing at ourselves) or item tombstone
             // cascade: clear the local row and wrap (design §6.3, §6.5).
             try store.deleteGrant(deviceID: row.deviceID, itemID: row.itemID, kind: row.kind)
             return .deleted
-        }
-        let ownerKey = try ownerKeyOf(store)
-        do {
-            try ItemCrypto.verifyGrantSignature(row, vaultID: vaultID, ownerSignPublicKey: ownerKey)
-        } catch {
-            throw SyncError.tampered("grant \(row.itemID)/\(row.kind) signature")
         }
         try store.upsertGrant(row)
         return .applied
@@ -224,10 +220,8 @@ public final class SyncEngine: Sendable {
     /// directory even for devices that no longer receive anything else).
     private func applyDirectory(_ row: DirectoryData, store: SyncStateStore) throws -> Bool {
         let vaultID = try vaultIDOf(store)
-        let ownerKey = try ownerKeyOf(store)
         do {
-            try verifyOwnerSignature(transcript: row.signed, signature: row.signature,
-                                     ownerSignPublicKey: ownerKey)
+            try verifyDirectory(row, store: store)
         } catch {
             throw SyncError.tampered("directory signature")
         }
@@ -261,7 +255,7 @@ public final class SyncEngine: Sendable {
     /// (fail closed). Tolerated offline (transport failure → skip).
     public func reconcileGrants(store: SyncStateStore) async throws {
         let vaultID = try vaultIDOf(store)
-        let ownerKey = try ownerKeyOf(store)
+        _ = try ownerKeyOf(store)
         guard let own = try store.ownDeviceID() else { throw SyncError.notPaired }
 
         let selfResp: GrantsSelfResponse
@@ -275,7 +269,7 @@ public final class SyncEngine: Sendable {
 
         for row in selfResp.grants {
             do {
-                try ItemCrypto.verifyGrantSignature(row, vaultID: vaultID, ownerSignPublicKey: ownerKey)
+                try verifyGrant(row, vaultID: vaultID, store: store)
             } catch {
                 throw SyncError.tampered("grants/self row \(row.itemID)/\(row.kind)")
             }
@@ -298,6 +292,117 @@ public final class SyncEngine: Sendable {
                 try store.deleteGrant(deviceID: g.deviceID, itemID: g.itemID, kind: g.kind)
             }
         }
+    }
+
+    // MARK: owner key chain (v2 F)
+
+    /// One signing identity the engine accepts for owner-authored rows:
+    /// an active iOS device listed in the saved directory.
+    private struct ChainKey {
+        var deviceID: String
+        var signAlg: String
+        var publicKey: Data
+    }
+
+    /// Whether a directory is saved locally. Before the first one the
+    /// pinned key is the only anchor; once one exists a vault with no
+    /// active iOS device is dead and everything fails closed (v2 F).
+    private func savedDirectoryPresent(_ store: SyncStateStore) throws -> Bool {
+        try store.directory() != nil
+    }
+
+    /// Active owner signing keys from the saved directory. Empty before a
+    /// directory is stored — the pinned key is then the only anchor.
+    private func activeOwnerKeys(_ store: SyncStateStore) throws -> [ChainKey] {
+        guard let dir = try store.directory(),
+              let vaultID = try store.vaultID(),
+              KeyrefEncoding.isValidID(vaultID) else {
+            return []
+        }
+        guard let devices = try? VaultFlows.parseVerifiedDevices(dir.signed, vaultID: vaultID) else {
+            return []
+        }
+        return devices
+            .filter { $0.kind == DeviceKind.ios && $0.status == DeviceStatus.active }
+            .map { ChainKey(deviceID: $0.deviceID, signAlg: $0.signAlg, publicKey: $0.signPublicKey) }
+    }
+
+    /// Item rows verify under the active owner device named by
+    /// writer_device_id (v2 F); with no saved directory the pinned key is
+    /// the only owner identity known.
+    private func verifyItem(_ row: ItemData, vaultID: String, store: SyncStateStore) throws {
+        let keys = try activeOwnerKeys(store)
+        if !(try savedDirectoryPresent(store)) {
+            let pinned = try ownerKeyOf(store)
+            try ItemCrypto.verifyItemSignature(row, vaultID: vaultID,
+                                               signAlg: SignAlg.ecdsaP256, signPublicKey: pinned)
+            return
+        }
+        guard !keys.isEmpty else {
+            throw SyncError.tampered("item \(row.itemID): the saved directory lists no active owner device")
+        }
+        guard let key = keys.first(where: { $0.deviceID == row.writerDeviceID }) else {
+            throw SyncError.tampered("item \(row.itemID): writer \(row.writerDeviceID) is not an active owner device")
+        }
+        try ItemCrypto.verifyItemSignature(row, vaultID: vaultID,
+                                           signAlg: key.signAlg, signPublicKey: key.publicKey)
+    }
+
+    /// Grant rows carry no writer id and verify under some active owner
+    /// key (v2 F).
+    private func verifyGrant(_ row: GrantData, vaultID: String, store: SyncStateStore) throws {
+        let keys = try activeOwnerKeys(store)
+        if !(try savedDirectoryPresent(store)) {
+            let pinned = try ownerKeyOf(store)
+            try ItemCrypto.verifyGrantSignature(row, vaultID: vaultID, ownerSignPublicKey: pinned)
+            return
+        }
+        guard !keys.isEmpty else {
+            throw SyncError.tampered("grant \(row.itemID)/\(row.kind): the saved directory lists no active owner device")
+        }
+        var lastError: Error = SyncError.tampered("grant \(row.itemID)/\(row.kind) signature")
+        for key in keys {
+            do {
+                let t = try grantTranscript(row, vaultID: vaultID)
+                try verifyDeviceSignature(transcript: try t.buildBytes(),
+                                          signature: row.signature,
+                                          signAlg: key.signAlg, publicKey: key.publicKey)
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
+    }
+
+    /// A new directory is accepted iff signed by an active iOS device of
+    /// the saved directory; before any saved directory the pinned key is
+    /// the only anchor (v2 F).
+    private func verifyDirectory(_ row: DirectoryData, store: SyncStateStore) throws {
+        let keys = try activeOwnerKeys(store)
+        if !(try savedDirectoryPresent(store)) {
+            let pinned = try ownerKeyOf(store)
+            try verifyOwnerSignature(transcript: row.signed, signature: row.signature,
+                                     ownerSignPublicKey: pinned)
+            return
+        }
+        guard !keys.isEmpty else {
+            throw SyncError.tampered("directory: the saved directory lists no active owner device")
+        }
+        for key in keys {
+            if (try? verifyDeviceSignature(transcript: row.signed, signature: row.signature,
+                                           signAlg: key.signAlg, publicKey: key.publicKey)) != nil {
+                return
+            }
+        }
+        throw SyncError.tampered("directory signature")
+    }
+
+    private func grantTranscript(_ row: GrantData, vaultID: String) throws -> GrantTranscript {
+        GrantTranscript(vaultID: vaultID, deviceID: row.deviceID, itemID: row.itemID,
+                        kind: row.kind, revision: row.revision,
+                        expiresAt: UInt64(bitPattern: row.expiresAt),
+                        hpkeEnc: row.hpkeEnc, wrappedKey: row.wrappedKey)
     }
 
     // MARK: helpers

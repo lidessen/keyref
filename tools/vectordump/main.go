@@ -343,6 +343,7 @@ type vectors struct {
 	Recovery    recoveryVector    `json:"recovery"`
 
 	Item          transcriptVector `json:"item_transcript"`
+	ItemTombstone transcriptVector `json:"item_tombstone_transcript"`
 	GrantView     transcriptVector `json:"grant_view_transcript"`
 	GrantUse      transcriptVector `json:"grant_use_transcript"`
 	GrantDelete   transcriptVector `json:"grant_delete_transcript"`
@@ -814,13 +815,47 @@ func main() {
 		VaultID             string `json:"vault_id"`
 		ItemID              string `json:"item_id"`
 		Revision            uint64 `json:"revision"`
+		Tombstone           bool   `json:"tombstone"`
 		MetaCiphertextHex   string `json:"meta_ciphertext_hex"`
 		SecretCiphertextHex string `json:"secret_ciphertext_hex"`
 		VaultWrappedMetaHex string `json:"vault_wrapped_meta_key_hex"`
 		VaultWrappedItemHex string `json:"vault_wrapped_item_key_hex"`
+		MetaDigestHex       string `json:"meta_digest_hex"`
+		SecretDigestHex     string `json:"secret_digest_hex"`
+		VWMetaDigestHex     string `json:"vault_wrapped_meta_key_digest_hex"`
+		VWItemDigestHex     string `json:"vault_wrapped_item_key_digest_hex"`
 		WriterDeviceID      string `json:"writer_device_id"`
-	}{vaultID, itemID, 4, hx(blobMeta), hx(blobSecret), hx(vwMeta), hx(vwItem), ownerDevID},
+	}{vaultID, itemID, 4, false, hx(blobMeta), hx(blobSecret), hx(vwMeta), hx(vwItem),
+		hx(wire.FieldDigest(blobMeta)), hx(wire.FieldDigest(blobSecret)),
+		hx(wire.FieldDigest(vwMeta)), hx(wire.FieldDigest(vwItem)), ownerDevID},
 		itemTB, signOwner(itemTB), wire.SignAlgECDSAP256, hx(ownerPub), true)
+
+	// --- item tombstone (§3.1 v2 E): flag byte 0x01, four empty digests.
+	tombTB, err := wire.BuildItemTranscript(wire.ItemTranscript{
+		VaultID: vaultID, ItemID: itemID, Revision: 5,
+		Tombstone: true, WriterDeviceID: ownerDevID,
+	})
+	if err != nil {
+		panic(err)
+	}
+	v.ItemTombstone = tv(struct {
+		VaultID             string `json:"vault_id"`
+		ItemID              string `json:"item_id"`
+		Revision            uint64 `json:"revision"`
+		Tombstone           bool   `json:"tombstone"`
+		MetaCiphertextHex   string `json:"meta_ciphertext_hex"`
+		SecretCiphertextHex string `json:"secret_ciphertext_hex"`
+		VaultWrappedMetaHex string `json:"vault_wrapped_meta_key_hex"`
+		VaultWrappedItemHex string `json:"vault_wrapped_item_key_hex"`
+		MetaDigestHex       string `json:"meta_digest_hex"`
+		SecretDigestHex     string `json:"secret_digest_hex"`
+		VWMetaDigestHex     string `json:"vault_wrapped_meta_key_digest_hex"`
+		VWItemDigestHex     string `json:"vault_wrapped_item_key_digest_hex"`
+		WriterDeviceID      string `json:"writer_device_id"`
+	}{vaultID, itemID, 5, true, "", "", "", "",
+		hx(wire.FieldDigest(nil)), hx(wire.FieldDigest(nil)),
+		hx(wire.FieldDigest(nil)), hx(wire.FieldDigest(nil)), ownerDevID},
+		tombTB, signOwner(tombTB), wire.SignAlgECDSAP256, hx(ownerPub), false)
 
 	grantFieldsOf := func(g wire.GrantTranscript) any {
 		return grantFields{

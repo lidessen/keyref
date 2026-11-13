@@ -20,6 +20,9 @@ public extension ItemData {
                            vaultWrappedItemKey: vaultWrappedItemKey,
                            writerDeviceID: writerDeviceID, signature: signature,
                            updatedAt: updatedAt)
+        // The four v2 E digests describe the row's own fields; mint them
+        // here so locally built rows match what the server renders.
+        row.fillDigests()
         return row
     }
 }

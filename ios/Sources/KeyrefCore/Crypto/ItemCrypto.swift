@@ -206,21 +206,37 @@ public enum ItemCrypto {
                                                      writerDeviceID: writerDeviceID).buildBytes())
     }
 
-    /// Verifies an item row's owner signature by rebuilding its transcript
-    /// (write-only transcripts, protocol §1.5/D3). Owner devices see the
-    /// full row including vault_wrapped_*; CLI-filtered rows without those
-    /// fields cannot be rebuilt and are integrity-checked by their AEAD
-    /// tags instead (§8.3 note).
+    /// Verifies a delivered item row end to end (protocol §3.1 v2 E):
+    /// every ciphertext field present in the row must hash to its digest,
+    /// then the writer's signature must verify over the digest-form
+    /// transcript under the given signing algorithm and key (v2 F: the
+    /// writer is the device named by writer_device_id). Fields a CLI view
+    /// pruned are covered by their digests alone.
     public static func verifyItemSignature(_ row: ItemData, vaultID: String,
-                                           ownerSignPublicKey: Data) throws {
+                                           signAlg: String, signPublicKey: Data) throws {
+        let fields: [(field: Data, digest: Data)] = [
+            (row.metaCiphertext, row.metaDigest),
+            (row.secretCiphertext, row.secretDigest),
+            (row.vaultWrappedMetaKey, row.vaultWrappedMetaKeyDigest),
+            (row.vaultWrappedItemKey, row.vaultWrappedItemKeyDigest),
+        ]
+        for (field, digest) in fields {
+            guard digest.count == KeyrefSizes.digest else {
+                throw KeyrefWireError.invalidField("item \(row.itemID): field digest must be \(KeyrefSizes.digest) bytes")
+            }
+            if !field.isEmpty, itemFieldDigest(field) != digest {
+                throw KeyrefWireError.invalidField("item \(row.itemID): field does not match its digest")
+            }
+        }
         let t = ItemTranscript(vaultID: vaultID, itemID: row.itemID, revision: row.revision,
                                metaCiphertext: row.metaCiphertext,
                                secretCiphertext: row.secretCiphertext,
                                vaultWrappedMetaKey: row.vaultWrappedMetaKey,
                                vaultWrappedItemKey: row.vaultWrappedItemKey,
-                               writerDeviceID: row.writerDeviceID)
-        try verifyOwnerSignature(transcript: try t.buildBytes(), signature: row.signature,
-                                 ownerSignPublicKey: ownerSignPublicKey)
+                               writerDeviceID: row.writerDeviceID,
+                               tombstone: row.tombstone)
+        try verifyDeviceSignature(transcript: try t.buildBytes(), signature: row.signature,
+                                  signAlg: signAlg, publicKey: signPublicKey)
     }
 
     /// Verifies a grant row's owner signature (§3.2). vaultID is the vault

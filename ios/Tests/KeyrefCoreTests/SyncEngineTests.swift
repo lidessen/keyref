@@ -46,12 +46,14 @@ final class SyncEngineTests: XCTestCase {
                              vaultWrappedMetaKey: Data(repeating: 3, count: 44),
                              vaultWrappedItemKey: Data(repeating: 4, count: 44),
                              writerDeviceID: ownerDev)
-        return ItemData(vaultID: vaultID, itemID: itemID, revision: revision,
-                        tombstone: tombstone,
-                        metaCiphertext: t.metaCiphertext, secretCiphertext: t.secretCiphertext,
-                        vaultWrappedMetaKey: t.vaultWrappedMetaKey, vaultWrappedItemKey: t.vaultWrappedItemKey,
-                        writerDeviceID: ownerDev,
-                        signature: try ownerSigner.sign(try t.buildBytes()), updatedAt: 1)
+        var row = ItemData(vaultID: vaultID, itemID: itemID, revision: revision,
+                           tombstone: tombstone,
+                           metaCiphertext: t.metaCiphertext, secretCiphertext: t.secretCiphertext,
+                           vaultWrappedMetaKey: t.vaultWrappedMetaKey, vaultWrappedItemKey: t.vaultWrappedItemKey,
+                           writerDeviceID: ownerDev,
+                           signature: try ownerSigner.sign(try t.buildBytes()), updatedAt: 1)
+        row.fillDigests()
+        return row
     }
 
     private func signedGrant(revision: UInt64, deleted: Bool = false,
@@ -211,6 +213,157 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(outcome.deleted, 1)
         XCTAssertEqual(try store.grants().count, 1)
         XCTAssertEqual(try store.grants().first?.deviceID, foreign.deviceID)
+    }
+
+    // MARK: v2 F owner key chain
+
+    private let otherOwnerDev = "22223333444455556666777788889999"
+    private let strangerDev = "aaaabbbbccccddddeeeeffff11112222"
+
+    private func directorySigned(by signer: SoftwareP256Signer, revision: UInt64,
+                                 ownerDevices: [(String, SoftwareP256Signer)]) throws -> DirectoryData {
+        var devices = [DirectoryDevice(deviceID: cliDev, kind: DeviceKind.cli,
+                                       status: DeviceStatus.active,
+                                       hpkeKEM: KEMName.x25519,
+                                       hpkePublicKey: Data(repeating: 7, count: 32),
+                                       signAlg: SignAlg.ed25519,
+                                       signPublicKey: Data(repeating: 8, count: 32),
+                                       grantsDigest: emptyGrantsDigest())]
+        for (dev, owner) in ownerDevices {
+            devices.append(DirectoryDevice(deviceID: dev, kind: DeviceKind.ios,
+                                           status: DeviceStatus.active,
+                                           hpkeKEM: KEMName.p256,
+                                           hpkePublicKey: Data(repeating: 9, count: 65),
+                                           signAlg: SignAlg.ecdsaP256,
+                                           signPublicKey: owner.signPublicKey,
+                                           grantsDigest: emptyGrantsDigest()))
+        }
+        let bytes = try DirectoryTranscript(vaultID: vaultID, directoryRevision: revision,
+                                            devices: devices).buildBytes()
+        return DirectoryData(directoryRevision: revision, signed: bytes,
+                             signature: try signer.sign(bytes))
+    }
+
+    /// Once a directory is saved, a vault whose directory lists no
+    /// active iOS device fails closed: no item, grant or directory is
+    /// accepted, even one signed by the pinned key (v2 F).
+    func testKeyChainFailsClosedWithoutActiveOwner() throws {
+        let cliOnly = DirectoryTranscript(vaultID: vaultID, directoryRevision: 1, devices: [
+            DirectoryDevice(deviceID: cliDev, kind: DeviceKind.cli,
+                            status: DeviceStatus.active,
+                            hpkeKEM: KEMName.x25519,
+                            hpkePublicKey: Data(repeating: 7, count: 32),
+                            signAlg: SignAlg.ed25519,
+                            signPublicKey: Data(repeating: 8, count: 32),
+                            grantsDigest: emptyGrantsDigest()),
+        ])
+        let bytes = try cliOnly.buildBytes()
+        try store.storeDirectory(DirectoryData(directoryRevision: 1, signed: bytes,
+                                               signature: try ownerSigner.sign(bytes)))
+
+        let engine = SyncEngine(api: makeAPI())
+        let row = try signedItem(revision: 1)
+        XCTAssertThrowsError(try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
+            change(seq: 1, entity: "item", entityID: try EntityID.item(itemID),
+                   data: try WireJSON.encoder.encode(row)),
+        ]), store: store)) { error in
+            guard case SyncError.tampered = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertNil(try store.item(itemID))
+
+        let grant = try signedGrant(revision: 1)
+        XCTAssertThrowsError(try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
+            change(seq: 1, entity: "grant", entityID: try EntityID.grant(deviceID: cliDev, itemID: itemID, kind: "use"),
+                   data: try WireJSON.encoder.encode(grant)),
+        ]), store: store)) { error in
+            guard case SyncError.tampered = error else { return XCTFail("\(error)") }
+        }
+
+        let next = try directorySigned(by: ownerSigner, revision: 2,
+                                       ownerDevices: [(ownerDev, ownerSigner)])
+        XCTAssertThrowsError(try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
+            change(seq: 1, entity: "directory", entityID: try EntityID.directory(vaultID),
+                   data: try WireJSON.encoder.encode(next)),
+        ]), store: store))
+        XCTAssertEqual(try store.directory()?.directoryRevision, 1)
+    }
+
+    /// A directory signed by ANY active owner device of the saved
+    /// directory is accepted (v2 F).
+    func testKeyChainAcceptsDirectoryFromAnotherActiveOwner() throws {
+        let other = SoftwareP256Signer(privateKey: P256.Signing.PrivateKey())
+        try store.storeDirectory(try directorySigned(
+            by: ownerSigner, revision: 1,
+            ownerDevices: [(ownerDev, ownerSigner), (otherOwnerDev, other)]))
+        let engine = SyncEngine(api: makeAPI())
+        let next = try directorySigned(by: other, revision: 2,
+                                       ownerDevices: [(ownerDev, ownerSigner), (otherOwnerDev, other)])
+        _ = try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
+            change(seq: 1, entity: "directory", entityID: try EntityID.directory(vaultID),
+                   data: try WireJSON.encoder.encode(next)),
+        ]), store: store)
+        XCTAssertEqual(try store.directory()?.directoryRevision, 2)
+    }
+
+    /// A directory signed by a key no active device carries aborts the
+    /// sync and does not replace the saved directory (v2 F).
+    func testKeyChainRejectsDirectoryFromUnknownKey() throws {
+        try store.storeDirectory(try directorySigned(
+            by: ownerSigner, revision: 1, ownerDevices: [(ownerDev, ownerSigner)]))
+        let engine = SyncEngine(api: makeAPI())
+        let stranger = SoftwareP256Signer(privateKey: P256.Signing.PrivateKey())
+        let rogue = try directorySigned(by: stranger, revision: 2,
+                                        ownerDevices: [(ownerDev, ownerSigner)])
+        XCTAssertThrowsError(try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
+            change(seq: 1, entity: "directory", entityID: try EntityID.directory(vaultID),
+                   data: try WireJSON.encoder.encode(rogue)),
+        ]), store: store)) { error in
+            guard case SyncError.tampered = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertEqual(try store.directory()?.directoryRevision, 1)
+    }
+
+    /// Items verify under the key of the active owner device named by
+    /// writer_device_id; an unknown or revoked writer is rejected even
+    /// though some owner key signed the row (v2 F).
+    func testKeyChainRejectsItemFromUnknownWriter() throws {
+        try store.storeDirectory(try directorySigned(
+            by: ownerSigner, revision: 1, ownerDevices: [(ownerDev, ownerSigner)]))
+        let engine = SyncEngine(api: makeAPI())
+        let t = ItemTranscript(vaultID: vaultID, itemID: itemID, revision: 1,
+                               metaCiphertext: Data(repeating: 1, count: 40),
+                               secretCiphertext: Data(repeating: 2, count: 44),
+                               vaultWrappedMetaKey: Data(repeating: 3, count: 44),
+                               vaultWrappedItemKey: Data(repeating: 4, count: 44),
+                               writerDeviceID: strangerDev)
+        var row = ItemData(vaultID: vaultID, itemID: itemID, revision: 1, tombstone: false,
+                           metaCiphertext: t.metaCiphertext, secretCiphertext: t.secretCiphertext,
+                           vaultWrappedMetaKey: t.vaultWrappedMetaKey,
+                           vaultWrappedItemKey: t.vaultWrappedItemKey,
+                           writerDeviceID: strangerDev,
+                           signature: try ownerSigner.sign(try t.buildBytes()), updatedAt: 1)
+        row.fillDigests()
+        XCTAssertThrowsError(try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
+            change(seq: 1, entity: "item", entityID: try EntityID.item(itemID),
+                   data: try WireJSON.encoder.encode(row)),
+        ]), store: store)) { error in
+            guard case SyncError.tampered = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertNil(try store.item(itemID))
+    }
+
+    /// Grant deletion rows are signed too: a tampered deletion must not
+    /// clear the local wrap (v2 F).
+    func testGrantDeletionFormIsVerified() throws {
+        let engine = SyncEngine(api: makeAPI())
+        try store.upsertGrant(try signedGrant(revision: 1))
+        var del = try signedGrant(revision: 2, deleted: true)
+        del.signature[del.signature.startIndex] ^= 0x01
+        XCTAssertThrowsError(try engine.apply(response: SyncResponse(cursor: 2, hasMore: false, changes: [
+            change(seq: 2, entity: "grant", entityID: try EntityID.grant(deviceID: cliDev, itemID: itemID, kind: "use"),
+                   data: try WireJSON.encoder.encode(del)),
+        ]), store: store))
+        XCTAssertEqual(try store.grants().count, 1)
     }
 
     // MARK: revocation delivery (§8.4)

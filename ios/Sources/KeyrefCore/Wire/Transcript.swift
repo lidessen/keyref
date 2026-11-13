@@ -22,6 +22,8 @@ public enum KeyrefSizes {
     public static let p256Key = 65
     public static let ed25519Key = 32
     public static let digest = 32
+    /// One HPKE wrap of a 32-byte key: ct(32) + tag(16) (v2 E pins the size).
+    public static let wrappedKey = 48
     public static let challenge = 32
     public static let pairNonce = 16
     /// The pairing confirmation secret `c` (protocol §3.13, v2 D): 32
@@ -119,12 +121,20 @@ private func requireUTF8(_ s: String, maxBytes: Int, name: String) throws {
     }
 }
 
-// MARK: - item transcript (§3.1)
+// MARK: - item transcript (§3.1, v2 E)
+
+/// Per-field digest of the item transcript: SHA-256 of the field, with an
+/// empty field hashing as SHA-256("") (protocol §3.1 v2).
+public func itemFieldDigest(_ field: Data) -> Data {
+    Data(SHA256.hash(data: field))
+}
 
 public struct ItemTranscript: Sendable {
     public var vaultID: String
     public var itemID: String
     public var revision: UInt64
+    /// v2 E: the signed tombstone flag byte (0x00 live, 0x01 deletion).
+    public var tombstone: Bool
     public var metaCiphertext: Data
     public var secretCiphertext: Data
     public var vaultWrappedMetaKey: Data
@@ -134,10 +144,11 @@ public struct ItemTranscript: Sendable {
     public init(vaultID: String, itemID: String, revision: UInt64,
                 metaCiphertext: Data, secretCiphertext: Data,
                 vaultWrappedMetaKey: Data, vaultWrappedItemKey: Data,
-                writerDeviceID: String) {
+                writerDeviceID: String, tombstone: Bool = false) {
         self.vaultID = vaultID
         self.itemID = itemID
         self.revision = revision
+        self.tombstone = tombstone
         self.metaCiphertext = metaCiphertext
         self.secretCiphertext = secretCiphertext
         self.vaultWrappedMetaKey = vaultWrappedMetaKey
@@ -145,12 +156,13 @@ public struct ItemTranscript: Sendable {
         self.writerDeviceID = writerDeviceID
     }
 
-    /// Tombstone rows carry four zero-length ciphertext fields.
+    /// Tombstone rows carry the tombstone flag and four zero-length
+    /// ciphertext fields (protocol §3.1 v2).
     public static func tombstone(vaultID: String, itemID: String, revision: UInt64, writerDeviceID: String) -> ItemTranscript {
         ItemTranscript(vaultID: vaultID, itemID: itemID, revision: revision,
                        metaCiphertext: Data(), secretCiphertext: Data(),
                        vaultWrappedMetaKey: Data(), vaultWrappedItemKey: Data(),
-                       writerDeviceID: writerDeviceID)
+                       writerDeviceID: writerDeviceID, tombstone: true)
     }
 
     public func buildBytes() throws -> Data {
@@ -160,14 +172,19 @@ public struct ItemTranscript: Sendable {
         guard revision >= 1 else {
             throw KeyrefWireError.invalidField("revision must be >= 1")
         }
+        if tombstone && (!metaCiphertext.isEmpty || !secretCiphertext.isEmpty ||
+                         !vaultWrappedMetaKey.isEmpty || !vaultWrappedItemKey.isEmpty) {
+            throw KeyrefWireError.invalidField("tombstone rows must leave all four ciphertext fields empty")
+        }
         var b = begin("item")
         b.append(contentsOf: vaultID.utf8); b.append(KeyrefEncoding.fieldSeparator)
         b.append(contentsOf: itemID.utf8); b.append(KeyrefEncoding.fieldSeparator)
         KeyrefEncoding.appendU64BE(revision, to: &b); b.append(KeyrefEncoding.fieldSeparator)
-        b.append(metaCiphertext); b.append(KeyrefEncoding.fieldSeparator)
-        b.append(secretCiphertext); b.append(KeyrefEncoding.fieldSeparator)
-        b.append(vaultWrappedMetaKey); b.append(KeyrefEncoding.fieldSeparator)
-        b.append(vaultWrappedItemKey); b.append(KeyrefEncoding.fieldSeparator)
+        b.append(tombstone ? 0x01 : 0x00); b.append(KeyrefEncoding.fieldSeparator)
+        b.append(itemFieldDigest(metaCiphertext)); b.append(KeyrefEncoding.fieldSeparator)
+        b.append(itemFieldDigest(secretCiphertext)); b.append(KeyrefEncoding.fieldSeparator)
+        b.append(itemFieldDigest(vaultWrappedMetaKey)); b.append(KeyrefEncoding.fieldSeparator)
+        b.append(itemFieldDigest(vaultWrappedItemKey)); b.append(KeyrefEncoding.fieldSeparator)
         b.append(contentsOf: writerDeviceID.utf8)
         return b
     }
@@ -216,6 +233,18 @@ public struct GrantTranscript: Sendable {
         }
         guard hpkeEnc.isEmpty == wrappedKey.isEmpty else {
             throw KeyrefWireError.invalidField("hpke_enc and wrapped_key must be both empty (deletion form) or both present")
+        }
+        // Fixed crypto-field sizes (v2 E): a present encapsulation is one
+        // KEM's key length and a present wrapped key is an HPKE wrap of a
+        // 32-byte key, so the variable-length tail cannot be forged from
+        // arbitrary bytes.
+        if !hpkeEnc.isEmpty {
+            guard hpkeEnc.count == KeyrefSizes.x25519Key || hpkeEnc.count == KeyrefSizes.p256Key else {
+                throw KeyrefWireError.invalidField("hpke_enc must be \(KeyrefSizes.x25519Key) (X25519) or \(KeyrefSizes.p256Key) (P-256) bytes")
+            }
+            guard wrappedKey.count == KeyrefSizes.wrappedKey else {
+                throw KeyrefWireError.invalidField("wrapped_key must be \(KeyrefSizes.wrappedKey) bytes")
+            }
         }
         var b = begin("grant")
         b.append(contentsOf: vaultID.utf8); b.append(KeyrefEncoding.fieldSeparator)

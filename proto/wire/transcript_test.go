@@ -37,8 +37,6 @@ func TestBuildTranscriptGolden(t *testing.T) {
 	secret := []byte{0xbb, 0xcc}
 	vwMeta := []byte{0x01, 0x00, 0x02}
 	vwItem := []byte{}
-	enc := []byte{0x0a}
-	wrapped := []byte{0x0b}
 	digestA := rep(0xd4, SizeDigest)
 	digestB := rep(0x07, SizeDigest)
 
@@ -72,20 +70,32 @@ func TestBuildTranscriptGolden(t *testing.T) {
 	grantItem1 := GrantTranscript{ // view on tvItem2, sorts first by item_id
 		VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem2,
 		Kind: GrantKindView, Revision: 1, ExpiresAt: 0,
-		HPKEEnc: []byte{0x1a}, WrappedKey: []byte{0x1b},
+		// Realistic crypto-field sizes (v2 E): a present enc must be a
+		// valid KEM encapsulation and wrapped_key a 48-byte wrap.
+		HPKEEnc: rep(0x1a, SizeX25519Key), WrappedKey: rep(0x1b, SizeMessageWrappedKey),
 	}
 	grantItem2 := GrantTranscript{ // use on tvItem, second by item_id
 		VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem,
 		Kind: GrantKindUse, Revision: 2, ExpiresAt: 1790000000000,
-		HPKEEnc: enc, WrappedKey: wrapped,
+		HPKEEnc: rep(0x0a, SizeX25519Key), WrappedKey: rep(0x0b, SizeMessageWrappedKey),
 	}
 	// Hand-assembled grant transcript bytes (independent of the builder).
 	grant1Str := "KEYREF1\x00grant\x00" + tvVault + "\x00" + tvDevice + "\x00" + tvItem2 +
-		"\x00view\x00" + u64hex(1) + "\x00" + u64hex(0) + "\x00" + "\x1a\x00" + "\x1b"
+		"\x00view\x00" + u64hex(1) + "\x00" + u64hex(0) + "\x00" + string(rep(0x1a, SizeX25519Key)) +
+		"\x00" + string(rep(0x1b, SizeMessageWrappedKey))
 	grant2Str := "KEYREF1\x00grant\x00" + tvVault + "\x00" + tvDevice + "\x00" + tvItem +
-		"\x00use\x00" + u64hex(2) + "\x00" + u64hex(1790000000000) + "\x00" + "\x0a\x00" + "\x0b"
+		"\x00use\x00" + u64hex(2) + "\x00" + u64hex(1790000000000) + "\x00" +
+		string(rep(0x0a, SizeX25519Key)) + "\x00" + string(rep(0x0b, SizeMessageWrappedKey))
 
 	pairNonce := []byte("0123456789abcdef")
+
+	// Per-field digests of the §3.1 v2 item layout, computed independently
+	// of the builder: SHA-256 of each raw field, empty field = SHA-256("").
+	sha := func(b []byte) string { s := sha256.Sum256(b); return string(s[:]) }
+	itemDigests := "\x00" + sha(meta) + "\x00" + sha(secret) + "\x00" +
+		sha(vwMeta) + "\x00" + sha(vwItem) + "\x00"
+	tombstoneDigests := "\x00" + sha(nil) + "\x00" + sha(nil) + "\x00" +
+		sha(nil) + "\x00" + sha(nil) + "\x00"
 
 	tests := []struct {
 		name string
@@ -103,11 +113,36 @@ func TestBuildTranscriptGolden(t *testing.T) {
 				})
 			}),
 			want: "KEYREF1\x00item\x00" + tvVault + "\x00" + tvItem + "\x00" +
-				u64hex(4) + "\x00" +
-				"\xaa\x00" + "\xbb\xcc\x00" + "\x01\x00\x02\x00" + "\x00" + tvWriter,
+				u64hex(4) + "\x00\x00" + itemDigests + tvWriter,
 		},
 		{
-			name: "item tombstone row has four empty ciphertext fields",
+			name: "item digest form matches the field form",
+			got: mustBuild(t, func() ([]byte, error) {
+				return BuildItemDigestTranscript(ItemDigestTranscript{
+					VaultID: tvVault, ItemID: tvItem, Revision: 4,
+					MetaDigest:                FieldDigest(meta),
+					SecretDigest:              FieldDigest(secret),
+					VaultWrappedMetaKeyDigest: FieldDigest(vwMeta),
+					VaultWrappedItemKeyDigest: FieldDigest(vwItem),
+					WriterDeviceID:            tvWriter,
+				})
+			}),
+			want: "KEYREF1\x00item\x00" + tvVault + "\x00" + tvItem + "\x00" +
+				u64hex(4) + "\x00\x00" + itemDigests + tvWriter,
+		},
+		{
+			name: "item tombstone carries the flag byte and empty digests",
+			got: mustBuild(t, func() ([]byte, error) {
+				return BuildItemTranscript(ItemTranscript{
+					VaultID: tvVault, ItemID: tvItem, Revision: 5,
+					Tombstone: true, WriterDeviceID: tvWriter,
+				})
+			}),
+			want: "KEYREF1\x00item\x00" + tvVault + "\x00" + tvItem + "\x00" +
+				u64hex(5) + "\x00\x01" + tombstoneDigests + tvWriter,
+		},
+		{
+			name: "live row with four empty fields differs from a tombstone",
 			got: mustBuild(t, func() ([]byte, error) {
 				return BuildItemTranscript(ItemTranscript{
 					VaultID: tvVault, ItemID: tvItem, Revision: 5,
@@ -115,7 +150,7 @@ func TestBuildTranscriptGolden(t *testing.T) {
 				})
 			}),
 			want: "KEYREF1\x00item\x00" + tvVault + "\x00" + tvItem + "\x00" +
-				u64hex(5) + "\x00\x00\x00\x00\x00" + tvWriter,
+				u64hex(5) + "\x00\x00" + tombstoneDigests + tvWriter,
 		},
 		{
 			name: "grant use with expiry",
@@ -236,7 +271,7 @@ func TestBuildTranscriptRejectsInvalidInput(t *testing.T) {
 	validGrant := GrantTranscript{
 		VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem,
 		Kind: GrantKindUse, Revision: 1, ExpiresAt: 0,
-		HPKEEnc: []byte{1}, WrappedKey: []byte{2},
+		HPKEEnc: rep(1, SizeX25519Key), WrappedKey: rep(2, SizeMessageWrappedKey),
 	}
 	validDevice := DirectoryDevice{
 		DeviceID: tvDevice, Kind: DeviceKindCLI, Status: DeviceStatusActive,
@@ -278,6 +313,39 @@ func TestBuildTranscriptRejectsInvalidInput(t *testing.T) {
 			g := validGrant
 			g.Revision = 0
 			return BuildGrantTranscript(g)
+		}},
+		{"grant enc is not a KEM encapsulation size", func() ([]byte, error) {
+			g := validGrant
+			g.HPKEEnc = rep(1, 31)
+			return BuildGrantTranscript(g)
+		}},
+		{"grant wrapped key is not 48 bytes", func() ([]byte, error) {
+			g := validGrant
+			g.WrappedKey = rep(2, 47)
+			return BuildGrantTranscript(g)
+		}},
+		{"item tombstone with a ciphertext field", func() ([]byte, error) {
+			it := validItem
+			it.Tombstone = true
+			return BuildItemTranscript(it)
+		}},
+		{"item digest form with a short digest", func() ([]byte, error) {
+			d := ItemDigestTranscript{
+				VaultID: tvVault, ItemID: tvItem, Revision: 1,
+				MetaDigest: rep(1, 31), WriterDeviceID: tvWriter,
+			}
+			return BuildItemDigestTranscript(d)
+		}},
+		{"item digest form tombstone with a non-empty digest", func() ([]byte, error) {
+			d := ItemDigestTranscript{
+				VaultID: tvVault, ItemID: tvItem, Revision: 1, Tombstone: true,
+				MetaDigest:                FieldDigest([]byte{1}),
+				SecretDigest:              FieldDigest(nil),
+				VaultWrappedMetaKeyDigest: FieldDigest(nil),
+				VaultWrappedItemKeyDigest: FieldDigest(nil),
+				WriterDeviceID:            tvWriter,
+			}
+			return BuildItemDigestTranscript(d)
 		}},
 		{"directory bad status", func() ([]byte, error) {
 			d := validDevice
@@ -382,12 +450,12 @@ func TestGrantsDigest(t *testing.T) {
 	use := GrantTranscript{
 		VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem,
 		Kind: GrantKindUse, Revision: 2, ExpiresAt: 1790000000000,
-		HPKEEnc: []byte{0x0a}, WrappedKey: []byte{0x0b},
+		HPKEEnc: rep(0x0a, SizeX25519Key), WrappedKey: rep(0x0b, SizeMessageWrappedKey),
 	}
 	view := GrantTranscript{
 		VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem2,
 		Kind: GrantKindView, Revision: 1,
-		HPKEEnc: []byte{0x1a}, WrappedKey: []byte{0x1b},
+		HPKEEnc: rep(0x1a, SizeX25519Key), WrappedKey: rep(0x1b, SizeMessageWrappedKey),
 	}
 	tUse, err := BuildGrantTranscript(use)
 	if err != nil {
@@ -422,7 +490,7 @@ func TestGrantsDigest(t *testing.T) {
 		useSameItem := GrantTranscript{
 			VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem,
 			Kind: GrantKindUse, Revision: 1,
-			HPKEEnc: []byte{1}, WrappedKey: []byte{2},
+			HPKEEnc: rep(1, SizeX25519Key), WrappedKey: rep(2, SizeMessageWrappedKey),
 		}
 		viewSameItem := useSameItem
 		viewSameItem.Kind = GrantKindView

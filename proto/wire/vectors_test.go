@@ -30,6 +30,7 @@ type vecItem struct {
 	VaultID             string `json:"vault_id"`
 	ItemID              string `json:"item_id"`
 	Revision            uint64 `json:"revision"`
+	Tombstone           bool   `json:"tombstone"`
 	MetaCiphertext      string `json:"meta_ciphertext"`
 	SecretCiphertext    string `json:"secret_ciphertext"`
 	VaultWrappedMetaKey string `json:"vault_wrapped_meta_key"`
@@ -55,6 +56,10 @@ type vectorsFile struct {
 		Input      vecItem `json:"input"`
 		Transcript string  `json:"transcript"`
 	} `json:"item_transcript"`
+	ItemTombstoneTranscript struct {
+		Input      vecItem `json:"input"`
+		Transcript string  `json:"transcript"`
+	} `json:"item_tombstone_transcript"`
 	GrantTranscript struct {
 		Input      vecGrant `json:"input"`
 		Transcript string   `json:"transcript"`
@@ -168,13 +173,13 @@ func grantFromVec(t *testing.T, g vecGrant) GrantTranscript {
 	}
 }
 
-func TestVectorItemTranscript(t *testing.T) {
-	v := loadVectors(t)
-	in := v.ItemTranscript.Input
+func itemTranscriptFromVec(t *testing.T, in vecItem) []byte {
+	t.Helper()
 	got, err := BuildItemTranscript(ItemTranscript{
 		VaultID:             in.VaultID,
 		ItemID:              in.ItemID,
 		Revision:            in.Revision,
+		Tombstone:           in.Tombstone,
 		MetaCiphertext:      mustHex(t, in.MetaCiphertext),
 		SecretCiphertext:    mustHex(t, in.SecretCiphertext),
 		VaultWrappedMetaKey: mustHex(t, in.VaultWrappedMetaKey),
@@ -184,8 +189,36 @@ func TestVectorItemTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return got
+}
+
+func TestVectorItemTranscript(t *testing.T) {
+	v := loadVectors(t)
+	if v.ItemTranscript.Input.Tombstone {
+		t.Fatal("golden live-row vector must not be a tombstone")
+	}
+	got := itemTranscriptFromVec(t, v.ItemTranscript.Input)
 	if !bytes.Equal(got, mustHex(t, v.ItemTranscript.Transcript)) {
 		t.Fatalf("item transcript diverges from golden vector:\n got: %x\nwant: %x", got, mustHex(t, v.ItemTranscript.Transcript))
+	}
+}
+
+// TestVectorItemTombstoneTranscript pins the v2 E tombstone form: the
+// signed flag byte plus the four empty-field digests, which differ from a
+// live row with four empty fields.
+func TestVectorItemTombstoneTranscript(t *testing.T) {
+	v := loadVectors(t)
+	in := v.ItemTombstoneTranscript.Input
+	if !in.Tombstone {
+		t.Fatal("golden tombstone vector must carry tombstone=true")
+	}
+	got := itemTranscriptFromVec(t, in)
+	if !bytes.Equal(got, mustHex(t, v.ItemTombstoneTranscript.Transcript)) {
+		t.Fatalf("item tombstone transcript diverges from golden vector:\n got: %x\nwant: %x", got, mustHex(t, v.ItemTombstoneTranscript.Transcript))
+	}
+	in.Tombstone = false
+	if bytes.Equal(itemTranscriptFromVec(t, in), got) {
+		t.Fatal("live row with four empty fields must not equal a tombstone")
 	}
 }
 

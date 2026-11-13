@@ -144,6 +144,7 @@ These come from `docs/design.md` §16 — read that section before changing secu
 - Grants are empty at pairing completion until a human selects items.
 - Revoking a possibly-leaked CLI rotates the item keys it could reach.
 - Approval requests carry the CLI's device signature; the one-time wrap binds `approval_id`, `item_id` and the request transcript digest.
+- Every item and grant row a client applies is verified first: items by their per-field digests plus the writer signature (v2 E/F), grants against the owner key chain. A failed row is skipped, never stored; a directory that does not verify aborts the sync.
 - No `system()` / `sh -c`; the child is spawned directly.
 - Local-only items (storage class from design v0.7) never upload their secret ciphertext.
 - `sms:<message_id>` is not resolvable by `list`/`get` — it appears only in an approval-gated `exec`.

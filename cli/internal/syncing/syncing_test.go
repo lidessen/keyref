@@ -1,6 +1,7 @@
 package syncing
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,11 +23,13 @@ import (
 )
 
 const (
-	tvVault  = "00112233445566778899aabbccddeeff"
-	tvOwner  = "99998888777766665555444433332222"
-	tvDevice = "0123456789abcdef0123456789abcdef"
-	tvItem   = "deadbeefdeadbeefdeadbeefdeadbeef"
-	tvItem2  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tvVault    = "00112233445566778899aabbccddeeff"
+	tvOwner    = "99998888777766665555444433332222"
+	tvDevice   = "0123456789abcdef0123456789abcdef"
+	tvItem     = "deadbeefdeadbeefdeadbeefdeadbeef"
+	tvItem2    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	tvOther    = "11112222333344445555666677778888"
+	tvStranger = "aaaabbbbccccddddeeeeffff00001111"
 )
 
 func newIdentity(t *testing.T) *device.Identity {
@@ -135,6 +138,11 @@ func TestSyncAppliesItemsGrantsDirectory(t *testing.T) {
 			HPKEKEM: wire.KEMX25519, HPKEPublicKey: id.HPKEPublic,
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: id.SignPublic,
 			GrantsDigest: digest,
+		}, {
+			DeviceID: tvOwner, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
+			HPKEKEM: wire.KEMP256, HPKEPublicKey: owner.HPKEPub,
+			SignAlg: wire.SignAlgECDSAP256, SignPublicKey: owner.SignPub,
+			GrantsDigest: digest,
 		}},
 	})
 	if err != nil {
@@ -187,6 +195,7 @@ func TestSyncAppliesLocalItemRow(t *testing.T) {
 	local := item.Data
 	local.SecretCiphertext = nil
 	local.VaultWrappedItemKey = nil
+	local.FillDigests()
 	tb, err := wire.BuildItemTranscript(wire.ItemTranscript{
 		VaultID: tvVault, ItemID: tvItem, Revision: 1,
 		MetaCiphertext: local.MetaCiphertext, SecretCiphertext: nil,
@@ -241,7 +250,7 @@ func TestSyncTombstoneAndGrantDeletionClearCache(t *testing.T) {
 
 	// Item tombstone deletes the row and its grants (design §6.3).
 	ss2 := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "item:"+tvItem,
-		wire.ItemData{VaultID: tvVault, ItemID: tvItem, Revision: 2, Tombstone: true, WriterDeviceID: tvOwner})})
+		owner.TombstoneRow(tvItem, tvOwner, 2))})
 	if _, err := Run(st, client.New(ss2.URL, tokn()), tvDevice); err != nil {
 		t.Fatal(err)
 	}
@@ -262,8 +271,7 @@ func TestSyncTombstoneAndGrantDeletionClearCache(t *testing.T) {
 	if _, err := Run(st, client.New(ss3.URL, tokn()), tvDevice); err != nil {
 		t.Fatal(err)
 	}
-	del := wire.GrantData{DeviceID: tvDevice, ItemID: tvItem2, Kind: wire.GrantKindView,
-		Deleted: true, Revision: 2}
+	del := owner.DeleteGrantRow(tvDevice, tvItem2, wire.GrantKindView, 2)
 	ss4 := newSyncServer(t, []wire.SyncChange{change(wire.EntityGrant, "g", del)})
 	if _, err := Run(st, client.New(ss4.URL, tokn()), tvDevice); err != nil {
 		t.Fatal(err)
@@ -289,7 +297,7 @@ func TestSyncRejectsTombstoneRollback(t *testing.T) {
 
 	// Tombstone at revision 2 deletes the row.
 	ss2 := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "item:"+tvItem,
-		wire.ItemData{VaultID: tvVault, ItemID: tvItem, Revision: 2, Tombstone: true, WriterDeviceID: tvOwner})})
+		owner.TombstoneRow(tvItem, tvOwner, 2))})
 	if _, err := Run(st, client.New(ss2.URL, tokn()), tvDevice); err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +312,64 @@ func TestSyncRejectsTombstoneRollback(t *testing.T) {
 	}
 	if _, ok, _ := st.GetItem(tvItem); ok {
 		t.Fatal("tombstone rollback resurrected the item")
+	}
+}
+
+// TestSyncRejectsStaleTombstoneReplay pins the tombstone replay guard:
+// a correctly signed but stale tombstone must not delete a newer local
+// row (a malicious server could otherwise roll a resurrected item back
+// by replaying the old deletion).
+func TestSyncRejectsStaleTombstoneReplay(t *testing.T) {
+	owner := testowner.New(t, tvVault, tvOwner)
+	st := newStore(t, owner)
+
+	item := owner.SealItem(tvItem, tvOwner, "openai-prod", "n", "***", "v")
+	ss := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "i", item.Data)})
+	if _, err := Run(st, client.New(ss.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tombstone at revision 2 deletes the row.
+	ss2 := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "i",
+		owner.TombstoneRow(tvItem, tvOwner, 2))})
+	if _, err := Run(st, client.New(ss2.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.GetItem(tvItem); ok {
+		t.Fatal("tombstone did not delete item")
+	}
+
+	// Re-create the item at revision 3 (server-side resurrection).
+	revived := item.Data
+	revived.Revision = 3
+	revived.FillDigests()
+	tb, err := wire.BuildItemTranscript(wire.ItemTranscript{
+		VaultID: tvVault, ItemID: tvItem, Revision: 3,
+		MetaCiphertext: revived.MetaCiphertext, SecretCiphertext: revived.SecretCiphertext,
+		VaultWrappedMetaKey: revived.VaultWrappedMetaKey,
+		VaultWrappedItemKey: revived.VaultWrappedItemKey,
+		WriterDeviceID:      tvOwner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revived.Signature = owner.Sign(tb)
+	ss3 := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "i", revived)})
+	if _, err := Run(st, client.New(ss3.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+	if it, ok, _ := st.GetItem(tvItem); !ok || it.Revision != 3 {
+		t.Fatal("resurrected item not applied")
+	}
+
+	// Replaying the revision-2 tombstone must not delete the rev-3 row.
+	ss4 := newSyncServer(t, []wire.SyncChange{change(wire.EntityItem, "i",
+		owner.TombstoneRow(tvItem, tvOwner, 2))})
+	if _, err := Run(st, client.New(ss4.URL, tokn()), tvDevice); err != nil {
+		t.Fatal(err)
+	}
+	if it, ok, _ := st.GetItem(tvItem); !ok || it.Revision != 3 {
+		t.Fatal("stale tombstone replay deleted the newer row")
 	}
 }
 
@@ -326,8 +392,7 @@ func TestSyncRejectsGrantResurrection(t *testing.T) {
 	}
 
 	// Revoke the grant (deletion form, revision 2).
-	del := wire.GrantData{DeviceID: tvDevice, ItemID: tvItem, Kind: wire.GrantKindView,
-		Deleted: true, Revision: 2}
+	del := owner.DeleteGrantRow(tvDevice, tvItem, wire.GrantKindView, 2)
 	ss2 := newSyncServer(t, []wire.SyncChange{change(wire.EntityGrant, "g", del)})
 	if _, err := Run(st, client.New(ss2.URL, tokn()), tvDevice); err != nil {
 		t.Fatal(err)
@@ -366,6 +431,11 @@ func TestSyncRejectsStaleDirectory(t *testing.T) {
 				DeviceID: tvDevice, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
 				HPKEKEM: wire.KEMX25519, HPKEPublicKey: id.HPKEPublic,
 				SignAlg: wire.SignAlgEd25519, SignPublicKey: id.SignPublic,
+				GrantsDigest: digest,
+			}, {
+				DeviceID: tvOwner, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
+				HPKEKEM: wire.KEMP256, HPKEPublicKey: owner.HPKEPub,
+				SignAlg: wire.SignAlgECDSAP256, SignPublicKey: owner.SignPub,
 				GrantsDigest: digest,
 			}},
 		})
@@ -445,7 +515,10 @@ func TestSyncDetectsRevocationAndCleansUp(t *testing.T) {
 	}
 }
 
-func TestSyncRejectsTamperedGrant(t *testing.T) {
+// TestSyncSkipsTamperedGrant pins the v2 F row rule: a row whose
+// signature does not verify is skipped (one warning line), not applied,
+// and does not fail the sync.
+func TestSyncSkipsTamperedGrant(t *testing.T) {
 	owner := testowner.New(t, tvVault, tvOwner)
 	id := newIdentity(t)
 	st := newStore(t, owner)
@@ -455,10 +528,19 @@ func TestSyncRejectsTamperedGrant(t *testing.T) {
 	// Tamper with the wrapped key after signing.
 	view.WrappedKey[0] ^= 1
 
+	var warned bytes.Buffer
+	Warn = &warned
+	t.Cleanup(func() { Warn = nil })
+
 	ss := newSyncServer(t, []wire.SyncChange{change(wire.EntityGrant, "g", view)})
-	_, err := Run(st, client.New(ss.URL, tokn()), tvDevice)
-	if err == nil {
-		t.Fatal("tampered grant applied")
+	if _, err := Run(st, client.New(ss.URL, tokn()), tvDevice); err != nil {
+		t.Fatalf("tampered row must not fail the sync: %v", err)
+	}
+	if grants, _ := st.Grants(); len(grants) != 0 {
+		t.Fatal("tampered grant was applied")
+	}
+	if !bytes.Contains(warned.Bytes(), []byte("sync skipped grant")) {
+		t.Fatal("no warning for the skipped row")
 	}
 }
 

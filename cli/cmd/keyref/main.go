@@ -17,8 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lidessen/keyref/proto/wire"
-
 	"github.com/lidessen/keyref/cli/internal/approval"
 	"github.com/lidessen/keyref/cli/internal/audit"
 	"github.com/lidessen/keyref/cli/internal/client"
@@ -38,6 +36,9 @@ import (
 )
 
 func main() {
+	// Rows skipped by the v2 F verification surface on stderr without
+	// failing the sync (docs/protocol-v2.md §F).
+	syncing.Warn = os.Stderr
 	// Purge runs on every path out of protectedMain — normal returns
 	// AND panic unwinding — and always BEFORE os.Exit, which would
 	// otherwise skip deferred cleanup (design.md §12.2: guarded
@@ -645,7 +646,7 @@ func runExecCore(opts execOptions) int {
 			reporterRaw, _, _ = st.GetKV(session.KVDeviceID)
 			if dirSigned, ok, _ := st.GetKV(pair.KVDirectorySigned); ok && len(dirSigned) > 0 {
 				if dirSig, ok2, _ := st.GetKV(pair.KVDirectorySig); ok2 && len(dirSig) > 0 {
-					if wire.VerifyOwnerSignature(dirSigned, dirSig, ownerPub) == nil {
+					if syncing.VerifyStoredDirectory(st, dirSigned, dirSig) == nil {
 						if recips, err := audit.OwnersFromDirectory(dirSigned); err == nil {
 							auditRecips = recips
 						}
@@ -678,7 +679,7 @@ func runExecCore(opts execOptions) int {
 		if !ok || len(dirSig) == 0 {
 			return nil, errNoDirectory
 		}
-		if err := wire.VerifyOwnerSignature(dirSigned, dirSig, ownerPub); err != nil {
+		if err := syncing.VerifyStoredDirectory(st, dirSigned, dirSig); err != nil {
 			return nil, err
 		}
 		return audit.ParseDirectory(dirSigned)
@@ -1276,7 +1277,7 @@ func cmdDecider(args []string) int {
 			if !ok || len(dirSig) == 0 {
 				return nil, errNoDirectory
 			}
-			if err := wire.VerifyOwnerSignature(dirSigned, dirSig, ownerPub); err != nil {
+			if err := syncing.VerifyStoredDirectory(st, dirSigned, dirSig); err != nil {
 				return nil, err
 			}
 			return audit.ParseDirectory(dirSigned)

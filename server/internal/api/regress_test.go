@@ -336,7 +336,7 @@ func TestRevokedCLIBootstrapTombstones(t *testing.T) {
 		t.Fatalf("revoke directory: %d %s", s, raw)
 	}
 	tb, _ := wire.BuildItemTranscript(wire.ItemTranscript{
-		VaultID: owner.vaultID, ItemID: itemID, Revision: 2, WriterDeviceID: owner.deviceID,
+		VaultID: owner.vaultID, ItemID: itemID, Revision: 2, Tombstone: true, WriterDeviceID: owner.deviceID,
 	})
 	delSig, _ := wire.SignOwnerECDSA(tb, owner.signKey)
 	if s, raw := e.do("DELETE", "/v1/items/"+itemID, owner.token, wire.DeleteItemRequest{Revision: 2, Signature: delSig}); s != 204 {

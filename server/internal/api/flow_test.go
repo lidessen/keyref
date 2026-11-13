@@ -201,7 +201,7 @@ func TestFullFlowSelfHosted(t *testing.T) {
 
 	// --- item tombstone cascade (§6.11) ----------------------------------
 	tb, err := wire.BuildItemTranscript(wire.ItemTranscript{
-		VaultID: owner.vaultID, ItemID: item1, Revision: 3, WriterDeviceID: owner.deviceID,
+		VaultID: owner.vaultID, ItemID: item1, Revision: 3, Tombstone: true, WriterDeviceID: owner.deviceID,
 	})
 	if err != nil {
 		t.Fatal(err)

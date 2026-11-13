@@ -184,7 +184,7 @@ func TestStructuredFieldTamperRejection(t *testing.T) {
 	grant := GrantTranscript{
 		VaultID: tvVault, DeviceID: tvDevice, ItemID: tvItem,
 		Kind: GrantKindView, Revision: 2, ExpiresAt: 1790000000000,
-		HPKEEnc: []byte{1}, WrappedKey: []byte{2},
+		HPKEEnc: rep(1, SizeX25519Key), WrappedKey: rep(2, SizeMessageWrappedKey),
 	}
 	grantSig, err := SignOwnerECDSA(mustBuild(t, func() ([]byte, error) {
 		return BuildGrantTranscript(grant)
