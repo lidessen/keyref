@@ -142,6 +142,33 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertTrue(try store.grants().isEmpty)
     }
 
+    func testTombstoneWithBadSignatureIsRejected() throws {
+        let engine = SyncEngine(api: makeAPI())
+        try store.upsertItem(try signedItem(revision: 1))
+        var tombstone = try signedItem(revision: 2, tombstone: true)
+        tombstone.signature[tombstone.signature.startIndex] ^= 0x01
+        XCTAssertThrowsError(try engine.apply(response: SyncResponse(cursor: 2, hasMore: false, changes: [
+            change(seq: 2, entity: "item", entityID: try EntityID.item(itemID),
+                   data: try WireJSON.encoder.encode(tombstone)),
+        ]), store: store)) { error in
+            guard case SyncError.tampered = error else { return XCTFail("\(error)") }
+        }
+        // The forged tombstone must not have deleted anything.
+        XCTAssertNotNil(try store.item(itemID))
+    }
+
+    func testOlderDirectoryDoesNotReplaceNewer() throws {
+        let engine = SyncEngine(api: makeAPI())
+        let newer = try signedDirectory(revision: 9, cliStatus: DeviceStatus.active)
+        try store.storeDirectory(newer)
+        let older = try signedDirectory(revision: 5, cliStatus: DeviceStatus.active)
+        _ = try engine.apply(response: SyncResponse(cursor: 1, hasMore: false, changes: [
+            change(seq: 1, entity: "directory", entityID: try EntityID.directory(vaultID),
+                   data: try WireJSON.encoder.encode(older)),
+        ]), store: store)
+        XCTAssertEqual(try store.directory()?.directoryRevision, 9)
+    }
+
     // MARK: grants
 
     func testGrantApplyForeignVerifiedAndKept() throws {

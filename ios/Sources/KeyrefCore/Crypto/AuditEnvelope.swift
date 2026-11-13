@@ -102,19 +102,25 @@ public enum AuditEnvelope {
         let wrapCount = Int(envelope[envelope.startIndex])
         guard wrapCount >= 1 else { throw KeyrefCryptoError.invalidBlob }
         var offset = envelope.startIndex + 1
-        var lastError: Error = KeyrefCryptoError.invalidBlob
+        // First pass: walk every wrap record to find where the body starts.
+        var wraps: [(enc: Data, wrapped: Data)] = []
         for _ in 0..<wrapCount {
-            guard envelope.count >= offset + encHeaderSize else { throw KeyrefCryptoError.invalidBlob }
+            guard envelope.endIndex >= offset + encHeaderSize else { throw KeyrefCryptoError.invalidBlob }
             let b0 = Int(envelope[offset]), b1 = Int(envelope[offset + 1])
             let encLen = (b0 << 8) | b1
             offset += encHeaderSize
-            guard envelope.count >= offset + encLen + wrappedKeySize else {
+            guard envelope.endIndex >= offset + encLen + wrappedKeySize else {
                 throw KeyrefCryptoError.invalidBlob
             }
             let enc = Data(envelope[offset..<offset + encLen])
             let wrapped = Data(envelope[offset + encLen..<offset + encLen + wrappedKeySize])
-            let blob = Data(envelope[(offset + encLen + wrappedKeySize)...])
+            wraps.append((enc: enc, wrapped: wrapped))
             offset += encLen + wrappedKeySize
+        }
+        // The body (nonce‖ct‖tag) follows ALL wraps.
+        let blob = Data(envelope[offset...])
+        var lastError: Error = KeyrefCryptoError.invalidBlob
+        for (enc, wrapped) in wraps {
             do {
                 let info = try hpkeInfo(purpose: KeyrefPurpose.auditEventKey, vaultID: vaultID,
                                         recipientDeviceID: ownerDeviceID)

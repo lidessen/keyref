@@ -763,19 +763,23 @@ public final class LiveBackend: AppBackend {
         var rewrapped = 0
         var newGrants: [GrantData] = []
         for grant in stateStore.allGrants()
-        where grant.itemID == row.itemID && grant.kind == "use" && !grant.deleted {
+        where grant.itemID == row.itemID
+            && (grant.kind == GrantKind.use || grant.kind == GrantKind.view) && !grant.deleted {
             guard let device = directoryDevices()?.first(where: { $0.deviceID == grant.deviceID }),
                   device.status == DeviceStatus.active else { continue }
+            // sealItem 同时换了 metaKey 和 itemKey：use 授予包新 itemKey，
+            // view 授予包新 metaKey，否则 view 设备解不开新的 meta。
+            let wrapKey = grant.kind == GrantKind.view ? sealed.metaKey : sealed.itemKey
             let (enc, ct) = try ItemCrypto.wrapGrantKey(
                 kemName: device.hpkeKEM, recipientPublicKey: device.hpkePublicKey,
-                kind: "use", vaultID: vaultID, recipientDeviceID: device.deviceID,
-                key: sealed.itemKey)
-            var g = GrantData.make(deviceID: device.deviceID, itemID: row.itemID, kind: "use",
+                kind: grant.kind, vaultID: vaultID, recipientDeviceID: device.deviceID,
+                key: wrapKey)
+            var g = GrantData.make(deviceID: device.deviceID, itemID: row.itemID, kind: grant.kind,
                               hpkeEnc: enc, wrappedKey: ct, expiresAt: grant.expiresAt,
                               revision: grant.revision + 1, signature: Data(), deleted: false)
             g.signature = try owner.signer.sign(g.transcript(vaultID: vaultID).buildBytes())
             newGrants.append(g)
-            rewrapped += 1
+            if grant.kind == GrantKind.use { rewrapped += 1 }
         }
         if !newGrants.isEmpty {
             try await api.putGrants(PutGrantsRequest.make(grants: newGrants))
