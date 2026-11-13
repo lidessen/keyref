@@ -255,9 +255,12 @@ func TestStageFdFileUnlinksImmediately(t *testing.T) {
 		t.Fatalf("fd payload %q", b)
 	}
 	// A staging failure reports false (Run maps it to exit 18, not
-	// the redaction-specific 14 — §7.6 semantics).
-	if _, ok := stageFdFile("/nonexistent-staging-dir-xyz", 3, []byte("x")); ok {
-		t.Fatal("staging succeeded in a missing directory")
+	// the redaction-specific 14 — §7.6 semantics). The fallback is
+	// tested directly: where memfd exists the directory is not used at
+	// all, so only the file landing can fail on a missing directory
+	// (issue #4).
+	if _, ok := stageFdFallback("/nonexistent-staging-dir-xyz", 3, []byte("x")); ok {
+		t.Fatal("the file fallback succeeded in a missing directory")
 	}
 }
 

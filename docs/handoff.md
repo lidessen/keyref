@@ -8,7 +8,7 @@
 
 第 5 节的前八步、第 9 步的 lib + cli 部分与第 10 步已完成（第 9 步的 iOS / server 部分待办）：
 
-- **第 1 步（验证）通过。** `TestStageFdFileUnlinksImmediately` 与 e2e 的 `TestPtyReplyFlow` 在本机通过（第 2 节的两个失败确认为沙箱环境所致）。`d7c3d6b` 的 iOS 改动在 macOS 上编译通过，`KeyrefCoreTests` 119 个用例全绿，含三条新回归；整个 `Keyref` scheme 也全绿。
+- **第 1 步（验证）通过。** `TestStageFdFileUnlinksImmediately` 与 e2e 的 `TestPtyReplyFlow` 在本机通过。**更正（2026-11-13）：** 前者此前被当成沙箱所致，实际是 Linux 上 memfd 让断言不成立，已在 issue #4 修复（见第 2 节）；只有 pty 那条是环境所致。`d7c3d6b` 的 iOS 改动在 macOS 上编译通过，`KeyrefCoreTests` 119 个用例全绿，含三条新回归；整个 `Keyref` scheme 也全绿。
 - **第 2 步（v2 G）已实现。** 见 protocol v2 §G 与 protocol.md §6.3/§6.15：目录是设备行的唯一真相来源，省略即撤销，`revoked` 终态，设备上限按目录记录投影。测试：`server/internal/store/directory_test.go`（新增）、`server/internal/api/regress_test.go`。
 - **第 3 步（v2 A + B）已实现。** 见 protocol v2 §A/§B 与 protocol.md §3.11/§3.12/§6.19–§6.22：审批请求改签结构化誊本（覆盖 subject、过期时间、一次性公钥、密文摘要），审批决定新增 `decision_signature`（服务器 approvals 表 schema v7，CLI 解包前先验签，失败退出码 13）。改动：`proto/wire`、`server/internal/api/approvals.go`、`server/internal/store/approvals.go`、`cli/internal/approval`、`cli/internal/decider`、`cli/e2e`、iOS `ApprovalFlows.swift` / `LiveBackend.decideApproval` / `ApprovalTranscripts.swift`（新增）、跨语言向量（新增三条 approval 誊本向量）。负例测试：CLI 拒绝没有签名或签名不对的决定；decider 拒绝它无法归属到目录里 active CLI 的请求；iOS 拒绝临时公钥被换掉的请求。
 
@@ -72,7 +72,7 @@ go test -C cli -tags=e2e ./e2e
 
 在 review 用的 Linux 沙箱里有两个失败，**改动之前就失败，与本次改动无关**，在正常机器上应当通过，请确认：
 
-- `cli/internal/exec` 的 `TestStageFdFileUnlinksImmediately`：断言在不存在的目录里暂存会失败，但沙箱里 memfd 路径直接成功。**更正（2026-11-13 lib + CLI review）：这不是沙箱问题。** Linux 上 `stageFdFile` 先走 memfd，根本不碰目录，断言在任何有 memfd 的 Linux 上都不成立；CI 跑在 `ubuntu-latest`，`main` 最近几次 `ci` 都是失败。见 issue #4。
+- `cli/internal/exec` 的 `TestStageFdFileUnlinksImmediately`：**已修复（issue #4）。** 原断言「在不存在的目录里暂存会失败」在 Linux 上不成立——`stageFdFile` 先走 memfd，根本不碰目录，CI 跑在 `ubuntu-latest`，`main` 的 `ci` 因此一直是红的。现在文件回退拆成 `stageFdFallback` 直接测试，memfd 分支在 `fdstage_linux_test.go` 里单独断言（不依赖目录、载荷完整），macOS 与 Linux 交叉编译均通过。
 - e2e 的 `TestPtyReplyFlow`：沙箱没有可用的 pty，`exec --pty` 以退出码 18 结束。因此本次对 pty 路径的改动（启动失败文本脱敏、`ChildExit`、`Failed()` 检查）**编译过但没有运行过**，请在有 pty 的机器上跑一遍 `go test -C cli ./internal/exec` 和这个 e2e。
 
 iOS 在第 1 步已全量编译与测试通过；Android 在第 10 步已编译、通过 vectors 测试与 lint（未在真机上运行）。

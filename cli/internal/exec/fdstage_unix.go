@@ -23,6 +23,13 @@ func stageFdFile(dir string, fdnum int, payload []byte) (*os.File, bool) {
 		f.Close()
 	}
 	// 2) O_CREAT|O_EXCL 0600, write, seek, unlink while still open.
+	return stageFdFallback(dir, fdnum, payload)
+}
+
+// stageFdFallback is the file-based landing. It is split out so both
+// platforms can test it directly whether or not memfd is available
+// (issue #4).
+func stageFdFallback(dir string, fdnum int, payload []byte) (*os.File, bool) {
 	path := filepath.Join(dir, "fd"+strconv.Itoa(fdnum))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
