@@ -3,7 +3,7 @@
 //
 // Guarded buffers are allocated outside the Go heap, locked with mlock,
 // invisible to the garbage collector and immovable by it. They are
-// explicitly zeroed on Destroy, on Vault.Lock (the `keyref lock` command)
+// explicitly zeroed on Destroy, on `keyref lock`
 // and on process exit (Purge, deferred in main). Secrets never travel
 // through ordinary heap strings: this package exposes byte slices only,
 // and secret values are extracted from decrypted JSON by jsonscan.go
@@ -18,7 +18,6 @@ package secret
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/awnumar/memguard"
 )
@@ -69,70 +68,6 @@ func (k *Key) Destroy() {
 		k.buf.Destroy()
 		k.buf = nil
 	}
-}
-
-// Vault holds the unwrapped keys of the current session in guarded
-// memory, keyed by item id (design.md §6.5: unlocked item keys stay in
-// process memory only, at most 8 hours, dropped by `keyref lock`).
-type Vault struct {
-	mu   sync.Mutex
-	keys map[string]*Key
-}
-
-// NewVault returns an empty key vault.
-func NewVault() *Vault {
-	return &Vault{keys: make(map[string]*Key)}
-}
-
-// Put stores key under itemID, taking ownership: a previously stored key
-// for the same item is destroyed, and on failure key is destroyed too.
-func (v *Vault) Put(itemID string, key *Key) {
-	if key == nil {
-		return
-	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	old, ok := v.keys[itemID]
-	if ok && old != key {
-		old.Destroy()
-	}
-	v.keys[itemID] = key
-}
-
-// Get returns the guarded key for itemID if present.
-func (v *Vault) Get(itemID string) (*Key, bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	k, ok := v.keys[itemID]
-	return k, ok
-}
-
-// Delete destroys and removes the key for itemID.
-func (v *Vault) Delete(itemID string) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if k, ok := v.keys[itemID]; ok {
-		k.Destroy()
-		delete(v.keys, itemID)
-	}
-}
-
-// Lock destroys every key in the vault — the memory effect of
-// `keyref lock` (design.md §6.5, §12.2).
-func (v *Vault) Lock() {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	for id, k := range v.keys {
-		k.Destroy()
-		delete(v.keys, id)
-	}
-}
-
-// Len returns the number of live keys.
-func (v *Vault) Len() int {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return len(v.keys)
 }
 
 // NewPlaintext allocates a guarded buffer of size n for a secret
