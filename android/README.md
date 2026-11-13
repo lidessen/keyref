@@ -12,7 +12,7 @@ scripts/dev/android-build.sh testDebugUnitTest   # golden-vector gate (design §
 scripts/dev/android-build.sh lintDebug           # must report 0 errors
 ```
 
-The script points `JAVA_HOME` at Homebrew's OpenJDK 21 (Gradle 8.9 supports Java ≤ 22 and rejects Android Studio's bundled JBR 25) and `ANDROID_HOME` at `~/Library/Android/sdk`, then runs the committed wrapper (Gradle 8.9, AGP 8.7.3, compileSdk 35). The host JDK only runs Gradle — the bytecode target stays `jvmTarget = 17` in `app/build.gradle.kts`. Opening this directory in Android Studio (`File → Open`, for device runs and `Build → Build APK(s)`) works alongside the CLI path.
+The script prefers `JAVA_HOME` = Android Studio's bundled JDK 25 (Gradle 9.9.1 runs on Java 17–27) and falls back to a Homebrew LTS JDK; `ANDROID_HOME` defaults to `~/Library/Android/sdk`. It then runs the committed wrapper (Gradle 9.9.1, AGP 9.5.1 with built-in Kotlin 2.4.21, compileSdk 37) — AGP 9 compiles Kotlin itself, so there is no `kotlin-android` plugin. The host JDK only runs Gradle — the bytecode target stays `jvmTarget = 17` in `app/build.gradle.kts`. Opening this directory in Android Studio (`File → Open`, for device runs and `Build → Build APK(s)`) works alongside the CLI path.
 
 ## Use
 

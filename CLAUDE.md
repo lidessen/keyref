@@ -97,7 +97,7 @@ KEYREF_SERVER=http://127.0.0.1:8080 keyref pair
 
 Server environment: `KEYREF_DATA`, `KEYREF_LISTEN`, `KEYREF_ENFORCE_QUOTAS=1` (hosted behaviour: quotas on, PoW required), `KEYREF_DOMAIN` (ACME/HTTPS), `KEYREF_ACME_EMAIL`. CLI: `KEYREF_SERVER` (origin override), `KEYREF_KEYRING_DIR`.
 
-**Android** builds and tests on this machine through the committed Gradle wrapper (Gradle 8.9, AGP 8.7.3, compileSdk 35):
+**Android** builds and tests on this machine through the committed Gradle wrapper (Gradle 9.9.1, AGP 9.5.1 with built-in Kotlin 2.4.21, compileSdk 37):
 
 ```sh
 scripts/dev/android-build.sh assembleDebug       # debug APK
@@ -105,7 +105,7 @@ scripts/dev/android-build.sh testDebugUnitTest   # golden-vector gate (design §
 scripts/dev/android-build.sh lintDebug           # must report 0 errors
 ```
 
-The script points `JAVA_HOME` at Homebrew's OpenJDK 21 — Gradle 8.9 supports Java ≤ 22 and rejects Android Studio's bundled JBR 25 — and `ANDROID_HOME` at `~/Library/Android/sdk`. `CryptoVectorsTest` asserts the transcripts, the §3.13 pairing MAC, the AEAD blob and both HPKE KEMs byte-for-byte against `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`; a Kotlin failure means the code drifted, never the fixture. Running the app still needs a real phone (SMS broadcasts are not delivered on a simulator), so the pairing → seal → upload loop has not been watched end to end here.
+The script prefers Android Studio's bundled JDK 25 for `JAVA_HOME` — Gradle 9.9.1 runs on Java 17–27 — and falls back to Homebrew's OpenJDK 21 when Studio is not installed; `ANDROID_HOME` defaults to `~/Library/Android/sdk`. `CryptoVectorsTest` asserts the transcripts, the §3.13 pairing MAC, the AEAD blob and both HPKE KEMs byte-for-byte against `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`; a Kotlin failure means the code drifted, never the fixture. Running the app still needs a real phone (SMS broadcasts are not delivered on a simulator), so the pairing → seal → upload loop has not been watched end to end here.
 
 ## Architecture
 
