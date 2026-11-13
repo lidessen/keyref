@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/lidessen/keyref/cli/internal/atomicfile"
 	"github.com/lidessen/keyref/cli/internal/config"
 )
 
@@ -131,8 +132,9 @@ func Load(p config.Paths) (*Config, error) {
 	return cfg, nil
 }
 
-// Save persists the default and the non-built-in sources.
-func Save(p config.Paths, cfg *Config) error {
+// save persists the default and the non-built-in sources. Callers hold
+// the configuration lock; the write itself is atomic.
+func save(p config.Paths, cfg *Config) error {
 	doc := document{Default: cfg.Default, Sources: map[string]Entry{}}
 	for name, entry := range cfg.Sources {
 		if _, built := builtins(p)[name]; built {
@@ -144,22 +146,21 @@ func Save(p config.Paths, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(Path(p), append(raw, '\n'), 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(Path(p), 0o600)
+	return atomicfile.Write(Path(p), append(raw, '\n'))
 }
 
 // Ensure writes the initial configuration once. A data directory that
 // already holds a paired vault defaults to it, so upgrading the CLI does
 // not silently move existing commands onto an empty local vault.
 func Ensure(p config.Paths, paired bool) error {
-	if _, err := os.Stat(Path(p)); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return Save(p, defaults(p, paired))
+	return atomicfile.WithLock(Path(p), func() error {
+		if _, err := os.Stat(Path(p)); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return save(p, defaults(p, paired))
+	})
 }
 
 // Resolve picks the source for one command.
@@ -195,15 +196,17 @@ func (c *Config) Specs() []Spec {
 // SetDefault persists the source used when neither --source nor
 // KEYREF_SOURCE is given.
 func SetDefault(p config.Paths, name string) error {
-	cfg, err := Load(p)
-	if err != nil {
-		return err
-	}
-	if _, ok := cfg.Sources[name]; !ok {
-		return fmt.Errorf("%w: %q", ErrUnknown, name)
-	}
-	cfg.Default = name
-	return Save(p, cfg)
+	return atomicfile.WithLock(Path(p), func() error {
+		cfg, err := Load(p)
+		if err != nil {
+			return err
+		}
+		if _, ok := cfg.Sources[name]; !ok {
+			return fmt.Errorf("%w: %q", ErrUnknown, name)
+		}
+		cfg.Default = name
+		return save(p, cfg)
+	})
 }
 
 // Add registers another local vault under its own name.
@@ -214,22 +217,27 @@ func Add(p config.Paths, name, path string) (Spec, error) {
 	if _, built := builtins(p)[name]; built {
 		return Spec{}, fmt.Errorf("%w: %q", ErrBuiltIn, name)
 	}
-	cfg, err := Load(p)
-	if err != nil {
-		return Spec{}, err
-	}
-	if _, exists := cfg.Sources[name]; exists {
-		return Spec{}, fmt.Errorf("%w: source %q already exists", ErrInvalid, name)
-	}
-	entry, err := normalize(p, name, Entry{Kind: KindLocal, Path: path})
-	if err != nil {
-		return Spec{}, err
-	}
-	cfg.Sources[name] = entry
-	if err := Save(p, cfg); err != nil {
-		return Spec{}, err
-	}
-	return Spec{Name: name, Kind: entry.Kind, Path: entry.Path}, nil
+	var spec Spec
+	err := atomicfile.WithLock(Path(p), func() error {
+		cfg, err := Load(p)
+		if err != nil {
+			return err
+		}
+		if _, exists := cfg.Sources[name]; exists {
+			return fmt.Errorf("%w: source %q already exists", ErrInvalid, name)
+		}
+		entry, err := normalize(p, name, Entry{Kind: KindLocal, Path: path})
+		if err != nil {
+			return err
+		}
+		cfg.Sources[name] = entry
+		if err := save(p, cfg); err != nil {
+			return err
+		}
+		spec = Spec{Name: name, Kind: entry.Kind, Path: entry.Path}
+		return nil
+	})
+	return spec, err
 }
 
 // Remove drops a registered source. The vault file itself is left alone.
@@ -237,18 +245,20 @@ func Remove(p config.Paths, name string) error {
 	if _, built := builtins(p)[name]; built {
 		return fmt.Errorf("%w: %q cannot be removed", ErrBuiltIn, name)
 	}
-	cfg, err := Load(p)
-	if err != nil {
-		return err
-	}
-	if _, ok := cfg.Sources[name]; !ok {
-		return fmt.Errorf("%w: %q", ErrUnknown, name)
-	}
-	delete(cfg.Sources, name)
-	if cfg.Default == name {
-		cfg.Default = LocalName
-	}
-	return Save(p, cfg)
+	return atomicfile.WithLock(Path(p), func() error {
+		cfg, err := Load(p)
+		if err != nil {
+			return err
+		}
+		if _, ok := cfg.Sources[name]; !ok {
+			return fmt.Errorf("%w: %q", ErrUnknown, name)
+		}
+		delete(cfg.Sources, name)
+		if cfg.Default == name {
+			cfg.Default = LocalName
+		}
+		return save(p, cfg)
+	})
 }
 
 func normalize(p config.Paths, name string, entry Entry) (Entry, error) {

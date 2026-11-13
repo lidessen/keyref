@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/lidessen/keyref/cli/internal/atomicfile"
 )
 
 // DefaultOrigin is the compiled-in official hosted origin. It is still
@@ -78,10 +80,12 @@ func SetOrigin(p Paths, origin string) error {
 	if !validOrigin(origin) {
 		return errors.New("config: origin must be an https:// (or http://127.0.0.1 debug) URL")
 	}
-	if err := os.WriteFile(p.ServerFile, []byte(origin+"\n"), 0o600); err != nil {
+	// Atomic replace: a reader must never see a truncated server.conf
+	// (issue #6).
+	if err := atomicfile.Write(p.ServerFile, []byte(origin+"\n")); err != nil {
 		return fmt.Errorf("config: write origin: %w", err)
 	}
-	return os.Chmod(p.ServerFile, 0o600)
+	return nil
 }
 
 // validOrigin accepts https origins, and http only for loopback

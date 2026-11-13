@@ -7,10 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -483,5 +485,53 @@ func TestInitNeverOverwritesAnotherVaultsKey(t *testing.T) {
 	}
 	if len(entries) != 2 {
 		t.Fatalf("expected one keyring entry per vault, got %d", len(entries))
+	}
+}
+
+// TestConcurrentSourceAddsDoNotLoseUpdates pins issue #6: sources.json
+// is replaced atomically under an advisory lock, so parallel load-
+// modify-save writers keep every update and readers never see a
+// truncated file.
+func TestConcurrentSourceAddsDoNotLoseUpdates(t *testing.T) {
+	_, _, env := localHome(t)
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []string
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("src%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := exec.Command(cliBin, "source", "add", name,
+				"--path", filepath.Join(dir, name+".db"))
+			cmd.Env = env
+			var out bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Run(); err != nil {
+				mu.Lock()
+				failures = append(failures, name+": "+err.Error()+" "+out.String())
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if len(failures) > 0 {
+		t.Fatalf("concurrent source add failed: %v", failures)
+	}
+
+	list := localRun(t, env, "", "source", "list")
+	if list.code != 0 {
+		t.Fatalf("source list exit %d: %s", list.code, list.stderr)
+	}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("src%d", i)
+		if !strings.Contains(list.stdout, name) {
+			t.Fatalf("source %s was lost:\n%s", name, list.stdout)
+		}
 	}
 }
