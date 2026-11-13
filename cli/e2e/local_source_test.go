@@ -350,7 +350,7 @@ func TestInterruptTerminatesTheChild(t *testing.T) {
 	// run's unique helper path so the process scan cannot match anything
 	// else on the machine.
 	marker := helperBin + " sleep"
-	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30")
+	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30s")
 	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
