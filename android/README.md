@@ -1,46 +1,31 @@
-# keyref source（安卓验证码采集端）
+# keyref source (the Android verification-code collector)
 
-design.md v0.8 §14 的 `kind = source` 设备：读取本机短信、按本机过滤规则筛出
-验证码、在**收到时即加密**（信封直封 active owner + 有效委托期内的决策器，
-§14.3）、经 WorkManager 队列补传到 keyref 服务器。只上传、永不读取——
-它连条目密钥都没有（§14.2）。
+The `kind = source` device of design.md v0.8 §14: it reads the phone's own SMS, picks out verification codes with the phone's own filter rules, **encrypts them at the moment they arrive** (the envelope is addressed directly to the active owner plus any decider with a valid delegation, §14.3), and tops up the upload to the keyref server through a WorkManager queue. It only uploads and never reads — it does not even hold item keys (§14.2).
 
-## 构建
+## Build
 
-1. Android Studio（自带 JDK/SDK）`File → Open` 打开本目录，等 Gradle 同步。
-2. Run 到测试机，或 `Build → Build APK(s)` 生成 APK 侧载。
+1. Open this directory with Android Studio (it bundles its own JDK/SDK) via `File → Open`, and wait for the Gradle sync.
+2. Run it on a test device, or `Build → Build APK(s)` to produce a sideloadable APK.
 
-本机（macOS 开发机）没有 Android 构建环境，这批代码未经编译——同步或编译
-报错直接贴给维护者即可。
+This machine (the macOS dev box) has no Android build environment, so this code has never been compiled here — send sync or compile errors straight to the maintainer.
 
-## 使用
+## Use
 
-1. 安装后**打开一次 App**（系统不向从未启动的 App 投递广播）。
-2. 授权短信权限、加入电池优化白名单。
-3. 填服务器地址 → 「生成配对二维码」→ 用已配对的 iOS keyref App 扫码
-   （二维码带 `t=source`，§9.1 v1.2）。确认页会写明「只能上传短信」。
-4. 添加发信号码白名单 → 开启采集。
+1. **Open the app once after installing** (the system does not deliver broadcasts to an app that has never been launched).
+2. Grant the SMS permission and add the app to the battery-optimisation allowlist.
+3. Enter the server address → 「生成配对二维码」 → scan it with the paired iOS keyref app (the QR code carries `t=source`, §9.1 v1.2). The confirmation page states that it can only upload SMS.
+4. Add a sender-number allowlist → switch collection on.
 
-采集规则（design §14.2）：发信号码命中白名单 **且** 正文含 4–8 位数字码形。
-白名单为空时什么都不采集。规则只存本机——source 解不开任何密文，规则没有
-可加密同步的去处。
+The collection rule (design §14.2): the sender number must hit the allowlist **and** the body must contain a 4–8 digit code pattern. An empty allowlist collects nothing. The rules stay on the phone — a source device cannot decrypt any ciphertext, so there is nowhere for the rules to be encrypted and synced to.
 
-## 实现注记
+## Implementation notes
 
-- **HPKE 互操作面**：`crypto/Envelope.kt` 隔离了 BouncyCastle 的
-  RFC 9180 实现（DHKEM(X25519) + HKDF-SHA256 + AES-256-GCM）。它必须与
-  `proto/crypto`（circl）逐字节互通——design §9.2 的跨语言金向量是准入
-  门槛，接通 iOS 前先跑向量。
-- **誊本**：`crypto/Transcripts.kt` 逐字节实现 §3.5/§3.6/§3.9/§3.3；
-  目录解析与 CLI `audit.parseDirectory` 同策略（定长 + 重建比对，fail-closed）。
-- **私钥落盘**：AndroidKeyStore 不支持 X25519/Ed25519（design §14.2 已声明），
-  私钥由 Keystore 内 AES-GCM 密钥加密后存私有文件。设备丢失 = 撤销重配，
-  它本来就什么都不读。
-- **队列**：信封在收到短信的那一刻就封好落盘（密文先落本地），WorkManager
-  指数退避补传；401 续会话重试一次；配额类 4xx 丢弃并记日志。
+- **The HPKE interop surface**: `crypto/Envelope.kt` isolates BouncyCastle's RFC 9180 implementation (DHKEM(X25519) + HKDF-SHA256 + AES-256-GCM). It has to interoperate byte for byte with `proto/crypto` (circl) — the cross-language golden vectors of design §9.2 are the admission gate, so run the vectors before wiring this up to iOS.
+- **Transcripts**: `crypto/Transcripts.kt` implements §3.5 / §3.6 / §3.9 / §3.3 byte for byte; directory parsing uses the same strategy as the CLI's `audit.parseDirectory` (fixed length + rebuild comparison, fail-closed).
+- **Private key at rest**: AndroidKeyStore does not support X25519 / Ed25519 (already stated in design §14.2), so the private key is encrypted with an AES-GCM key inside the Keystore and stored in a private file. Losing the device means revoking and pairing again — it never reads anything anyway.
+- **Queue**: the envelope is sealed and written to disk the moment the SMS arrives (the ciphertext lands locally first), and WorkManager tops the upload up with exponential backoff; a 401 retries once after renewing the session; quota-type 4xx responses are dropped and logged.
 
-## 已知边界
+## Known boundaries
 
-- iOS 收件箱 / 审批界面 / 决策器管理（design §14.4、§14.8 的 iOS 侧）尚未
-  实现，本 App 配对后上传的消息暂无 iOS 端消费界面。
-- BC 的 HPKE 与 circl 的互操作向量尚未生成（design §9.2 的既有任务）。
+- The iOS inbox, approval screen and decider management (design §14.4, and the iOS side of §14.8) are implemented on the iOS side now, so a message uploaded by this app has a consumer — but this app itself has never been run against a real server, because it has never been compiled.
+- The BC ↔ circl interop vectors have not been generated or checked yet (the outstanding task from design §9.2).

@@ -1,50 +1,63 @@
 # keyref
 
-keyref 是给人用的秘密管理器，也是给 AI agent 用的秘密代理。人在 iOS 上保管 API key、token、密码和笔记。Agent 通过 CLI **使用**这些秘密，但工具回传给模型的内容里**没有明文**。
+keyref is a secret manager for humans and a secret broker for AI agents. A human keeps API keys, tokens, passwords and notes on iOS. An agent **uses** those secrets through the CLI, and the content the tools hand back to the model contains **no plaintext**.
 
-典型用法：
+Typical use:
 
 ```bash
 keyref exec --env OPENAI_API_KEY=openai-prod -- \
   curl https://api.openai.com/v1/models
 ```
 
-Agent 写下的是稳定引用 `openai-prod`，不是密钥本身。`keyref` 在子进程里注入真实的值，并把 stdout / stderr 里再次出现的秘密脱敏。
+The agent writes the stable reference `openai-prod`, not the secret itself. `keyref` injects the real value into the child process and redacts any secret that shows up again in stdout / stderr.
 
-## 仓库里有什么
+## What is in this repository
 
-| 路径 | 内容 |
+| Path | Contents |
 | --- | --- |
-| [docs/design.md](docs/design.md) | 完整设计（中文） |
-| [docs/protocol.md](docs/protocol.md) | 线协议契约：端点、请求/响应示例、签名誊本字节格式 |
-| [server/](server/) | 密文同步服务，Go + SQLite，官方托管和自托管同一二进制 |
-| [cli/](cli/) | Agent 用的 `keyref` CLI，Go（v0.4 起与服务器同语言） |
-| [ios/](ios/) | iOS 管理端，Swift / SwiftUI，已实现 |
-| [android/](android/) | 短信验证码采集端（design v0.8 §14 的 `source` 设备），Kotlin，未编译验证 |
-| [scripts/](scripts/) | 本地开发脚本：安装 CLI、起开发服务器、docker compose |
+| [docs/design.md](docs/design.md) | The full design (Chinese) |
+| [docs/protocol.md](docs/protocol.md) | The wire contract: endpoints, request/response examples, exact transcript byte layout |
+| [server/](server/) | Ciphertext sync service, Go + SQLite; the hosted and self-hosted deployments are the same binary |
+| [cli/](cli/) | The `keyref` CLI for agents, Go (same language as the server since v0.4). One command surface over both credential sources |
+| [ios/](ios/) | The iOS owner app, Swift / SwiftUI, implemented |
+| [android/](android/) | SMS code collector (`kind = source` device in design v0.8 §14), Kotlin, not compiled or verified yet |
+| [scripts/](scripts/) | Local development scripts: install the CLI, run a dev server, docker compose |
 
-三端均已实现。server / cli / proto / tools 的 `go vet` + `go test` 与 CLI 端到端测试（对着真实拉起的服务器走通建库、配对、同步、exec）在 CI 门禁里（[.github/workflows/ci.yml](.github/workflows/ci.yml)）；iOS 的 KeyrefCore / KeyrefUI 测试在模拟器与 macOS 上本地运行（见 [ios/README.md](ios/README.md)），CI 暂无 iOS job。
+All three sides are implemented. `go vet` + `go test` for server / cli / proto / tools, plus the CLI end-to-end tests (create vault, pair, sync and exec against a real running server) are the CI gate ([.github/workflows/ci.yml](.github/workflows/ci.yml)). The iOS KeyrefCore / KeyrefUI tests run locally on the simulator and on macOS (see [ios/README.md](ios/README.md)); CI has no iOS job yet.
 
-## 本地开发
+## Local development
 
 ```bash
-# 1. 起服务器（开发模式：plain HTTP、无配额），默认 127.0.0.1:8080
+# 1. Start the server (development mode: plain HTTP, no quotas), default 127.0.0.1:8080
 scripts/run-server.sh
 
-# 2. 安装 CLI 到 PATH（默认 /usr/local/bin，可用 KEYREF_BIN_DIR 覆盖）
+# 2. Install the CLI onto your PATH (default /usr/local/bin, override with KEYREF_BIN_DIR)
 scripts/install-cli.sh
 
-# 3. 或者用 docker compose 跑同一个服务器镜像
-scripts/docker-up.sh      # 构建镜像并启动；scripts/docker-down.sh 停止
+# 3. Or run the same server image with docker compose
+scripts/docker-up.sh      # builds the image and starts it; scripts/docker-down.sh stops it
 ```
 
-CLI 指向本地服务器：`KEYREF_SERVER=http://127.0.0.1:8080 keyref pair`。
+Point the CLI at the local server: `KEYREF_SERVER=http://127.0.0.1:8080 keyref pair`.
 
-## 已经定下的几件事
+## Two sources, one command surface
 
-- 服务器只存密文。名称、描述、`ref` 和秘密值都在密文里。
-- 主密钥留在 iOS 的 Secure Enclave 保护之下。CLI 只拿到被授权条目的条目密钥，拿不到主密钥。
-- 占位符写成 `{{keyref:openai-prod}}`。更稳妥的注入方式是 `--env`、stdin 或额外的文件描述符，而不是把秘密放进进程参数。
-- 同步层是一份 Go 服务器加嵌入式 SQLite。什么都不配置时，iOS 和 CLI 连官方托管；把服务器 URL 改成自己的地址就是自托管。托管按固定月租加硬配额来收费，避免免费用量把账单撑开。自托管免费。
+`keyref` reads and writes **sources**. `local` is a standalone offline vault on this machine and is the default; `sync` is the paired iOS vault, which the CLI may read but never write. Every data command takes `--source NAME`, `KEYREF_SOURCE` does the same, and `keyref source default NAME` persists the choice.
 
-设计里的取舍、威胁模型和还没拍板的问题都写在 [docs/design.md](docs/design.md)。
+```sh
+keyref init                              # create the local vault (key → OS keyring)
+keyref set my-ref < /path/to/secret      # store a secret, read from stdin
+keyref get my-ref                        # ref, mask, size — never the value
+keyref exec --env TOKEN=my-ref -- curl https://api.example.com
+```
+
+The paired vault is what the rest of this README is about; the local source is the same commands with no phone, no server and no approvals. See [cli/README.md](cli/README.md).
+
+## Decisions already made
+
+- The server stores ciphertext only. Names, descriptions, `ref` and secret values all live inside the ciphertext.
+- The master key stays under the iOS Secure Enclave. The CLI only ever receives the item keys of the items it was granted; it never gets the master key.
+- Placeholders are written as `{{keyref:openai-prod}}`. The safer injection shapes are `--env`, stdin or an extra file descriptor, rather than putting a secret in process arguments.
+- The sync layer is one Go server with embedded SQLite. With nothing configured, iOS and the CLI talk to the official hosted service; change the server URL to your own address and you are self-hosting. The hosted service is priced as a fixed monthly fee plus hard quotas, so free usage cannot blow the bill up. Self-hosting is free.
+
+The trade-offs, the threat model and the questions that are still open are written up in [docs/design.md](docs/design.md).

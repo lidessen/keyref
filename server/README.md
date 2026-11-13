@@ -1,29 +1,29 @@
 # server
 
-密文同步服务。已实现（Phase 1 + Phase 2 的审批端点）。服务器不持有、也不能解开 VMK 或条目明文。官方托管和自托管是同一份程序。
+The ciphertext sync service. Implemented (Phase 1 plus the Phase 2 approval endpoints). The server neither holds nor can decrypt the VMK or any item plaintext. The hosted service and the self-hosted deployment are the same program.
 
-设计见 [docs/design.md](../docs/design.md) 的「存储、部署与费用」和「服务端 API」两节；线格式以 [docs/protocol.md](../docs/protocol.md) 为准。
+See the "storage, deployment and cost" and "server API" sections of [docs/design.md](../docs/design.md) for the design; [docs/protocol.md](../docs/protocol.md) is the authority on the wire format.
 
-- 一份 Go 二进制 `keyref-server`，内嵌 SQLite（纯 Go 驱动，`CGO_ENABLED=0`）。Docker 镜像里就是这个二进制。
-- 端点：设计 §11 的全部 27 个——vault、配对三步、会话挑战、sync（`cursor=0` 现状引导、合成变更、revoked 可见性）、items/grants/directory、审批（CLI 签名验证、10 条待处理上限、2 秒轮询下限且不计配额）、恢复接管、审计、healthz、删除保险库、APNs 令牌登记（审批落库后 best-effort 扇出；未配置凭据则跳过推送）。
-- 只校验信封的形状、签名是否存在、设备是否有效、体积和配额是否超限。不要在服务器里实现解密。
-- CLI 身份的设备不能写入或删除条目。
-- 鉴权令牌只代表「这个设备可以来同步」，不是解密密钥。数据库里存令牌的哈希。
-- 自托管默认不限额、不校验收据、不向官方服务器上报。官方托管（`KEYREF_ENFORCE_QUOTAS=1`）必须打开配额；超额返回错误，不按量加钱。
+- One Go binary, `keyref-server`, with embedded SQLite (a pure Go driver, `CGO_ENABLED=0`). The Docker image contains exactly this binary.
+- Endpoints: all 32 of protocol §5 — vault, the three pairing steps, session challenge, sync (`cursor=0` for the current-state bootstrap, synthetic changes, revoked visibility), items/grants/directory, approvals (CLI signature verification, a ceiling of 10 pending requests, a 2-second polling floor that does not count against quotas), recovery takeover, audit, healthz, vault deletion, APNs token registration (a best-effort fan-out once an approval is stored; pushes are skipped when no credentials are configured), messages and delegation.
+- It only validates the shape of an envelope, whether a signature is present, whether the device is valid, and whether size and quota limits are exceeded. Never implement decryption in the server.
+- A device with the CLI role cannot write or delete items.
+- An auth token only means "this device may come and sync". It is not a decryption key. The database stores the hash of the token.
+- Self-hosted defaults to no quotas, no licence check and no reporting to the official server. The hosted deployment (`KEYREF_ENFORCE_QUOTAS=1`) must have quotas enabled; exceeding them is an error, never metered billing.
 
-布局：
+Layout:
 
 ```
 server/
 ├── go.mod
 ├── Dockerfile
-├── cmd/keyref-server/     # 入口：serve / backup / version
+├── cmd/keyref-server/     # entry points: serve / backup / version
 └── internal/
-    ├── api/               # 全部端点（httptest 流程测试覆盖）
-    ├── store/             # §6.3 schema、迁移、查询
-    ├── httpserver/        # plain HTTP / ACME（KEYREF_DOMAIN）
-    ├── quotas/            # KEYREF_ENFORCE_QUOTAS=1 时的档位与全局预算
-    └── pow/               # 托管注册的工作量证明
+    ├── api/               # all endpoints (covered by httptest flow tests)
+    ├── store/             # the §6.3 schema, migrations, queries
+    ├── httpserver/        # plain HTTP / ACME (KEYREF_DOMAIN)
+    ├── quotas/            # the tiers and the global budget when KEYREF_ENFORCE_QUOTAS=1
+    └── pow/               # the proof of work for hosted registration
 ```
 
-费用（2026-10-20 的公开价，计算过程在设计文档里）：官方托管的固定成本大约 $18/月，含一台小机器、域名和 Apple Developer 年费。诚实用户的边际成本按 $0.01/月规划。免费档有硬配额；Plus 的推荐标价是 $6/月或 $48/年。自托管免费。
+Cost (public prices as of 2026-10-20, with the calculation in the design document): the fixed cost of the hosted service is about $18/month, covering a small machine, the domain and the Apple Developer annual fee. The marginal cost of an honest user is budgeted at $0.01/month. The free tier has hard quotas; Plus is recommended at a list price of $6/month or $48/year. Self-hosting is free.

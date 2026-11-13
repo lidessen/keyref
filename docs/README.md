@@ -1,11 +1,13 @@
 # docs
 
-规格与契约。`server/`、`cli/`、`ios/` 已有实现，实现中的问题先回到这几份文档改，再动代码。
+Specifications and contracts. `server/`, `cli/` and `ios/` have implementations; when an implementation raises a question, change these documents first, then the code.
 
-| 文档 | 内容 |
+The three documents below are written in Chinese; commands, field names, algorithms, paths and code identifiers stay English in them, and this index is the English entry point.
+
+| Document | Contents |
 | --- | --- |
-| [design.md](design.md) | 完整设计：威胁模型、架构、`exec` 与注入形态、数据模型、密码学、恢复与撤销、存储与自托管、托管费用、API、技术栈、路线图、开放问题 |
-| [protocol.md](protocol.md) | 线协议契约：端点、请求/响应示例、签名誊本字节格式。两侧实现的唯一依据 |
-| [ios-ui.md](ios-ui.md) | iOS 交互规格：信息架构、逐屏状态与文案、Liquid Glass 与无障碍决定 |
+| [design.md](design.md) | The full design: threat model, architecture, `exec` and the injection shapes, data model, cryptography, recovery and revocation, storage and self-hosting, hosting cost, API, tech stack, roadmap, open questions |
+| [protocol.md](protocol.md) | The wire contract: endpoints, request/response examples, the exact transcript byte layout. The only reference both implementations work against |
+| [ios-ui.md](ios-ui.md) | The iOS interaction spec: information architecture, per-screen states and copy, Liquid Glass and accessibility decisions |
 
-阅读顺序建议：先看 design.md 开头的「决策摘要」，再看威胁模型、`exec` 与「注入的三种形态」（§7.8）三处——它们决定了这个产品和普通密码管理器的差别。实现协议代码前先通读 protocol.md。
+Suggested reading order: the "decision summary" at the top of design.md first, then the threat model, `exec` and the three injection shapes (§7.8) — those three decide what makes this product different from an ordinary password manager. Read protocol.md end to end before writing any protocol code.

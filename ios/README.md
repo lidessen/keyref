@@ -1,75 +1,54 @@
 # ios
 
-人用的管理端。Agent 不在这里运行；这里负责保管主密钥、编辑条目、配对 CLI、批准敏感的 `exec`。
+The owner app for humans. Agents do not run here; this side holds the master key, edits items, pairs the CLI and approves sensitive `exec` calls.
 
-设计见 [docs/design.md](../docs/design.md) 的「iOS 应用」和「密码学」两节。
+See the "iOS app" and "cryptography" sections of [docs/design.md](../docs/design.md) for the design.
 
-- Swift + SwiftUI。最低系统 **iOS 26**（design v0.5 起随 Liquid Glass 提升；CryptoKit 原生 RFC 9180 HPKE，隔区私钥原生接入）。
-- 解锁用 Face ID / Touch ID（`LocalAuthentication`）。包裹 VMK 的协定密钥放在 Secure Enclave，曲线只能是 P-256。
-- 另有一把 Secure Enclave 的 P-256 签名密钥，用来给条目密文和配对记录签名。
-- 条目的创建、修改、删除、轮换只发生在这台（或以后的另一台）owner 设备上。CLI 不能改保险库。
-- 界面文案用简体中文。`ref`、算法名、API 路径保持英文。
-- 可以展示明文，但每次「显示」都要再走一次生物识别。不要把明文写进系统日志、崩溃报告或分析 SDK。
-- 同步服务器默认是官方托管。设置里可以改成任意 HTTPS origin，用来连自托管。扫到的配对二维码若指向另一台服务器，先显示域名再请人确认。不要因为官方托管是自己人运营就少做端到端加密。
+- Swift + SwiftUI. Minimum system **iOS 26** (raised with Liquid Glass in design v0.5; CryptoKit has native RFC 9180 HPKE, and the enclave private key is integrated natively).
+- Unlock uses Face ID / Touch ID (`LocalAuthentication`). The agreement key that wraps the VMK lives in the Secure Enclave and its curve must be P-256.
+- There is a second Secure Enclave P-256 signing key, used to sign item ciphertext and pairing records.
+- Creating, editing, deleting and rotating items only happen on this device (or on a later one). The CLI cannot modify the vault.
+- Interface copy is Simplified Chinese. `ref`, algorithm names and API paths stay English.
+- Plaintext may be shown, but every "reveal" goes through biometric authentication again. Never write plaintext into system logs, crash reports or analytics SDKs.
+- The sync server defaults to the official hosted service. The settings allow any HTTPS origin, for self-hosting. When a scanned pairing QR code points at a different server, show the domain first and ask for confirmation. Do not skip a layer of end-to-end encryption just because the hosted service is operated by us.
 
-当前布局：
+Current layout:
 
 ```
 ios/
-├── Package.swift            # KeyrefCore（密码学/协议/同步/审批/双机配对）+ KeyrefUI（全部界面）
-├── Sources/KeyrefCore/      # UI-free 核心：加密、APIClient、SyncEngine、VaultFlows、ApprovalFlows、OwnerPairing
-├── Sources/KeyrefUI/        # SwiftUI 界面层（docs/ios-ui.md 的 17 屏，iOS 26 Liquid Glass）
-├── Tests/                   # KeyrefCoreTests + KeyrefUITests（两套都跑模拟器与 macOS）
-├── Keyref.xcodeproj         # App 壳（target "Keyref"，iOS 26+）
-└── Keyref/                  # @main 入口与 Info.plist
+├── Package.swift            # KeyrefCore (crypto / protocol / sync / approvals / second-device pairing) + KeyrefUI (all the views)
+├── Sources/KeyrefCore/      # UI-free core: encryption, APIClient, SyncEngine, VaultFlows, ApprovalFlows, OwnerPairing
+├── Sources/KeyrefUI/        # The SwiftUI layer (the 17 screens of docs/ios-ui.md, iOS 26 Liquid Glass)
+├── Tests/                   # KeyrefCoreTests + KeyrefUITests (both run on the simulator and on macOS)
+├── Keyref.xcodeproj         # The app shell (target "Keyref", iOS 26+)
+└── Keyref/                  # the @main entry point and Info.plist
 ```
 
-构建：`scripts/dev/xcodebuild.sh -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`。脚本把 `DEVELOPER_DIR` 指到 `/Applications/Xcode.app/Contents/Developer`——xcode-select 指向 CommandLineTools 的机器上直接跑 `xcodebuild` 会报 "tool 'xcodebuild' requires Xcode"；已把 xcode-select 切到完整 Xcode 的机器可以直接用 `xcodebuild` 本体。
+Build: `scripts/dev/xcodebuild.sh -project Keyref.xcodeproj -scheme Keyref -destination 'platform=iOS Simulator,name=iPhone 17' build|test`. The script points `DEVELOPER_DIR` at `/Applications/Xcode.app/Contents/Developer` — running `xcodebuild` directly on a machine whose `xcode-select` points at CommandLineTools fails with "tool 'xcodebuild' requires Xcode"; where `xcode-select` already points at a full Xcode, plain `xcodebuild` works.
 
-### 视觉语言
+### The visual language
 
-界面共用一套设计系统，在 `Sources/KeyrefUI/DesignSystem/`：
+The interface shares one design system, in `Sources/KeyrefUI/DesignSystem/`:
 
-- `Theme.swift` — 调色板。冷调编辑排版：整页近白（浅色）/ 近黑（深色），字近黑 /
-  近白，只有一条发丝线的分层色，另有一块「明文层」实面（浅色下近黑、深色下近白）
-  ——秘密在整页里是唯一的暗块，一眼能找到。琥珀是唯一的强调色，只作小面积信号
-  （品牌标记里的钥匙、步骤条的当前步、待审批角标的小方点）。自适应色一律走
-  `UIColor` 动态 provider，深浅两套是同一套逻辑（macOS 分支固定浅色——包在 macOS
-  上只做编译与测试）。
-- `DesignSystem.swift` — 通用件：页面底色、品牌标记、发丝线块、裸字形、字形圆圈、
-  分区标签、状态文字、结果英雄图、两个按钮样式、列表底纹。
+- `Theme.swift` — the palette. Cool editorial typography: an almost-white page (light) / almost-black page (dark), text almost-black / almost-white, one hairline colour for layering, and one solid "plaintext slab" (`slab`, the colour opposite the page) — the secret is the only dark block on the page, findable at a glance. Amber is the only accent colour and is used only as a small signal (the key in the brand mark, the current step in the stepper, the small square badge on pending approvals). Every adaptive colour goes through a `UIColor` dynamic provider, and light and dark are the same logic in two modes (the macOS branch is fixed to light — the package on macOS is only compiled and tested).
+- `DesignSystem.swift` — the shared parts: page background, brand mark, hairline blocks, bare type, type in a circle, section labels, status text, result hero images, two button styles and list shading.
 
-约定：**我们画的东西一律是平的**——没有渐变、光晕、阴影，没有卡片，没有图标瓦片
-底色；分层只靠发丝线和留白。主按钮 `KeyrefPrimaryButtonStyle`（前景色实心块 +
-页面色字）、次级 `KeyrefSecondaryButtonStyle`（同形描边）；其余控件（Toggle /
-Picker / SecureField / searchable / 导航栏 / Tab 栏 / 底部配件）是 SwiftUI 原样，
-accent 走 `.tint(KeyrefTheme.tint)`——跟着前景色走，不染彩色。
+The rule: **everything we draw is flat** — no gradients, no glows, no shadows, no cards, no tinted icon tiles; layering comes only from hairlines and whitespace. The primary button is `KeyrefPrimaryButtonStyle` (a solid block in the foreground colour with page-coloured text), the secondary is `KeyrefSecondaryButtonStyle` (the same shape, outlined); every other control (Toggle / Picker / SecureField / searchable / navigation bar / Tab bar / bottom accessory) is stock SwiftUI, and the accent follows `.tint(KeyrefTheme.tint)` — it tracks the foreground colour instead of dyeing controls.
 
-系统给了材质的（导航栏、Tab 栏、底部配件）不自绘模仿；真正浮在内容之上的自绘控件
-（明文层的收起/拷贝按钮、同步胶囊、扫码页手电筒）用 `glassEffect` 而不是手画半透明
-——见 docs/ios-ui.md §3.8。恢复码与 argv 原文不是浮层，它们是实心明文块（slab）。
+Where the system supplies the material (navigation bar, Tab bar, bottom accessory), do not imitate it by hand; the custom controls that genuinely float above content (the collapse/copy buttons on the plaintext slab, the sync capsule, the flashlight on the scanner page) use `glassEffect` rather than hand-drawn translucency — see docs/ios-ui.md §3.8. Recovery codes and raw argv are not floating layers; they are solid plaintext slabs.
 
-`ref`、指纹、掩码、恢复码一律等宽字体；时间戳用紧凑写法 `2026-11-01 04:37`
-（中文长日期在标签—值行里放不下，会被截成「2026年11月1日 04:…」）。
+`ref`, fingerprints, masks and recovery codes are always monospace; timestamps use the compact form `2026-11-01 04:37` (a long Chinese date does not fit in a label–value row and gets truncated to 「2026年11月1日 04:…」).
 
-### 模拟器 UI 端到端（可选）
+### Simulator UI end-to-end (optional)
 
 ```sh
 scripts/dev/ui-test.sh
 ```
 
-起一个真实的 `keyref-server`（`KEYREF_ENFORCE_QUOTAS=1`，建库走 PoW），然后在 iPhone 17
-模拟器里驱动真实 App：创建保险库（含恢复码回填）→ 添加条目 → 冷启动解锁 → 通过模拟器的
-粘贴入口配对 CLI（测试进程扮演 CLI，并校验 pair/status 与授权）。需要本机 `go`；只在 macOS
-上运行。
+It starts a real `keyref-server` (`KEYREF_ENFORCE_QUOTAS=1`, so creating a vault also exercises PoW), then drives the real app on the iPhone 17 simulator: create a vault (including the recovery-code confirmation) → add an item → cold-start unlock → pair the CLI through the simulator's paste entry point (the test process acts as the CLI and checks pair/status and the grant). It needs a local `go`; it only runs on macOS.
 
-- 单元/流程测试仍走默认 scheme（`KeyrefCoreTests` + `KeyrefUITests`）；UI 自动化在独立的
-  `KeyrefUIAutomation` scheme，不会拖慢默认门禁。
-- DEBUG 构建用 `Info-Debug.plist` 放行 `127.0.0.1` 的明文回环（`NSAllowsLocalNetworking`），
-  Release 继续用 `Info.plist`，不放开 ATS。UI 测试的启动参数（`-keyref-reset`、
-  `-keyref-origin`、`-keyref-assume-prerequisites`、`-keyref-skip-push`、
-  `-keyref-auto-auth`、`-keyref-initial-tab`）都编译在 `#if DEBUG` 里，Release 构建忽略。
-- 模拟器的相机不可用，配对走 `NoCameraView` 的粘贴入口；iOS 26/27 的浮动玻璃 Tab 栏在
-  XCUITest 下不接受点击，测试用 `-keyref-initial-tab` 冷启动到目标 Tab。
+- The unit and flow tests still run under the default scheme (`KeyrefCoreTests` + `KeyrefUITests`); the UI automation lives in its own `KeyrefUIAutomation` scheme so it does not slow the default gate.
+- DEBUG builds use `Info-Debug.plist` to allow plain-HTTP loopback for `127.0.0.1` (`NSAllowsLocalNetworking`); Release keeps using `Info.plist` and does not relax ATS. The UI test launch arguments (`-keyref-reset`, `-keyref-origin`, `-keyref-assume-prerequisites`, `-keyref-skip-push`, `-keyref-auto-auth`, `-keyref-initial-tab`) are all compiled under `#if DEBUG` and ignored in Release builds.
+- The simulator has no camera, so pairing goes through the paste entry point of `NoCameraView`; the floating glass Tab bar of iOS 26/27 does not accept taps under XCUITest, so the tests cold-start into the target tab with `-keyref-initial-tab`.
 
-界面规格见 [docs/ios-ui.md](../docs/ios-ui.md)。已实现：四 Tab、创建/恢复/接管/配对/撤销/审计/设置、审批收件箱（前台轮询 + Face ID 批准）、allowCommands/allowedHosts 精细编辑、第二台 iPhone 在线配对。推送（APNs）与 Plus 内购需要 Apple 开发者凭据，另行接入。
+The interface spec is [docs/ios-ui.md](../docs/ios-ui.md). Implemented: four tabs, create/recover/takeover/pair/revoke/audit/settings, the approval inbox (foreground polling + Face ID approval), fine-grained editing of allowCommands/allowedHosts, and online pairing with a second iPhone. Push (APNs) and the Plus purchase need Apple developer credentials and are wired up separately.
