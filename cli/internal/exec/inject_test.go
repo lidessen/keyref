@@ -2,9 +2,56 @@ package exec
 
 import (
 	"bytes"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 )
+
+func TestAllowedHostsURLAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arg     string
+		allowed bool
+	}{
+		{"plain", "https://allowed.example/v1", true},
+		{"port", "HTTPS://ALLOWED.EXAMPLE:443/v1", true},
+		{"userinfo", "https://" + url.UserPassword("fixture-user", "test").String() + "@allowed.example/v1", true},
+		{"query without path", "https://allowed.example?next=anything", true},
+		{"fragment without path", "https://allowed.example#section", true},
+		{"ipv6", "https://[::1]:443/v1", true},
+		{"foreign host", "https://other.example/v1", false},
+		{"host suffix", "https://allowed.example.other.example/v1", false},
+		{"userinfo masquerading as host", "https://" + url.UserPassword("allowed.example", "443").String() + "@other.example/v1", false},
+		{"userinfo without colon", "https://allowed.example@other.example/v1", false},
+		{"foreign ipv6", "https://[::2]:443/v1", false},
+		{"empty authority", "https:///allowed.example", false},
+		{"invalid port", "https://allowed.example:invalid/v1", false},
+		{"invalid escape", "https://allowed.example/%zz", false},
+		{"invalid brackets", "https://[::1/v1", false},
+		{"multiple URLs", "https://allowed.example/ https://other.example/", false},
+		{"nested URL", "https://allowed.example/?next=https://other.example/", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := allowedHostsFromArgv([]string{"tool", "--endpoint=" + tc.arg}, []string{"allowed.example", "::1"})
+			if (err == nil) != tc.allowed {
+				t.Fatalf("allowed=%v, want %v; error=%v", err == nil, tc.allowed, err)
+			}
+			if err != nil && !isPolicyErr(err) {
+				t.Fatalf("expected policy rejection, got %T", err)
+			}
+		})
+	}
+	for _, candidate := range []string{
+		"https://" + url.UserPassword("fixture-user", "test").String() + "@other.example/",
+		"https://allowed.example/%zz",
+	} {
+		err := allowedHostsFromArgv([]string{candidate}, []string{"allowed.example"})
+		if err == nil || strings.Contains(err.Error(), "fixture") || strings.Contains(err.Error(), candidate) {
+			t.Fatal("URL rejection must not expose userinfo or the original URL")
+		}
+	}
+}
 
 func TestValidateEnvName(t *testing.T) {
 	for _, good := range []string{"PATH", "OPENAI_API_KEY", "_x", "a1", "HTTPS_PROXY", "SSH_AUTH_SOCK"} {

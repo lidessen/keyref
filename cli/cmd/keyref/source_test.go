@@ -109,6 +109,35 @@ func TestReadPipedSecretSizeLimits(t *testing.T) {
 	}
 }
 
+func TestCheckSecretSizeWipesRejectedInput(t *testing.T) {
+	value := bytes.Repeat([]byte{'x'}, maxLocalSecretBytes+1)
+	if out, err := checkSecretSize(value); err == nil || out != nil {
+		t.Fatal("oversized secret was accepted")
+	}
+	if !bytes.Equal(value, make([]byte, len(value))) {
+		t.Fatal("rejected secret was not wiped")
+	}
+}
+
+type failingSecretReader struct{ retained []byte }
+
+func (r *failingSecretReader) Read(p []byte) (int, error) {
+	n := copy(p, "synthetic-input")
+	r.retained = p[:n]
+	return n, errors.New("synthetic-input must not appear in the error")
+}
+
+func TestReadPipedSecretWipesPartialRead(t *testing.T) {
+	reader := &failingSecretReader{}
+	out, err := readPipedSecret(reader, false)
+	if err == nil || out != nil || strings.Contains(err.Error(), "synthetic-input") {
+		t.Fatal("read error returned plaintext or echoed the reader error")
+	}
+	if len(reader.retained) == 0 || !bytes.Equal(reader.retained, make([]byte, len(reader.retained))) {
+		t.Fatal("partial secret was not wiped")
+	}
+}
+
 // An existing sync cache that cannot be read must fail the command, not
 // silently count as "not paired" and write `local` as the permanent
 // default (review 2026-11).

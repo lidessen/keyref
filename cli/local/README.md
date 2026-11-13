@@ -12,7 +12,7 @@ require an absolute path inside an existing private directory. The store file
 is created with mode 0600. A missing key does not initialize a store. Recovery
 of a lost key is not provided.
 
-`Put`, `Use`, `Stat`, `List` and `Delete` accept a reference. `Put` refuses a
+`Put`, `Use`, `Stat` and `Delete` accept a reference; `List` enumerates metadata. `Put` refuses a
 ref outside the design §6.1 grammar (`ValidRef`), takes `PutOptions`
 (description, allowCommands, allowedHosts) and reports whether it created a new
 entry. `Stat` and `List` decrypt only the encrypted meta and never touch the
@@ -40,10 +40,20 @@ both the encrypted file and the independently stored master key through an
 appropriate process. Do not treat deleting an entry as secure deletion of all
 previous disk copies.
 
-A vault created before encrypted meta gets a nullable `meta` column on open.
-Those old rows have no stored ref, so `List` omits them until `Stat(ref)` is
-called with the ref; it then writes a degraded meta (mask `***`, zero bytes)
-without decrypting the secret. Old secrets stay usable through `Use`.
+A vault created before encrypted meta gets a nullable `meta` column on open;
+concurrent opens serialize this schema migration. Old rows have only HMAC refs,
+so their refs cannot be recovered by decrypting the file. `Stat(ref)` stays
+read-only and returns `Incomplete: true`, mask `***`, and zero bytes/update time
+meaning unknown. It never persists these placeholder values. `List` omits rows
+without meta until `Use(ref)` backfills the mask and size from an authorized
+secret read, or `Put` replaces the row. The old write time remains zero because
+it cannot be recovered. Backfill compares both ciphertexts and counts the write
+in the same transaction, so it cannot overwrite a concurrent replacement or
+resurrect a deletion. Previously persisted zero-byte meta is recognized as
+incomplete and repaired on `Use` as well. Legacy refs outside `ValidRef` remain
+usable by `Use` but require a new `Put` with a valid ref to become listable.
+A backfill write failure aborts `Use` before its callback; modern rows do not
+need a migration write.
 
 The directory and file must be controlled by the application owner. The final
 file is checked for a symlink, but opening SQLite by path is not a defense

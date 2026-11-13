@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // The local source: one command surface over an offline vault. No
@@ -200,7 +203,7 @@ func TestLocalSourceLifecycle(t *testing.T) {
 // Local list is served from the encrypted meta; the secret ciphertext is
 // never decrypted (design §17.4).
 func TestLocalSourceListShowsMetaWithoutSecret(t *testing.T) {
-	_, _, env := localHome(t)
+	home, _, env := localHome(t)
 	if r := localRun(t, env, "", "init"); r.code != 0 {
 		t.Fatalf("init exit %d: %s", r.code, r.stderr)
 	}
@@ -235,6 +238,31 @@ func TestLocalSourceListShowsMetaWithoutSecret(t *testing.T) {
 		t.Fatalf("local list entry = %v", e)
 	}
 	assertNoLocalLeak(t, "local list json", jsonList.stdout, jsonList.stderr)
+
+	// Break only the secret ciphertext. The actual CLI must still read
+	// both metadata formats, while exec must refuse to deliver a value.
+	db, err := sql.Open("sqlite", filepath.Join(home, "local.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("UPDATE entries SET blob=zeroblob(32)"); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"get", "my-ref"}, {"get", "my-ref", "--format", "json"},
+		{"list"}, {"list", "--format", "json"},
+	} {
+		r := localRun(t, env, "", args...)
+		if r.code != 0 || !strings.Contains(r.stdout, "my-ref") {
+			t.Fatalf("metadata read depends on secret ciphertext: %v exit=%d", args, r.code)
+		}
+		assertNoLocalLeak(t, "metadata with corrupt secret", r.stdout, r.stderr)
+	}
+	broken := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", helperBin, "print-env")
+	if broken.code == 0 || strings.Contains(broken.stdout, "K=") {
+		t.Fatal("exec accepted corrupt secret ciphertext or started the child")
+	}
 
 	// A local source without a vault explains how to create one.
 	_, _, emptyEnv := localHome(t)
@@ -308,6 +336,15 @@ func TestLocalAllowCommandsIsAnExactWhitelist(t *testing.T) {
 		t.Fatalf("non-listed command exit %d, want 10: %s", tightened.code, tightened.stderr)
 	}
 	assertNoLocalLeak(t, "local allowCommands", tightened.stdout, tightened.stderr)
+
+	// Replacing without flags clears the old whitelist at the CLI layer.
+	if r := localRun(t, env, localSecret, "set", "my-ref"); r.code != 0 {
+		t.Fatalf("replacement exit %d", r.code)
+	}
+	reset := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", "/bin/cat", "/dev/null")
+	if reset.code != 10 {
+		t.Fatalf("replacement retained old whitelist: exit %d", reset.code)
+	}
 }
 
 func TestLocalAllowedHostsChecksArgv(t *testing.T) {
@@ -326,10 +363,17 @@ func TestLocalAllowedHostsChecksArgv(t *testing.T) {
 	for _, bad := range []string{
 		"https://api.openai.com.evil.example/v1",
 		"https://evil.example/v1",
+		"https://" + "api.openai.com:443@evil.example/v1",
+		"HTTPS://" + "api.openai.com:443@evil.example/v1",
+		"https:///api.openai.com",
 	} {
-		r := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", helperBin, bad)
+		marker := filepath.Join(t.TempDir(), "started")
+		r := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", helperBin, "sleep", "0s", marker, bad)
 		if r.code != 10 || !strings.Contains(r.stderr, "allowedHosts") {
-			t.Fatalf("%s: exit %d, %q", bad, r.code, r.stderr)
+			t.Fatalf("URL policy check: exit %d, %q", r.code, r.stderr)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatal("host policy rejection started the child")
 		}
 		assertNoLocalLeak(t, "local allowedHosts", r.stdout, r.stderr)
 	}

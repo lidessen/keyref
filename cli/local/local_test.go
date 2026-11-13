@@ -691,6 +691,10 @@ func TestLocalMetaRejectsMalformedPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, plain := range map[string][]byte{
+		"empty command": []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowCommands":[""]}}`),
+		"nul command":   []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowCommands":["curl\u0000"]}}`),
+		"empty host":    []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowedHosts":[""]}}`),
+		"nul host":      []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowedHosts":["api\u0000.example"]}}`),
 		"unknown field": []byte(`{"v":1,"ref":"tok","description":"","masked":"***","bytes":10,"updated_at":0,"policy":{"allowCommands":[],"allowedHosts":[]},"future":true}`),
 		"wrong version": []byte(`{"v":2,"ref":"tok","description":"","masked":"***","bytes":10,"updated_at":0,"policy":{"allowCommands":[],"allowedHosts":[]}}`),
 		"ref mismatch":  []byte(`{"v":1,"ref":"other","description":"","masked":"***","bytes":10,"updated_at":0,"policy":{"allowCommands":[],"allowedHosts":[]}}`),
@@ -782,10 +786,9 @@ func TestLocalMetaAndSecretCannotBeSwapped(t *testing.T) {
 	}
 }
 
-// A row from a pre-meta vault has a NULL meta column. Stat synthesizes
-// a degraded meta from the caller's ref and persists it; List only
-// picks the row up afterwards. The secret is never decrypted.
-func TestLocalLegacyRowGetsDegradedMeta(t *testing.T) {
+// Legacy reads expose incomplete metadata without decrypting or writing.
+// An authorized Use backfills the mask and size for later List calls.
+func TestLocalLegacyRowMigratesOnUse(t *testing.T) {
 	ctx := context.Background()
 	path := pathForTest(t)
 	key := keyForTest()
@@ -816,12 +819,12 @@ func TestLocalLegacyRowGetsDegradedMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Ref != "legacy" || m.Masked != "***" || m.Bytes != 0 || len(m.Policy.AllowCommands) != 0 {
-		t.Fatalf("degraded meta = %+v", m)
+	if m.Ref != "legacy" || m.Masked != "***" || m.Bytes != 0 || !m.Incomplete || m.UpdatedAt != 0 || len(m.Policy.AllowCommands) != 0 {
+		t.Fatalf("incomplete meta = %+v", m)
 	}
 	metas, err = s.List(ctx)
-	if err != nil || len(metas) != 1 || metas[0].Ref != "legacy" {
-		t.Fatalf("list after stat = %+v, %v", metas, err)
+	if err != nil || len(metas) != 0 {
+		t.Fatalf("Stat must not persist invented metadata: %+v, %v", metas, err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -833,10 +836,14 @@ func TestLocalLegacyRowGetsDegradedMeta(t *testing.T) {
 	defer s.Close()
 	if err := s.Use(ctx, "legacy", func(value []byte) error {
 		if string(value) != "synthetic-value" {
-			t.Errorf("stored value %q", value)
+			t.Error("migration changed the stored value")
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	metas, err = s.List(ctx)
+	if err != nil || len(metas) != 1 || metas[0].Ref != "legacy" || metas[0].Incomplete || metas[0].Bytes != len("synthetic-value") || metas[0].Masked != Mask([]byte("synthetic-value")) || metas[0].UpdatedAt != 0 {
+		t.Fatalf("migrated metadata = %+v, %v", metas, err)
 	}
 }

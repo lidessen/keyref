@@ -446,7 +446,8 @@ func readLocalSecret(input *os.File, raw bool) ([]byte, error) {
 		value, err := readTerminalSecret(fd)
 		_, _ = fmt.Fprintln(os.Stderr) // end the hidden line before any output
 		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("could not read the secret: %w", err)
+			secret.Wipe(value)
+			return nil, errors.New("could not read the secret")
 		}
 		return checkSecretSize(value)
 	}
@@ -490,7 +491,8 @@ func readPipedSecret(input io.Reader, raw bool) ([]byte, error) {
 	// larger stream at a CRLF boundary and store its first 1 MiB.
 	value, err := io.ReadAll(io.LimitReader(input, maxLocalSecretBytes+3))
 	if err != nil {
-		return nil, err
+		secret.Wipe(value)
+		return nil, errors.New("could not read the secret")
 	}
 	if !raw {
 		value = trimOneLineEnding(value)
@@ -510,6 +512,7 @@ func trimOneLineEnding(value []byte) []byte {
 
 func checkSecretSize(value []byte) ([]byte, error) {
 	if len(value) == 0 || len(value) > maxLocalSecretBytes {
+		secret.Wipe(value)
 		return nil, errors.New("the secret on stdin must be 1 to 1048576 bytes")
 	}
 	return value, nil

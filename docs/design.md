@@ -1488,7 +1488,7 @@ v0.9 落地之后，这句话只在名义上成立：`list` 只有 sync 有，`m
 
 meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id` 与行 id），两份密文不能互换。文件仍然不泄漏 ref 和掩码——没有主密钥什么都读不出来；持钥者则可以枚举。v0.9 的「ref 单向存、所以没有 `list`」是把「文件不泄漏名字」和「持钥者也不能列」混在了一起，后者不是需求，而且让 agent 无从发现有哪些 ref 可用。
 
-本地库的文件格式随 v0.9 当天引入，按没有存量处理，直接改格式；实现时如果发现已有存量库，补一次性迁移（解开旧行、补写 meta）。
+已有存量库按两步迁移：打开时在写事务内检查并补 nullable `meta` 列，支持多个进程同时首开。旧格式只保存 ref 的 HMAC，解开 secret 也不能恢复 ref，因此不能在打开时枚举并回填所有行。`Stat(ref)` / 默认 `get` 只返回保守掩码 `***`，库接口以 `Incomplete = true` 标识大小和原写入时间未知（均为 0），不写行、不解 secret。首次按有效 ref 调用 `Use`（CLI 的 `exec` 取值路径）时，在已授权解密之后补写准确掩码和大小；原写入时间无法恢复，继续为 0。回填在同一事务内核对旧 secret/meta 密文并计入写入上限，不能覆盖并发替换或复活已删除行；失败则不给回调交付明文。`list` 在回填或 `set` 替换前省略没有 meta 的行。早期版本已保存的 bytes 0 降级 meta 同样标为 `Incomplete`，在 `Use` 时修复；旧 ref 不符合新语法时仍可按原 ref 使用，但需以合法 ref 重新 `set` 才能进入新列表。
 
 **ref。** 语法与 §6.1 相同：`^[a-z][a-z0-9-]{0,62}[a-z0-9]$` 或单字符 `[a-z]`。`sms:` 前缀、空白、`=`、花括号都不是合法的本地 ref。
 
@@ -1570,4 +1570,4 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | 库独立 module、导出执行引擎、引擎自有策略类型、错误分类 | 未实现（注册表已删除；`GOWORK=off` 构建已修复并进 CI，issue #5） |
 | `status` 按 source 报告、只读命令不建文件、帮助退出 `0`、`--version` | 已实现（issue #7） |
 
-建议顺序：先交付 Neowind 的最小凭证注入路径（`exec --env` 与 `import-env`），再做 `get --reveal` 的控制终端确认、`keyref mcp --source` 与项目级 allowlist；最后做库的 module 拆分与引擎导出。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。
+建议顺序：先交付 Neowind 的最小凭证注入路径（现有 `exec --env`），再补完整 `import-env`、本地审计与项目级 allowlist；`get --reveal` 的控制终端确认作为 K1 安全债处理，`keyref mcp --source` 与库的 module 拆分、引擎导出继续按独立切片推进。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。

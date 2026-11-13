@@ -49,6 +49,17 @@ type Policy struct {
 	AllowedHosts  []string `json:"allowedHosts"`
 }
 
+func (p Policy) valid() bool {
+	for _, list := range [][]string{p.AllowCommands, p.AllowedHosts} {
+		for _, v := range list {
+			if v == "" || strings.ContainsRune(v, 0) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Meta is one entry's metadata plaintext before encryption. Masked and
 // Bytes are computed from the value at write time, so List and Stat
 // never need to decrypt the secret (design.md §17.4).
@@ -60,6 +71,9 @@ type Meta struct {
 	Bytes       int    `json:"bytes"`
 	UpdatedAt   int64  `json:"updated_at"`
 	Policy      Policy `json:"policy"`
+	// Incomplete marks legacy metadata whose mask and size are unknown.
+	// It is derived on read and is never stored in the encrypted JSON.
+	Incomplete bool `json:"-"`
 }
 
 // PutOptions carries the caller-supplied part of the meta. Every Put
@@ -272,7 +286,7 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		keycrypto.WipeKey(plain)
 		// Vaults created before encrypted meta existed get the nullable
 		// column. Their rows have no ref stored, so they stay out of List
-		// until Stat is called with the ref and writes a degraded meta.
+		// until Use can backfill accurate meta from an authorized read.
 		if e := ensureMetaColumn(db); e != nil {
 			wipe()
 			return fail(ErrInvalidStore)
@@ -284,35 +298,56 @@ func open(path string, key []byte, create bool) (*Store, error) {
 // ensureMetaColumn adds the meta column to a vault created before
 // encrypted meta (design.md §17.4). New vaults already have it.
 func ensureMetaColumn(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(entries)")
+	ctx := context.Background()
+	found, err := hasMetaColumn(ctx, db)
+	if err != nil || found {
+		return err
+	}
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
+	// Acquire the write reservation before rechecking the schema. Two
+	// processes opening an old vault must not both attempt the ALTER.
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, "ROLLBACK")
+	found, err = hasMetaColumn(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if !found {
+		if _, err := conn.ExecContext(ctx, "ALTER TABLE entries ADD COLUMN meta BLOB"); err != nil {
+			return err
+		}
+	}
+	_, err = conn.ExecContext(ctx, "COMMIT")
+	return err
+}
+
+func hasMetaColumn(ctx context.Context, db interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) (bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info(entries)")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
 	found := false
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, typ string
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
-			rows.Close()
-			return err
+			return false, err
 		}
 		if name == "meta" {
 			found = true
 		}
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if found {
-		return nil
-	}
-	_, err = db.Exec("ALTER TABLE entries ADD COLUMN meta BLOB")
-	return err
+	return found, rows.Err()
 }
 
 func (s *Store) entryID(ref string) (string, error) {
@@ -340,12 +375,8 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 	if len(value) == 0 || len(value) > maxValue {
 		return false, ErrInvalidStore
 	}
-	for _, list := range [][]string{opts.AllowCommands, opts.AllowedHosts} {
-		for _, v := range list {
-			if v == "" || strings.ContainsRune(v, 0) {
-				return false, ErrInvalidStore
-			}
-		}
+	if !(Policy{AllowCommands: opts.AllowCommands, AllowedHosts: opts.AllowedHosts}).valid() {
+		return false, ErrInvalidStore
 	}
 	id, err := s.entryID(ref)
 	if err != nil {
@@ -416,6 +447,7 @@ func (s *Store) sealMeta(id string, m *Meta) ([]byte, error) {
 	if err != nil {
 		return nil, ErrInvalidStore
 	}
+	defer keycrypto.WipeKey(plain)
 	aad, err := keycrypto.MetaAAD(s.id, id)
 	if err != nil {
 		return nil, ErrInvalidStore
@@ -451,26 +483,32 @@ func (s *Store) openMeta(id string, blob []byte) (*Meta, error) {
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, ErrInvalidStore
 	}
-	if m.V != 1 || !ValidRef(m.Ref) || m.Bytes < 0 || m.Bytes > maxValue || m.Masked == "" {
+	if m.V != 1 || !ValidRef(m.Ref) || m.Bytes < 0 || m.Bytes > maxValue || m.Masked == "" || !m.Policy.valid() {
 		return nil, ErrInvalidStore
 	}
 	gotID, err := s.entryID(m.Ref)
 	if err != nil || gotID != id {
 		return nil, ErrInvalidStore
 	}
+	// Put forbids empty values. Zero bytes identifies the incomplete
+	// meta produced by the first meta-capable version for legacy rows.
+	m.Incomplete = m.Bytes == 0
+	if m.Incomplete {
+		m.UpdatedAt = 0
+	}
 	return &m, nil
 }
 
 // List returns every row's meta, sorted by ref. It never decrypts a
 // secret. Rows from a pre-meta vault have no stored ref, so they are
-// absent until Stat(ref) writes their degraded meta.
+// absent until Use(ref) backfills their meta or Put replaces them.
 func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.db == nil {
 		return nil, ErrClosed
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id, meta FROM entries WHERE meta IS NOT NULL")
+	rows, err := s.db.QueryContext(ctx, "SELECT substr(id,1,33), substr(meta,1,?) FROM entries WHERE meta IS NOT NULL", maxMeta+1)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -501,10 +539,9 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	return out, nil
 }
 
-// Stat returns one row's meta without decrypting the secret. A row
-// written before encrypted meta gets a degraded meta (mask "***",
-// zero bytes) from the ref the caller supplied; it is persisted so
-// later List calls include it. The secret itself is untouched.
+// Stat returns one row's meta without decrypting the secret or writing
+// the row. For a legacy row, Incomplete is true, Masked is "***", and
+// Bytes and UpdatedAt are zero (unknown). Use or Put completes its meta.
 func (s *Store) Stat(ctx context.Context, ref string) (*Meta, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -516,7 +553,7 @@ func (s *Store) Stat(ctx context.Context, ref string) (*Meta, error) {
 		return nil, ErrNotFound
 	}
 	var blob []byte
-	err = s.db.QueryRowContext(ctx, "SELECT meta FROM entries WHERE id = ?", id).Scan(&blob)
+	err = s.db.QueryRowContext(ctx, "SELECT substr(meta,1,?) FROM entries WHERE id = ?", maxMeta+1, id).Scan(&blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -529,25 +566,10 @@ func (s *Store) Stat(ctx context.Context, ref string) (*Meta, error) {
 	if blob != nil {
 		return s.openMeta(id, blob)
 	}
-	m := &Meta{
-		V: 1, Ref: ref, Masked: "***", UpdatedAt: time.Now().UnixMilli(),
+	return &Meta{
+		V: 1, Ref: ref, Masked: "***", Incomplete: true,
 		Policy: Policy{AllowCommands: []string{}, AllowedHosts: []string{}},
-	}
-	sealed, err := s.sealMeta(id, m)
-	if err != nil {
-		return nil, err
-	}
-	res, err := s.db.ExecContext(ctx, "UPDATE entries SET meta=? WHERE id=? AND meta IS NULL", sealed, id)
-	if err != nil {
-		return nil, ErrInvalidStore
-	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		// Another writer filled the row first; return the stored meta.
-		if err := s.db.QueryRowContext(ctx, "SELECT meta FROM entries WHERE id = ?", id).Scan(&blob); err == nil && blob != nil {
-			return s.openMeta(id, blob)
-		}
-	}
-	return m, nil
+	}, nil
 }
 
 // Use decrypts only for the callback and wipes its buffer afterwards. A callback
@@ -578,9 +600,9 @@ func (s *Store) read(ctx context.Context, ref string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var blob []byte
+	var blob, metaBlob []byte
 	var blobLen int64
-	if err = s.db.QueryRowContext(ctx, "SELECT substr(blob,1,?),length(blob) FROM entries WHERE id = ?", maxValue+29, id).Scan(&blob, &blobLen); errors.Is(err, sql.ErrNoRows) {
+	if err = s.db.QueryRowContext(ctx, "SELECT substr(blob,1,?),length(blob),substr(meta,1,?) FROM entries WHERE id = ?", maxValue+29, maxMeta+1, id).Scan(&blob, &blobLen, &metaBlob); errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, ErrInvalidStore
@@ -596,7 +618,64 @@ func (s *Store) read(ctx context.Context, ref string) ([]byte, error) {
 	if err != nil {
 		return nil, ErrInvalidStore
 	}
+	if err := s.backfillMeta(ctx, ref, id, blob, metaBlob, plain); err != nil {
+		keycrypto.WipeKey(plain)
+		return nil, err
+	}
 	return plain, nil
+}
+
+// backfillMeta runs only after an authorized secret read. The old format
+// stored only HMAC refs, so it cannot be migrated without a caller's ref.
+// Compare both ciphertexts before writing: a concurrent replacement or
+// deletion must never receive metadata derived from the old value.
+func (s *Store) backfillMeta(ctx context.Context, ref, id string, blob, oldMeta, plain []byte) error {
+	if !ValidRef(ref) {
+		return nil // legacy refs remain usable, but cannot enter the new index
+	}
+	m := &Meta{V: 1, Ref: ref, Policy: Policy{AllowCommands: []string{}, AllowedHosts: []string{}}}
+	if oldMeta != nil {
+		stored, err := s.openMeta(id, oldMeta)
+		if err != nil || !stored.Incomplete {
+			return nil // Use is independent of meta; only repair recognized legacy rows
+		}
+		m = stored
+	}
+	m.Masked, m.Bytes, m.UpdatedAt, m.Incomplete = Mask(plain), len(plain), 0, false
+	sealed, err := s.sealMeta(id, m)
+	if err != nil {
+		return err
+	}
+	if len(sealed) > maxMeta {
+		return ErrMetaTooLarge
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ErrInvalidStore
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, "UPDATE entries SET meta=? WHERE id=? AND blob=? AND meta IS ?", sealed, id, blob, oldMeta)
+	if err != nil {
+		return ErrInvalidStore
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return ErrInvalidStore
+	}
+	if n == 0 {
+		return nil // another writer won; preserve its row and policy
+	}
+	res, err = tx.ExecContext(ctx, "UPDATE metadata SET writes=writes+1 WHERE writes < 4294967295")
+	if err != nil {
+		return ErrInvalidStore
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return ErrInvalidStore
+	}
+	if err := tx.Commit(); err != nil {
+		return ErrInvalidStore
+	}
+	return nil
 }
 
 func (s *Store) Delete(ctx context.Context, ref string) error {

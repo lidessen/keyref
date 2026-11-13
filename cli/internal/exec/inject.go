@@ -2,6 +2,7 @@ package exec
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -216,11 +217,10 @@ func ReplaceArgvPlaceholders(argv []string, resolve func(ref string) ([]byte, er
 	return out, nil
 }
 
-// urlHostRe matches http(s) URL hosts in argv for the parameter check.
-// The scheme is case-insensitive (RFC 3986 §3.1): children like curl
-// normalize `HTTPS://host/` before connecting, so a uppercase scheme
-// must not slip the host check (design.md §7.3).
-var urlHostRe = regexp.MustCompile(`(?i)https?://([^/\s:<>"']+)`)
+// argvURLRe finds http(s) URL starts, including URLs nested in query
+// strings. The scheme is case-insensitive (RFC 3986 §3.1). Hostnames
+// are parsed below from the complete authority, including userinfo.
+var argvURLRe = regexp.MustCompile(`(?i)https?://`)
 
 // allowedHostsFromArgv enforces one item's allowedHosts parameter
 // check (design.md §7.3): when non-empty, every http:// and https://
@@ -237,15 +237,18 @@ func allowedHostsFromArgv(argv []string, allowedHosts []string) error {
 		allowed[strings.ToLower(h)] = true
 	}
 	for _, a := range argv {
-		for _, m := range urlHostRe.FindAllStringSubmatch(a, -1) {
-			host := strings.ToLower(m[1])
-			// Strip credentials if present.
-			if i := strings.LastIndexByte(host, '@'); i >= 0 {
-				host = host[i+1:]
+		for _, start := range argvURLRe.FindAllStringIndex(a, -1) {
+			candidate := a[start[0]:]
+			if end := strings.IndexAny(candidate, " \t\n\r\f\v<>\"'"); end >= 0 {
+				candidate = candidate[:end]
 			}
-			if !allowed[host] {
-				return &PolicyError{Reason: fmt.Sprintf(
-					"argv URL host %q is not in the item's allowedHosts (exact match required)", m[1])}
+			u, err := url.Parse(candidate)
+			if err != nil || u.Hostname() == "" {
+				// url.Parse errors include the URL, which may contain credentials.
+				return &PolicyError{Reason: "argv contains an invalid HTTP URL; cannot check allowedHosts"}
+			}
+			if !allowed[strings.ToLower(u.Hostname())] {
+				return &PolicyError{Reason: "argv URL host is not in the item's allowedHosts (exact match required)"}
 			}
 		}
 	}

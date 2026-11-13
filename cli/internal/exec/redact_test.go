@@ -162,6 +162,21 @@ func TestRedactorFailureFiresOnFail(t *testing.T) {
 	}
 }
 
+func TestRedactorWriteFailureFiresOnce(t *testing.T) {
+	r := NewRedactor(map[string][]byte{"ref": []byte("synthetic-secret")})
+	defer r.Destroy()
+	r.Attach(&failingWriter{})
+	calls := 0
+	r.OnFail = func() { calls++ }
+	if _, err := r.Write([]byte("ready\n")); err == nil || !r.Failed() || calls != 1 {
+		t.Fatalf("write failure: err=%v failed=%v callbacks=%d", err, r.Failed(), calls)
+	}
+	_ = r.Flush()
+	if calls != 1 {
+		t.Fatalf("failure callback fired %d times", calls)
+	}
+}
+
 func TestWindowBasis(t *testing.T) {
 	secret := bytes.Repeat([]byte{0xc3}, 40) // percent encoding expands 3x
 	secrets := map[string][]byte{"w": secret}

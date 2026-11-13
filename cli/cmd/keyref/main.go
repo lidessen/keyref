@@ -146,7 +146,7 @@ commands:
                           one entry; masked by default, --reveal prints the
                           raw secret bytes (local sources only)
   delete <ref>            delete an entry from a local source
-  list [--format json]    refs, names, masks (paired vault only)
+  list [--format json]    refs, names, masks (local and paired vaults)
   exec [flags] -- <argv>  run a command with injected secrets
   source <list|default|add|remove>
                           show or configure credential sources
@@ -168,8 +168,8 @@ sources:
   Every data command takes --source NAME; KEYREF_SOURCE does the same, and
   "keyref source default NAME" persists the choice. The local master key
   lives in the OS keyring; KEYREF_LOCAL_MASTER (32 random bytes, standard
-  base64) overrides it for headless use. A local vault stores refs one-way,
-  so "list" works on the paired vault only.
+  base64) overrides it for headless use. Both sources store encrypted meta;
+  "list" and masked "get" read it without decrypting the secret.
 
 exec flags:
   --env NAME=REF            inject the secret as an environment variable
@@ -195,8 +195,8 @@ exec flags:
 
   On the paired vault an item must name the commands it may run
   (allowCommands on iOS; an empty list allows nothing, and commandPolicy
-  allow-all is the owner's explicit opt-out). A local source keeps the
-  built-in deny list instead.
+  allow-all is the owner's explicit opt-out). A local entry uses its
+  --allow-command whitelist when set, otherwise the built-in deny list.
 `)
 }
 
