@@ -1,6 +1,6 @@
-# keyref 协议变更规格（v2，草案，尚未实现）
+# keyref 协议变更规格（v2）
 
-状态：**A、B、C、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
+状态：**A、B、C、D、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
 
 兼容性：**破坏性变更，不兼容旧客户端**（已确认没有需要兼容的存量部署）。直接原地修改格式，不加版本协商和回退分支。
 
@@ -80,6 +80,8 @@ NUL H(body)
 修掉的问题：source 的签名只有服务器验，owner 和 decider 无法区分真实短信和服务器伪造的消息。
 
 ## D. 配对确认 MAC
+
+**已实现**（proto/wire/pair_confirm.go、CLI `internal/pair`、server `internal/api/pair.go` 只存不验、iOS `PairingClient`/`buildPairConfirmMAC` 与 `LiveBackend.completePairing` 按 `t` 接纳设备；protocol.md §3.13/§6.17/§6.18/§9.1；向量见 `pair_confirm_mac`）。
 
 目的：让被配对的设备能认证 owner，而不是信任服务器返回的 owner 公钥。不需要新增任何界面。
 

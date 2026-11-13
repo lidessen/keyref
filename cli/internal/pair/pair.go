@@ -41,7 +41,8 @@ const syncCursorKV = "cursor"
 type Options struct {
 	// Kind declares the device kind on the QR (protocol §9.1 `t`):
 	// "cli" (default) or "decider" (design v0.8 §14.8). The owner's
-	// confirmation copy and the pair/complete device.kind follow it.
+	// confirmation copy and the pair/complete device.kind follow it, and
+	// it is a field of the pairing confirmation MAC (§3.13).
 	Kind         string
 	Name         string        // proposed device label (≤32 bytes)
 	PrintPayload bool          // also print the raw payload line for tests
@@ -52,11 +53,16 @@ type Options struct {
 
 // Payload builds the QR payload
 //
-//	keyref://pair?v=1&k=<b64 X25519 pub>&s=<b64 ed25519 pub>&n=<hex nonce>&name=..&u=<origin>
+//	keyref://pair?v=1&k=<b64 X25519 pub>&s=<b64 ed25519 pub>&n=<hex nonce>
+//	  &name=..&u=<origin>[&t=<kind>]&c=<b64 32B pairing secret>
 //
 // with RFC 3986 percent-encoding of the base64 and UTF-8 fields
-// (docs/protocol.md §9.1).
-func Payload(origin string, hpkePub, signPub []byte, nonceHex, name string, kind ...string) string {
+// (docs/protocol.md §9.1). `c` is the pairing confirmation secret
+// (§3.13, v2 D): it travels only inside the QR — never to the server —
+// so the owner can compute the MAC and this device can tell a real
+// completion from one the server made up.
+func Payload(origin string, hpkePub, signPub []byte, nonceHex, name string,
+	confirmSecret []byte, kind ...string) string {
 	v := url.Values{}
 	v.Set("v", "1")
 	// t is optional and defaults to cli; emit it only when it says
@@ -69,6 +75,7 @@ func Payload(origin string, hpkePub, signPub []byte, nonceHex, name string, kind
 	v.Set("n", nonceHex)
 	v.Set("name", name)
 	v.Set("u", origin)
+	v.Set("c", base64.StdEncoding.EncodeToString(confirmSecret))
 	return "keyref://pair?" + v.Encode()
 }
 
@@ -88,12 +95,24 @@ func Run(st *store.Store, cl *client.Client, id *device.Identity, opts Options) 
 	if opts.PollInterval < 2*time.Second {
 		opts.PollInterval = 2 * time.Second
 	}
+	if opts.Kind == "" {
+		opts.Kind = wire.DeviceKindCLI
+	}
 
 	nonce := make([]byte, wire.SizePairNonce)
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("pair: nonce: %w", err)
 	}
 	nonceHex := hex.EncodeToString(nonce)
+	// The pairing confirmation secret (§3.13, v2 D): generated here,
+	// printed only inside the QR payload, never sent to the server. The
+	// owner computes the MAC with it at pair/complete; without the
+	// secret a malicious server cannot fabricate a completion this
+	// device would accept.
+	confirmSecret := make([]byte, wire.SizePairConfirmKey)
+	if _, err := rand.Read(confirmSecret); err != nil {
+		return fmt.Errorf("pair: pairing secret: %w", err)
+	}
 
 	// Register: sign the §3.5 transcript over the raw nonce.
 	tb, err := wire.BuildPairRegisterTranscript(nonce, opts.Name)
@@ -118,7 +137,8 @@ func Run(st *store.Store, cl *client.Client, id *device.Identity, opts Options) 
 	}
 
 	origin := cl.Origin()
-	payload := Payload(origin, id.HPKEPublic, id.SignPublic, nonceHex, opts.Name, opts.Kind)
+	payload := Payload(origin, id.HPKEPublic, id.SignPublic, nonceHex, opts.Name,
+		confirmSecret, opts.Kind)
 	if err := qr.Print(opts.Stdout, payload); err != nil {
 		return err
 	}
@@ -138,7 +158,7 @@ func Run(st *store.Store, cl *client.Client, id *device.Identity, opts Options) 
 		}
 		switch status.Status {
 		case "complete":
-			return complete(st, cl, id, opts, nonceHex, status)
+			return complete(st, cl, id, opts, nonceHex, status, confirmSecret)
 		case "pending":
 			// keep waiting
 		default:
@@ -151,7 +171,8 @@ func Run(st *store.Store, cl *client.Client, id *device.Identity, opts Options) 
 	}
 }
 
-func complete(st *store.Store, cl *client.Client, id *device.Identity, opts Options, nonceHex string, status *wire.PairStatusResponse) error {
+func complete(st *store.Store, cl *client.Client, id *device.Identity, opts Options,
+	nonceHex string, status *wire.PairStatusResponse, confirmSecret []byte) error {
 	if len(status.OwnerSignPublicKey) == 0 || len(status.PairingSignature) == 0 {
 		return errors.New("pair: incomplete pairing response")
 	}
@@ -178,6 +199,16 @@ func complete(st *store.Store, cl *client.Client, id *device.Identity, opts Opti
 	}
 	if err := wire.VerifyOwnerSignature(tb, status.PairingSignature, status.OwnerSignPublicKey); err != nil {
 		return fmt.Errorf("pair: pairing signature verification failed")
+	}
+	// Pairing confirmation MAC (§3.13, v2 D), checked before the owner
+	// key is pinned and before ANY local state is written: the signature
+	// above proves the transcript is self-consistent, but a malicious
+	// server can mint a fresh owner key and sign the transcript itself —
+	// it saw the registered keys and knows the nonce hash. The MAC is
+	// the one thing it cannot forge: the secret never left the QR code.
+	if !wire.VerifyPairConfirmMAC(status.PairingMAC, confirmSecret, opts.Kind, tb) {
+		return errors.New("pair: pairing confirmation MAC does not verify — " +
+			"the completion may not come from the device that scanned the QR code")
 	}
 	if len(status.DirectorySigned) > 0 {
 		if err := wire.VerifyOwnerSignature(status.DirectorySigned, status.DirectorySignature, status.OwnerSignPublicKey); err != nil {

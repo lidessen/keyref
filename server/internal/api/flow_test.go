@@ -52,6 +52,12 @@ func TestFullFlowSelfHosted(t *testing.T) {
 	if !bytes.Equal(ps.OwnerSignPublicKey, owner.signPub) || len(ps.PairingSignature) == 0 {
 		t.Fatal("pair status result missing owner key or signature")
 	}
+	// The §3.13 MAC rides back on the row (v2 D) and verifies under the
+	// fake CLI's own QR secret.
+	if !wire.VerifyPairConfirmMAC(ps.PairingMAC, cli.confirmSecret, wire.DeviceKindCLI,
+		mustPairTranscript(t, owner, cli, ps)) {
+		t.Fatal("pair status MAC does not verify under the QR secret")
+	}
 	cli.session(t)
 
 	// --- CLI bootstrap: view grant only → meta, no secret, no wraps ----
@@ -485,6 +491,95 @@ func TestBodyLimitsAndStrictJSON(t *testing.T) {
 	}
 }
 
+// mustPairTranscript rebuilds the §3.4 pair transcript of a completed
+// pairing from the status row, as the paired device does (§6.18).
+func mustPairTranscript(t *testing.T, o *testOwner, cli *testCLI, ps wire.PairStatusResponse) []byte {
+	t.Helper()
+	gts := make([]wire.GrantTranscript, 0, len(ps.Grants))
+	for _, g := range ps.Grants {
+		gts = append(gts, g.Transcript(o.vaultID))
+	}
+	tb, err := wire.BuildPairTranscript(wire.PairTranscript{
+		VaultID: o.vaultID, OwnerSignPublicKey: ps.OwnerSignPublicKey,
+		Nonce: cli.nonce, DeviceID: cli.deviceID,
+		HPKEKEM: wire.KEMX25519, HPKEPublicKey: cli.hpkePub,
+		SignAlg: wire.SignAlgEd25519, SignPublicKey: cli.signPub,
+		Label: "build-agent-1", Grants: gts,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tb
+}
+
+// TestPairCompleteRequiresConfirmMAC pins the v2 D field contract: the
+// §3.13 pairing confirmation MAC is required (32 bytes) at
+// pair/complete, stored opaquely, and echoed back by pair/status for the
+// paired device to re-verify under its own QR secret.
+func TestPairCompleteRequiresConfirmMAC(t *testing.T) {
+	e := newTestEnv(t, false)
+	owner := e.createVault(t)
+	cli := e.registerPair(t)
+
+	item := randHexID(t)
+	if s := owner.putItem(t, item, 1, randBytes(t, 64), randBytes(t, 64)); s != 200 {
+		t.Fatalf("put item: %d", s)
+	}
+	grant := owner.grant(t, cli.deviceID, item, wire.GrantKindView, 1, 0)
+	pairTB, err := wire.BuildPairTranscript(wire.PairTranscript{
+		VaultID: owner.vaultID, OwnerSignPublicKey: owner.signPub,
+		Nonce: cli.nonce, DeviceID: cli.deviceID,
+		HPKEKEM: wire.KEMX25519, HPKEPublicKey: cli.hpkePub,
+		SignAlg: wire.SignAlgEd25519, SignPublicKey: cli.signPub,
+		Label: "build-agent-1", Grants: []wire.GrantTranscript{grant.Transcript(owner.vaultID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := wire.SignOwnerECDSA(pairTB, owner.signKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mac, err := wire.BuildPairConfirmMAC(cli.confirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(mac wire.Blob) (int, []byte) {
+		return e.do("POST", "/v1/pair/complete", owner.token, wire.PairCompleteRequest{
+			Nonce: cli.nonce,
+			Device: wire.DeviceInput{
+				DeviceID: cli.deviceID, Kind: wire.DeviceKindCLI,
+				HPKEKEM: wire.KEMX25519, HPKEPublicKey: cli.hpkePub,
+				SignAlg: wire.SignAlgEd25519, SignPublicKey: cli.signPub,
+				Label: "build-agent-1",
+			},
+			Grants: []wire.GrantData{grant}, Signature: sig, PairingMAC: mac,
+		})
+	}
+	// Missing and wrong-size MACs are a 400 before anything is stored.
+	if s, raw := post(nil); s != 400 || expectError(t, raw, "invalid_field") != 0 {
+		t.Fatalf("missing MAC: want 400 invalid_field, got %d %s", s, raw)
+	}
+	if s, raw := post(wire.Blob(randBytes(t, wire.SizePairConfirmKey-1))); s != 400 {
+		t.Fatalf("short MAC: want 400, got %d %s", s, raw)
+	}
+	// The real one completes, and pair/status echoes it back.
+	if s, raw := post(mac); s != 204 {
+		t.Fatalf("good MAC: want 204, got %d %s", s, raw)
+	}
+	var ps wire.PairStatusResponse
+	if s := e.doOut("GET", "/v1/pair/status?nonce="+cli.nonce, "", nil, &ps); s != 200 || ps.Status != "complete" {
+		t.Fatalf("pair status: %d %+v", s, ps)
+	}
+	if !bytes.Equal(ps.PairingMAC, mac) {
+		t.Fatal("pair status did not echo the pairing MAC")
+	}
+	if !wire.VerifyPairConfirmMAC(ps.PairingMAC, cli.confirmSecret, wire.DeviceKindCLI,
+		mustPairTranscript(t, owner, cli, ps)) {
+		t.Fatal("echoed MAC does not verify under the QR secret")
+	}
+}
+
 func TestPairExpiryAndMismatch(t *testing.T) {
 	e := newTestEnv(t, false)
 	owner := e.createVault(t)
@@ -509,6 +604,10 @@ func TestPairExpiryAndMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	sig, _ := wire.SignOwnerECDSA(pairTB, owner.signKey)
+	mac, err := wire.BuildPairConfirmMAC(cli.confirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	status, raw := e.do("POST", "/v1/pair/complete", owner.token, wire.PairCompleteRequest{
 		Nonce: cli.nonce,
 		Device: wire.DeviceInput{
@@ -516,7 +615,8 @@ func TestPairExpiryAndMismatch(t *testing.T) {
 			HPKEKEM: wire.KEMX25519, HPKEPublicKey: wire.Blob(otherPub), // not the registered key
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: cli.signPub, Label: "x",
 		},
-		Signature: sig,
+		Signature:  sig,
+		PairingMAC: mac,
 	})
 	if status != 403 {
 		t.Fatalf("key mismatch: want 403, got %d %s", status, raw)

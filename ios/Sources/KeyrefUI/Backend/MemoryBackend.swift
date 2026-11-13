@@ -259,7 +259,7 @@ public final class MemoryBackend: AppBackend {
     public func completePairing(offer: PairingOffer, deviceLabel: String,
                                 selections: [GrantSelection]) async throws {
         pairingCompletions.append((offer, selections))
-        devices.append(DeviceRow(id: KeyrefEncoding.newID(), kind: "cli", status: "active",
+        devices.append(DeviceRow(id: KeyrefEncoding.newID(), kind: offer.kind, status: "active",
                                  label: deviceLabel, createdAt: now(),
                                  fingerprint: offer.fingerprint, grants: []))
     }

@@ -874,8 +874,12 @@ public final class LiveBackend: AppBackend {
     public func completePairing(offer: PairingOffer, deviceLabel: String,
                                 selections: [GrantSelection]) async throws {
         let (vmk, owner, vaultID) = try guardUnlocked()
+        // The QR `t` parameter decides the admitted device kind (protocol
+        // §9.1, v2 D): defaulting it to cli would mislabel a source or
+        // decider device, and the pairing confirmation MAC — which binds
+        // the kind — would no longer verify.
         let device = DeviceInput.make(
-            deviceID: KeyrefEncoding.newID(), kind: DeviceKind.cli,
+            deviceID: KeyrefEncoding.newID(), kind: offer.kind,
             hpkeKEM: offer.hpkeKEM, hpkePublicKey: offer.hpkePublicKey,
             signAlg: offer.signAlg, signPublicKey: offer.signPublicKey,
             label: deviceLabel, renewalSignPublicKey: Data())
@@ -907,7 +911,8 @@ public final class LiveBackend: AppBackend {
         }
         try await PairingClient(api: api).complete(vaultID: vaultID, nonce: offer.nonce,
                                                    device: device, grants: grants,
-                                                   ownerSigner: owner.signer)
+                                                   ownerSigner: owner.signer,
+                                                   confirmSecret: offer.confirmSecret)
         // The device's public keys are trusted exclusively from the
         // signed directory (design §9.1): after the pair lands, re-sign
         // the directory with the new CLI appended (revision + 1) and PUT
@@ -916,7 +921,7 @@ public final class LiveBackend: AppBackend {
         // editing, revocation and approval validation.
         let dirRevision = stateStore.currentDirectory()?.directoryRevision ?? 0
         let newDevice = KeyrefDirectoryDevice(
-            deviceID: device.deviceID, kind: DeviceKind.cli, status: DeviceStatus.active,
+            deviceID: device.deviceID, kind: offer.kind, status: DeviceStatus.active,
             hpkeKEM: device.hpkeKEM, hpkePublicKey: device.hpkePublicKey,
             signAlg: device.signAlg, signPublicKey: device.signPublicKey,
             renewalSignPublicKey: device.renewalSignPublicKey,

@@ -169,6 +169,17 @@ func (o *owner) registerSource(t *testing.T) *sourceDevice {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The test plays the source device too, so it generates the QR
+	// secret itself and hands the owner-computed MAC to pair/complete
+	// (§3.13, v2 D).
+	confirmSecret := make([]byte, wire.SizePairConfirmKey)
+	if _, err := rand.Read(confirmSecret); err != nil {
+		t.Fatal(err)
+	}
+	mac, err := wire.BuildPairConfirmMAC(confirmSecret, wire.DeviceKindSource, ptb)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp := o.do(t, "POST", "/v1/pair/complete", wire.PairCompleteRequest{
 		Nonce: d.nonce,
 		Device: wire.DeviceInput{
@@ -177,7 +188,7 @@ func (o *owner) registerSource(t *testing.T) *sourceDevice {
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: signPub,
 			Label: label,
 		},
-		Grants: nil, Signature: o.sign(ptb),
+		Grants: nil, Signature: o.sign(ptb), PairingMAC: mac,
 	}, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("source pair complete: %d", resp.StatusCode)
 	}

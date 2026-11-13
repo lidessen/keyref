@@ -23,7 +23,8 @@ final class PairingDirectoryTests: XCTestCase {
             hpkeKEM: KEMName.x25519, hpkePublicKey: Data(repeating: 0x11, count: 32),
             signAlg: SignAlg.ed25519, signPublicKey: Data(repeating: 0x22, count: 32),
             nonce: KeyrefEncoding.newID(), label: "build-bot",
-            origin: URL(string: "https://sync.example")!)
+            origin: URL(string: "https://sync.example")!,
+            confirmSecret: Data(repeating: 0x33, count: KeyrefSizes.pairConfirmKey))
 
         // The vault's signed directory as the backend would have bootstrapped it.
         let dirDevice = DirectoryDevice(

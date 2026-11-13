@@ -88,7 +88,10 @@ final class RealServerIntegrationTests: XCTestCase {
                                  signAlg: SignAlg.ed25519,
                                  signPublicKey: cliSigner.signPublicKey,
                                  nonce: KeyrefEncoding.hexEncode(nonceData),
-                                 label: "build-bot", origin: baseURL)
+                                 label: "build-bot", origin: baseURL,
+                                 kind: DeviceKind.cli,
+                                 confirmSecret: Data((0..<KeyrefSizes.pairConfirmKey)
+                                     .map { _ in UInt8.random(in: 0...255) }))
         do {
             try await backend.completePairing(
                 offer: offer, deviceLabel: "build-bot",

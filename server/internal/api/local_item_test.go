@@ -225,6 +225,10 @@ func TestLocalItemGrantMutualExclusion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mac, err := wire.BuildPairConfirmMAC(rogue.confirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s, raw = e.do("POST", "/v1/pair/complete", owner.token, wire.PairCompleteRequest{
 		Nonce: rogue.nonce,
 		Device: wire.DeviceInput{
@@ -233,7 +237,7 @@ func TestLocalItemGrantMutualExclusion(t *testing.T) {
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: rogue.signPub,
 			Label: "build-agent-1",
 		},
-		Grants: []wire.GrantData{useGrant}, Signature: sig,
+		Grants: []wire.GrantData{useGrant}, Signature: sig, PairingMAC: mac,
 	})
 	if s != 400 || expectError(t, raw, "local_item_grant_conflict") != 0 {
 		t.Fatalf("pair complete with use grant on local item: want 400 local_item_grant_conflict, got %d %s", s, raw)

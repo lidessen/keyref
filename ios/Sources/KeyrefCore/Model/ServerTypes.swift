@@ -699,12 +699,18 @@ public struct PairCompleteRequest: Codable, Sendable {
     public var device: DeviceInput
     public var grants: [GrantData]
     public var signature: Data
+    /// Pairing confirmation MAC (protocol §3.13, v2 D): HMAC-SHA256 over
+    /// the pair transcript under the QR secret `c`, required. The server
+    /// stores it opaquely and echoes it at pair/status; the paired device
+    /// re-computes it from its own `c` before pinning the owner key.
+    public var pairingMac: Data
 
     enum CodingKeys: String, CodingKey {
         case nonce
         case device
         case grants
         case signature
+        case pairingMac = "pairing_mac"
     }
 }
 
@@ -714,6 +720,7 @@ public struct PairStatusResponse: Codable, Sendable {
     public var deviceID: String?
     public var ownerSignPublicKey: Data?
     public var pairingSignature: Data?
+    public var pairingMac: Data?
     public var directoryRevision: UInt64?
     public var directorySigned: Data?
     public var directorySignature: Data?
@@ -725,6 +732,7 @@ public struct PairStatusResponse: Codable, Sendable {
         case deviceID = "device_id"
         case ownerSignPublicKey = "owner_sign_public_key"
         case pairingSignature = "pairing_signature"
+        case pairingMac = "pairing_mac"
         case directoryRevision = "directory_revision"
         case directorySigned = "directory_signed"
         case directorySignature = "directory_signature"

@@ -511,7 +511,10 @@ func (o *owner) wrapGrant(t *testing.T, cliHPKEPub []byte, cliDeviceID, itemID, 
 }
 
 // completePairing answers the running `keyref pair` (§6.17). The CLI
-// device keys are read off the QR payload, as the phone would.
+// device keys and the QR pairing secret `c` are read off the QR payload,
+// as the phone would (§3.13, v2 D): the phone computes the pairing
+// confirmation MAC with the secret and sends it in pair/complete; the
+// CLI re-verifies it before it pins the owner key.
 func (o *owner) completePairing(t *testing.T, nonceHex, payloadLine string) {
 	t.Helper()
 	u, err := url.Parse(payloadLine)
@@ -526,6 +529,10 @@ func (o *owner) completePairing(t *testing.T, nonceHex, payloadLine string) {
 	cliSign, err := base64.StdEncoding.DecodeString(q.Get("s"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	confirmSecret, err := base64.StdEncoding.DecodeString(q.Get("c"))
+	if err != nil || len(confirmSecret) != wire.SizePairConfirmKey {
+		t.Fatalf("pairing secret off the QR: %x (%v)", confirmSecret, err)
 	}
 	o.cliHPKE, o.cliSign = cliHPKE, cliSign
 	cliDeviceID := newID(t)
@@ -552,6 +559,10 @@ func (o *owner) completePairing(t *testing.T, nonceHex, payloadLine string) {
 	if digest, err := wire.GrantsDigest(gts); err == nil {
 		o.cliGrants = digest
 	}
+	mac, err := wire.BuildPairConfirmMAC(confirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := wire.PairCompleteRequest{
 		Nonce: nonceHex,
 		Device: wire.DeviceInput{
@@ -560,8 +571,9 @@ func (o *owner) completePairing(t *testing.T, nonceHex, payloadLine string) {
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: cliSign,
 			Label: cliLabel,
 		},
-		Grants:    grants,
-		Signature: o.sign(pairTB),
+		Grants:     grants,
+		Signature:  o.sign(pairTB),
+		PairingMAC: mac,
 	}
 	if resp := o.do(t, "POST", "/v1/pair/complete", req, nil); resp.StatusCode != 204 {
 		t.Fatalf("pair complete: %d", resp.StatusCode)

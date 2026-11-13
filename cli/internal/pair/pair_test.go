@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,7 +32,8 @@ const (
 func TestPayloadLayout(t *testing.T) {
 	hpke := bytesRepeat(0x11, 32)
 	sign := bytesRepeat(0x22, 32)
-	got := Payload("https://sync.example", hpke, sign, "aabb", "build agent")
+	confirm := bytesRepeat(0x33, 32)
+	got := Payload("https://sync.example", hpke, sign, "aabb", "build agent", confirm)
 	if !strings.HasPrefix(got, "keyref://pair?") {
 		t.Fatalf("payload prefix: %q", got)
 	}
@@ -43,6 +43,7 @@ func TestPayloadLayout(t *testing.T) {
 		"v=1",
 		"k=" + url.QueryEscape(base64.StdEncoding.EncodeToString(hpke)),
 		"s=" + url.QueryEscape(base64.StdEncoding.EncodeToString(sign)),
+		"c=" + url.QueryEscape(base64.StdEncoding.EncodeToString(confirm)),
 		"n=aabb",
 		"name=build+agent",
 		"u=" + url.QueryEscape("https://sync.example"),
@@ -58,12 +59,17 @@ func TestPayloadLayout(t *testing.T) {
 	}
 	q := u.Query()
 	if q.Get("v") != "1" || q.Get("n") != "aabb" || q.Get("name") != "build agent" ||
-		q.Get("u") != "https://sync.example" {
+		q.Get("u") != "https://sync.example" || q.Get("t") != "" {
 		t.Fatalf("decoded query wrong: %v", q)
 	}
 	kb, err := base64.StdEncoding.DecodeString(q.Get("k"))
 	if err != nil || !bytes.Equal(kb, hpke) {
 		t.Fatalf("k roundtrip failed: %x", kb)
+	}
+	// The pairing secret travels in the QR (§3.13) — and nowhere else.
+	cb, err := base64.StdEncoding.DecodeString(q.Get("c"))
+	if err != nil || !bytes.Equal(cb, confirm) {
+		t.Fatalf("c roundtrip failed: %x", cb)
 	}
 }
 
@@ -170,8 +176,11 @@ func (ps *pairingServer) completeWith(c map[string]any) {
 }
 
 // buildCompletion produces the pair/status "complete" body with real
-// owner signatures over the §3.4 pair transcript and §3.3 directory.
-func buildCompletion(t *testing.T, owner *testowner.Owner, id *device.Identity, nonceHex, deviceID string, grants []wire.GrantData) map[string]any {
+// owner signatures over the §3.4 pair transcript and §3.3 directory, plus
+// the §3.13 pairing confirmation MAC computed from the QR secret `c` as
+// the owner-side phone does (v2 D).
+func buildCompletion(t *testing.T, owner *testowner.Owner, id *device.Identity,
+	nonceHex, deviceID string, grants []wire.GrantData, confirmSecret []byte) map[string]any {
 	t.Helper()
 	pt := wire.PairTranscript{
 		VaultID:            owner.VaultID,
@@ -192,6 +201,10 @@ func buildCompletion(t *testing.T, owner *testowner.Owner, id *device.Identity, 
 		t.Fatal(err)
 	}
 	pairingSig := owner.Sign(tb)
+	mac, err := wire.BuildPairConfirmMAC(confirmSecret, wire.DeviceKindCLI, tb)
+	if err != nil {
+		t.Fatal(err)
+	}
 	digest, err := wire.GrantsDigest(pt.Grants)
 	if err != nil {
 		t.Fatal(err)
@@ -215,10 +228,6 @@ func buildCompletion(t *testing.T, owner *testowner.Owner, id *device.Identity, 
 		t.Fatal(err)
 	}
 	dirSig := owner.Sign(dirSigned)
-	b64 := func(b []byte) string {
-		out, _ := wire.Blob(b).MarshalJSON()
-		return string(out[1 : len(out)-1]) // strip quotes
-	}
 	grantMaps := make([]map[string]any, 0, len(grants))
 	for _, g := range grants {
 		grantMaps = append(grantMaps, map[string]any{
@@ -232,6 +241,7 @@ func buildCompletion(t *testing.T, owner *testowner.Owner, id *device.Identity, 
 		"status": "complete", "vault_id": owner.VaultID, "device_id": deviceID,
 		"owner_sign_public_key": b64(owner.SignPub),
 		"pairing_signature":     b64(pairingSig),
+		"pairing_mac":           b64(mac),
 		"directory_revision":    1,
 		"directory_signed":      b64(dirSigned),
 		"directory_signature":   b64(dirSig),
@@ -239,22 +249,69 @@ func buildCompletion(t *testing.T, owner *testowner.Owner, id *device.Identity, 
 	}
 }
 
-func runPairAsync(t *testing.T, st *store.Store, id *device.Identity, url string) chan error {
+func runPairAsync(t *testing.T, st *store.Store, id *device.Identity, url string) (*pairCapture, chan error) {
 	return runPairAsyncTimeout(t, st, id, url, 8*time.Second)
 }
 
-func runPairAsyncTimeout(t *testing.T, st *store.Store, id *device.Identity, url string, timeout time.Duration) chan error {
+// b64 encodes one blob the way the wire JSON does (standard base64, no
+// quotes), so a raw []byte can ride a map[string]any completion body.
+func b64(b []byte) string {
+	out, _ := wire.Blob(b).MarshalJSON()
+	return string(out[1 : len(out)-1]) // strip quotes
+}
+
+// pairCapture reads the pairing payload line the CLI prints with
+// --print-payload, so the test can pull the QR secret `c` off it exactly
+// like the owner phone does (§3.13).
+type pairCapture struct {
+	buf *bytes.Buffer
+}
+
+func (p *pairCapture) payload(t *testing.T) url.Values {
 	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(p.buf.String(), "\n") {
+			if !strings.HasPrefix(line, "payload: ") {
+				continue
+			}
+			u, err := url.Parse(strings.TrimPrefix(line, "payload: "))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return u.Query()
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("pair never printed its payload")
+	return nil
+}
+
+func runPairAsyncTimeout(t *testing.T, st *store.Store, id *device.Identity, url string, timeout time.Duration) (*pairCapture, chan error) {
+	t.Helper()
+	buf := &bytes.Buffer{}
 	done := make(chan error, 1)
 	go func() {
 		done <- Run(st, client.New(url, nil), id, Options{
 			Name:         "build-agent-1",
+			PrintPayload: true,
 			PollInterval: 10 * time.Millisecond,
 			PollTimeout:  timeout,
-			Stdout:       io.Discard,
+			Stdout:       buf,
 		})
 	}()
-	return done
+	return &pairCapture{buf: buf}, done
+}
+
+// confirmSecretOf reads the QR pairing secret `c` out of a payload's
+// query (§3.13): base64, 32 bytes.
+func confirmSecretOf(t *testing.T, q url.Values) []byte {
+	t.Helper()
+	c, err := base64.StdEncoding.DecodeString(q.Get("c"))
+	if err != nil || len(c) != wire.SizePairConfirmKey {
+		t.Fatalf("payload c: %x (%v)", c, err)
+	}
+	return c
 }
 
 func TestPairCompletePinsOwnerKeyAndStoresGrants(t *testing.T) {
@@ -266,9 +323,11 @@ func TestPairCompletePinsOwnerKeyAndStoresGrants(t *testing.T) {
 	view := owner.WrapGrant(id.HPKEPublic, tvDevice, tvItem, wire.GrantKindView, 1, 0, bytesRepeat(0x4d, 32))
 	use := owner.WrapGrant(id.HPKEPublic, tvDevice, tvItem, wire.GrantKindUse, 1, 0, bytesRepeat(0x51, 32))
 
-	done := runPairAsync(t, st, id, ps.URL)
+	cap, done := runPairAsync(t, st, id, ps.URL)
 	nonce := ps.waitForRegistration(t)
-	ps.completeWith(buildCompletion(t, owner, id, nonce, tvDevice, []wire.GrantData{view, use}))
+	confirm := confirmSecretOf(t, cap.payload(t))
+	ps.completeWith(buildCompletion(t, owner, id, nonce, tvDevice,
+		[]wire.GrantData{view, use}, confirm))
 
 	if err := <-done; err != nil {
 		t.Fatalf("pair run: %v", err)
@@ -292,6 +351,51 @@ func TestPairCompletePinsOwnerKeyAndStoresGrants(t *testing.T) {
 	}
 }
 
+// TestPairCompleteRejectsForgedMAC pins v2 D at the CLI: a completion
+// whose pairing confirmation MAC does not verify under the QR secret is
+// refused — the server knows the registered keys and the nonce hash, so
+// without the MAC it can fabricate a self-consistent completion and get
+// its own key pinned as the owner key. Nothing may be written before the
+// MAC check.
+func TestPairCompleteRejectsForgedMAC(t *testing.T) {
+	owner := testowner.New(t, tvVault, tvOwner)
+	id := newTestIdentity(t)
+	// A MAC minted under a different secret: well-formed, but it cannot
+	// verify under the QR secret the CLI generated.
+	wrongMAC, err := wire.BuildPairConfirmMAC(bytesRepeat(0xAA, 32), wire.DeviceKindCLI,
+		mustPairBytes(t, owner, id, "00112233445566778899aabbccddeeff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mutate := map[string]func(map[string]any){
+		"missing MAC":  func(c map[string]any) { delete(c, "pairing_mac") },
+		"short MAC":    func(c map[string]any) { c["pairing_mac"] = "AAAA" },
+		"wrong secret": func(c map[string]any) { c["pairing_mac"] = b64(wrongMAC) },
+	}
+	for name, m := range mutate {
+		t.Run(name, func(t *testing.T) {
+			st2 := newTestStore(t)
+			ps2 := newPairingServer(t)
+			cap2, done2 := runPairAsync(t, st2, id, ps2.URL)
+			nonce2 := ps2.waitForRegistration(t)
+			confirm2 := confirmSecretOf(t, cap2.payload(t))
+			completion := buildCompletion(t, owner, id, nonce2, tvDevice, nil, confirm2)
+			m(completion)
+			ps2.completeWith(completion)
+			if err := <-done2; err == nil {
+				t.Fatal("forged pairing MAC accepted")
+			}
+			if _, ok, _ := st2.GetKV(KVOwnerSignPub); ok {
+				t.Fatal("owner key pinned despite failed MAC")
+			}
+			if _, ok, _ := st2.GetKV("vault_id"); ok {
+				t.Fatal("vault id stored despite failed MAC")
+			}
+		})
+	}
+}
+
 func TestPairCompleteRejectsForgedSignature(t *testing.T) {
 	owner := testowner.New(t, tvVault, tvOwner)
 	// The attacker signs with their own key but presents it as the
@@ -304,10 +408,11 @@ func TestPairCompleteRejectsForgedSignature(t *testing.T) {
 	st := newTestStore(t)
 	ps := newPairingServer(t)
 
-	done := runPairAsync(t, st, id, ps.URL)
+	cap, done := runPairAsync(t, st, id, ps.URL)
 	nonce := ps.waitForRegistration(t)
+	confirm := confirmSecretOf(t, cap.payload(t))
 
-	completion := buildCompletion(t, owner, id, nonce, tvDevice, nil)
+	completion := buildCompletion(t, owner, id, nonce, tvDevice, nil, confirm)
 	// Corrupt the signature bytes.
 	completion["pairing_signature"] = completion["pairing_signature"].(string)[:8] + "AAAA"
 	ps.completeWith(completion)
@@ -341,7 +446,8 @@ func TestPairRegisterSignatureVerifiedByServerShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	done := runPairAsyncTimeout(t, st, id, srv.URL, 300*time.Millisecond)
+	cap, done := runPairAsyncTimeout(t, st, id, srv.URL, 300*time.Millisecond)
+	_ = cap
 	deadline := time.Now().Add(3 * time.Second)
 	for regBody == nil && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -355,6 +461,10 @@ func TestPairRegisterSignatureVerifiedByServerShape(t *testing.T) {
 	if s, _ := regBody["signature"].(string); s == "" {
 		t.Fatal("register missing signature")
 	}
+	// The QR secret never rides the register body (§3.13).
+	if s, _ := regBody["c"].(string); s != "" {
+		t.Fatalf("register leaked the pairing secret: %q", s)
+	}
 	select {
 	case err := <-done:
 		// Expect the timeout error.
@@ -364,4 +474,21 @@ func TestPairRegisterSignatureVerifiedByServerShape(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("pair run did not finish")
 	}
+}
+
+// mustPairBytes rebuilds the §3.4 pair transcript bytes for a no-grant
+// pairing, for MACs the test mints itself.
+func mustPairBytes(t *testing.T, owner *testowner.Owner, id *device.Identity, nonceHex string) []byte {
+	t.Helper()
+	tb, err := wire.BuildPairTranscript(wire.PairTranscript{
+		VaultID: owner.VaultID, OwnerSignPublicKey: owner.SignPub,
+		Nonce: nonceHex, DeviceID: tvDevice,
+		HPKEKEM: wire.KEMX25519, HPKEPublicKey: id.HPKEPublic,
+		SignAlg: wire.SignAlgEd25519, SignPublicKey: id.SignPublic,
+		Label: "build-agent-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tb
 }

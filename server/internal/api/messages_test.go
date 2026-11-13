@@ -31,6 +31,9 @@ type testKindDevice struct {
 	nonce    string
 	deviceID string
 	token    string
+	// confirmSecret is the device's QR pairing secret `c` (§3.13): never
+	// sent to the server, used to compute the pairing confirmation MAC.
+	confirmSecret []byte
 }
 
 // registerPairKind is registerPair generalized over the device kind
@@ -47,6 +50,8 @@ func (e *testEnv) registerPairKind(t *testing.T, kind string) *testKindDevice {
 		hpkePub:  randBytes(t, wire.SizeX25519Key),
 		nonce:    randHexID(t),
 		deviceID: randHexID(t),
+		// The fake device generates its own QR secret (§3.13, v2 D).
+		confirmSecret: randBytes(t, wire.SizePairConfirmKey),
 	}
 	nonceRaw, _ := hex.DecodeString(d.nonce)
 	tb, err := wire.BuildPairRegisterTranscript(nonceRaw, "kind-"+kind)
@@ -91,6 +96,10 @@ func (o *testOwner) completePairKind(t *testing.T, d *testKindDevice, grants []w
 	if err != nil {
 		t.Fatal(err)
 	}
+	mac, err := wire.BuildPairConfirmMAC(d.confirmSecret, d.kind, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	status, raw := o.env.do("POST", "/v1/pair/complete", o.token, wire.PairCompleteRequest{
 		Nonce: d.nonce,
 		Device: wire.DeviceInput{
@@ -99,7 +108,7 @@ func (o *testOwner) completePairKind(t *testing.T, d *testKindDevice, grants []w
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: d.signPub,
 			Label: "kind-" + d.kind,
 		},
-		Grants: grants, Signature: sig,
+		Grants: grants, Signature: sig, PairingMAC: mac,
 	})
 	if status != 204 {
 		t.Fatalf("pair complete %s: status %d %s", d.kind, status, raw)

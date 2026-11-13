@@ -158,6 +158,14 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field")
 		return
 	}
+	// The §3.13 pairing confirmation MAC is a required field (v2 D): the
+	// server stores it opaquely and hands it back through pair/status,
+	// where the paired device re-computes it from the QR secret the
+	// server never saw. Size is all the server can check.
+	if len(req.PairingMAC) != wire.SizePairConfirmKey {
+		writeError(w, "invalid_field")
+		return
+	}
 	sum := sha256.Sum256(nonce)
 	ps, err := s.st.GetPairSession(r.Context(), hex.EncodeToString(sum[:]))
 	if errors.Is(err, store.ErrNotFound) {
@@ -267,6 +275,7 @@ func (s *Server) handlePairComplete(w http.ResponseWriter, r *http.Request) {
 		DeviceID:           req.Device.DeviceID,
 		OwnerSignPublicKey: ac.device.SignPublicKey,
 		PairingSignature:   req.Signature,
+		PairingMAC:         req.PairingMAC,
 		DirectoryRevision:  uint64(ac.vault.DirectoryRevision),
 		DirectorySigned:    ac.vault.DirectorySigned,
 		DirectorySignature: ac.vault.DirectorySignature,

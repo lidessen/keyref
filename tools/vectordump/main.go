@@ -309,6 +309,18 @@ type transcriptVector struct {
 	TamperedIdx int    `json:"tampered_index,omitempty"`
 }
 
+// pairConfirmMACVector pins the §3.13 pairing confirmation MAC (v2 D):
+// HMAC-SHA256(c, label NUL kind NUL pair transcript). Deterministic — the
+// secret and the transcript are fixture bytes.
+type pairConfirmMACVector struct {
+	ConfirmSecretHex  string `json:"confirm_secret_hex"`
+	Kind              string `json:"kind"`
+	PairTranscriptHex string `json:"pair_transcript_hex"`
+	MACHex            string `json:"pairing_mac_hex"`
+	// the same transcript under a different secret must not verify
+	WrongSecretMACHex string `json:"wrong_secret_pairing_mac_hex"`
+}
+
 type vectors struct {
 	Generator string `json:"generator"`
 
@@ -348,6 +360,9 @@ type vectors struct {
 
 	// message transcript (§3.9 — v2 C)
 	MessageUpload transcriptVector `json:"message_upload_transcript"`
+
+	// pairing confirmation MAC (§3.13 — v2 D)
+	PairConfirmMAC pairConfirmMACVector `json:"pair_confirm_mac"`
 
 	// owner ECDSA signature over the session transcript (exercises the
 	// owner signer on a §3.6 transcript as the iOS session client does)
@@ -649,6 +664,19 @@ func main() {
 	}
 	pairRegSig := ed25519.Sign(cliPriv, pairRegTB)
 
+	// --- pair-confirm MAC (§3.13 — v2 D) --------------------------------------
+	// Deterministic fixture secret; kind matches the paired CLI above.
+	pairConfirmSecret := mustHex("0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c")
+	pairConfirmMAC, err := wire.BuildPairConfirmMAC(pairConfirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		panic(err)
+	}
+	wrongSecretMAC, err := wire.BuildPairConfirmMAC(mustHex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+		wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		panic(err)
+	}
+
 	challenge := mustHex(challengeHex)
 	sessionTB, err := wire.BuildSessionTranscript(cliDevID, challenge)
 	if err != nil {
@@ -844,6 +872,14 @@ func main() {
 		NonceRawHex  string `json:"nonce_raw_hex"`
 		ProposedName string `json:"proposed_name"`
 	}{nonceHex, "proposed-name-0"}, pairRegTB, pairRegSig, wire.SignAlgEd25519, hx(cliPub), false)
+
+	v.PairConfirmMAC = pairConfirmMACVector{
+		ConfirmSecretHex:  hx(pairConfirmSecret),
+		Kind:              wire.DeviceKindCLI,
+		PairTranscriptHex: hx(pairTB),
+		MACHex:            hx(pairConfirmMAC),
+		WrongSecretMACHex: hx(wrongSecretMAC),
+	}
 
 	v.Session = tv(struct {
 		DeviceID     string `json:"device_id"`

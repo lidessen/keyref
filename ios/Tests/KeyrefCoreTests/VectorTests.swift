@@ -152,6 +152,14 @@ private struct VectorFile: Decodable, Sendable {
         let tampered_index: Int?
     }
 
+    struct PairConfirmMACVector: Decodable {
+        let confirm_secret_hex: String
+        let kind: String
+        let pair_transcript_hex: String
+        let pairing_mac_hex: String
+        let wrong_secret_pairing_mac_hex: String
+    }
+
     struct RawJSON: Decodable, Sendable {
         subscript(key: String) -> RawJSONValue? {
             dict[key]
@@ -214,6 +222,8 @@ private struct VectorFile: Decodable, Sendable {
     let approval_decision_transcript: TranscriptVector
     let approval_denied_transcript: TranscriptVector
     let message_upload_transcript: TranscriptVector
+
+    let pair_confirm_mac: PairConfirmMACVector
 
     let owner_session_signature_hex: String
     let cli_grants_digest_hex: String
@@ -516,6 +526,28 @@ final class VectorTests: XCTestCase {
         XCTAssertEqual(t.sign_alg, SignAlg.ed25519)
         try verifyCLISignature(transcript: bytes, signature: hex(t.signature_hex),
                                cliSignPublicKey: hex(t.signer_public_hex))
+    }
+
+    func testPairConfirmMAC() throws {
+        let m = v.pair_confirm_mac
+        let secret = hex(m.confirm_secret_hex)
+        let transcript = hex(m.pair_transcript_hex)
+        // The vector covers the same §3.4 pair transcript as its own fixture.
+        XCTAssertEqual(transcript, hex(v.pair_transcript.bytes_hex))
+        let mac = try buildPairConfirmMAC(c: secret, kind: m.kind, pairTranscript: transcript)
+        XCTAssertEqual(mac, hex(m.pairing_mac_hex))
+        XCTAssertTrue(verifyPairConfirmMAC(mac: mac, c: secret, kind: m.kind,
+                                           pairTranscript: transcript))
+        // A MAC minted under any other secret — the malicious-server case —
+        // must not verify, and a missing MAC is a mismatch, not a crash.
+        XCTAssertFalse(verifyPairConfirmMAC(mac: hex(m.wrong_secret_pairing_mac_hex), c: secret,
+                                            kind: m.kind, pairTranscript: transcript))
+        XCTAssertFalse(verifyPairConfirmMAC(mac: Data(), c: secret, kind: m.kind,
+                                            pairTranscript: transcript))
+        // The kind is bound into the MAC: admitting the device as anything
+        // else invalidates it.
+        XCTAssertFalse(verifyPairConfirmMAC(mac: mac, c: secret, kind: DeviceKind.decider,
+                                            pairTranscript: transcript))
     }
 
     func testSessionTranscript() throws {

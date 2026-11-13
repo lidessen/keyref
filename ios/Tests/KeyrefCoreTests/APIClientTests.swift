@@ -170,12 +170,20 @@ final class APIClientTests: XCTestCase {
         let hpke = try HPKEKeys.generateX25519()
         let sign = try HPKEKeys.generateEd25519()
         let nonce = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        let confirmSecret = Data(repeating: 0x5c, count: KeyrefSizes.pairConfirmKey)
         let offer = PairingOffer(hpkeKEM: KEMName.x25519, hpkePublicKey: hpke.publicKey,
                                  signAlg: SignAlg.ed25519, signPublicKey: sign.publicKey,
                                  nonce: nonce, label: "build agent 1",
-                                 origin: URL(string: "https://sync.example")!)
+                                 origin: URL(string: "https://sync.example")!,
+                                 kind: DeviceKind.cli, confirmSecret: confirmSecret)
         let parsed = try PairingOffer.parse(offer.payload())
         XCTAssertEqual(parsed, offer)
+        // `t` rides the QR only when it is not the cli default (§9.1).
+        XCTAssertFalse(offer.payload().contains("&t="))
+        var source = offer
+        source.kind = DeviceKind.source
+        XCTAssertTrue(source.payload().contains("&t=source"))
+        XCTAssertEqual(try PairingOffer.parse(source.payload()), source)
         // The fingerprint is SHA-256(sign pub)[0..8], grouped uppercase hex.
         let digest = Data(SHA256.hash(data: sign.publicKey))
         let hex = digest.prefix(8).map { String(format: "%02X", $0) }.joined()
@@ -184,6 +192,14 @@ final class APIClientTests: XCTestCase {
         XCTAssertThrowsError(try PairingOffer.parse("https://evil.example/pair?v=1"))
         XCTAssertThrowsError(try PairingOffer.parse("keyref://pair?v=2"))
         XCTAssertThrowsError(try PairingOffer.parse("keyref://pair?v=1&k=!!!&s=!!!&n=short&name=x&u=https://x"))
+        // `c` is required and must be 32 bytes (v2 D); an unknown kind is
+        // rejected at scan time rather than at pair/complete.
+        let payload = offer.payload()
+        XCTAssertThrowsError(try PairingOffer.parse(String(payload[..<payload.range(of: "&c=")!.lowerBound])))
+        XCTAssertThrowsError(try PairingOffer.parse(
+            payload.replacingOccurrences(of: "&c=", with: "&c=AAAA")))
+        XCTAssertThrowsError(try PairingOffer.parse(
+            source.payload().replacingOccurrences(of: "&t=source", with: "&t=ios")))
     }
 
     func testPairingCompleteSignsTranscript() async throws {
@@ -192,6 +208,7 @@ final class APIClientTests: XCTestCase {
         let nonce = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
         let hpke = try HPKEKeys.generateX25519()
         let sign = try HPKEKeys.generateEd25519()
+        let confirmSecret = Data(repeating: 0x5c, count: KeyrefSizes.pairConfirmKey)
         MockURLProtocol.handler = { request, body in
             guard request.url!.path.hasSuffix("/pair/complete") else {
                 return (404, Data("{\"error\":\"not_found\"}".utf8))
@@ -204,8 +221,15 @@ final class APIClientTests: XCTestCase {
                                    signAlg: req.device.signAlg, signPublicKey: req.device.signPublicKey,
                                    label: req.device.label,
                                    grants: req.grants.map { $0.transcript(vaultID: vaultID) })
-            try verifyOwnerSignature(transcript: try t.buildBytes(), signature: req.signature,
+            let tb = try t.buildBytes()
+            try verifyOwnerSignature(transcript: tb, signature: req.signature,
                                      ownerSignPublicKey: ownerSigner.signPublicKey)
+            // The required pairing confirmation MAC (§3.13, v2 D) binds
+            // the admitted kind and the transcript under the QR secret.
+            guard verifyPairConfirmMAC(mac: req.pairingMac, c: confirmSecret,
+                                       kind: req.device.kind, pairTranscript: tb) else {
+                throw KeyrefWireError.badSignature
+            }
             return (204, Data())
         }
         let device = DeviceInput(deviceID: "11112222333344441111222233334444", kind: DeviceKind.cli,
@@ -214,18 +238,22 @@ final class APIClientTests: XCTestCase {
                                  label: "build-agent-1", renewalSignPublicKey: Data())
         // Empty grant set at pairing time (design §15).
         try await PairingClient(api: makeAPI(token: "t")).complete(
-            vaultID: vaultID, nonce: nonce, device: device, grants: [], ownerSigner: ownerSigner)
+            vaultID: vaultID, nonce: nonce, device: device, grants: [],
+            ownerSigner: ownerSigner, confirmSecret: confirmSecret)
         XCTAssertEqual(MockURLProtocol.recorded().count, 1)
     }
 
-    func testVerifyCompleteStatusRejectsBadSignature() throws {
+    func testVerifyCompleteStatusRejectsBadSignatureAndBadMAC() throws {
         let ownerSigner = try SoftwareP256Signer(privateKey: P256.Signing.PrivateKey())
         let hpke = try HPKEKeys.generateX25519()
         let sign = try HPKEKeys.generateEd25519()
         let nonce = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+        let confirmSecret = Data(repeating: 0x5c, count: KeyrefSizes.pairConfirmKey)
         let offer = PairingOffer(hpkeKEM: KEMName.x25519, hpkePublicKey: hpke.publicKey,
                                  signAlg: SignAlg.ed25519, signPublicKey: sign.publicKey,
-                                 nonce: nonce, label: "cli", origin: URL(string: "https://sync.example")!)
+                                 nonce: nonce, label: "cli",
+                                 origin: URL(string: "https://sync.example")!,
+                                 kind: DeviceKind.cli, confirmSecret: confirmSecret)
         let vaultID = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
         let deviceID = "11112222333344441111222233334444"
         let t = PairTranscript(vaultID: vaultID, ownerSignPublicKey: ownerSigner.signPublicKey,
@@ -233,15 +261,28 @@ final class APIClientTests: XCTestCase {
                                hpkeKEM: offer.hpkeKEM, hpkePublicKey: offer.hpkePublicKey,
                                signAlg: offer.signAlg, signPublicKey: offer.signPublicKey,
                                label: offer.label, grants: [])
-        let goodSig = try ownerSigner.sign(try t.buildBytes())
+        let tb = try t.buildBytes()
+        let goodSig = try ownerSigner.sign(tb)
+        let goodMAC = try buildPairConfirmMAC(c: confirmSecret, kind: offer.kind,
+                                              pairTranscript: tb)
         var badSig = goodSig
         badSig[badSig.startIndex] ^= 0x01
         var status = PairStatusResponse(status: "complete", vaultID: vaultID, deviceID: deviceID,
                                         ownerSignPublicKey: ownerSigner.signPublicKey,
-                                        pairingSignature: goodSig, directoryRevision: 1,
+                                        pairingSignature: goodSig, pairingMac: goodMAC,
+                                        directoryRevision: 1,
                                         directorySigned: Data(), directorySignature: Data(), grants: [])
         try PairingClient(api: makeAPI()).verifyCompleteStatus(status, offer: offer)
         status.pairingSignature = badSig
+        XCTAssertThrowsError(try PairingClient(api: makeAPI()).verifyCompleteStatus(status, offer: offer))
+        // A well-signed transcript is not enough: a completion the server
+        // fabricated carries a MAC it cannot mint without the QR secret.
+        status.pairingSignature = goodSig
+        status.pairingMac = Data(repeating: 0, count: KeyrefSizes.pairConfirmKey)
+        XCTAssertThrowsError(try PairingClient(api: makeAPI()).verifyCompleteStatus(status, offer: offer)) {
+            XCTAssertEqual($0 as? PairingConfirmMismatch, PairingConfirmMismatch())
+        }
+        status.pairingMac = nil
         XCTAssertThrowsError(try PairingClient(api: makeAPI()).verifyCompleteStatus(status, offer: offer))
     }
 }

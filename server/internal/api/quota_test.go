@@ -161,6 +161,10 @@ func TestQuotaStorageAndDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 	sig, _ := wire.SignOwnerECDSA(pairTB, owner.signKey)
+	mac, err := wire.BuildPairConfirmMAC(cli2.confirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if s, raw := e.do("POST", "/v1/pair/complete", owner.token, wire.PairCompleteRequest{
 		Nonce: cli2.nonce,
 		Device: wire.DeviceInput{
@@ -168,7 +172,7 @@ func TestQuotaStorageAndDevices(t *testing.T) {
 			HPKEKEM: wire.KEMX25519, HPKEPublicKey: cli2.hpkePub,
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: cli2.signPub, Label: "agent-2",
 		},
-		Grants: []wire.GrantData{g}, Signature: sig,
+		Grants: []wire.GrantData{g}, Signature: sig, PairingMAC: mac,
 	}); s != 429 {
 		t.Fatalf("device ceiling: want 429, got %d %s", s, raw)
 	}

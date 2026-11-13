@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -450,6 +451,16 @@ func (o *owner) completePairFor(t *testing.T, nonceHex, deviceID string, signPub
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The pairing confirmation MAC (§3.13, v2 D) is a required field; the
+	// test's rogue fixture mints one the way the owner's phone does.
+	confirmSecret := make([]byte, wire.SizePairConfirmKey)
+	if _, err := rand.Read(confirmSecret); err != nil {
+		t.Fatal(err)
+	}
+	mac, err := wire.BuildPairConfirmMAC(confirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := wire.PairCompleteRequest{
 		Nonce: nonceHex,
 		Device: wire.DeviceInput{
@@ -458,8 +469,9 @@ func (o *owner) completePairFor(t *testing.T, nonceHex, deviceID string, signPub
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: signPub,
 			Label: "rogue-cli",
 		},
-		Grants:    grants,
-		Signature: o.sign(pairTB),
+		Grants:     grants,
+		Signature:  o.sign(pairTB),
+		PairingMAC: mac,
 	}
 	if resp := o.do(t, "POST", "/v1/pair/complete", req, nil); resp.StatusCode != 204 {
 		t.Fatalf("rogue pair complete: %d", resp.StatusCode)

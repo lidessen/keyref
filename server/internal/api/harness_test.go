@@ -456,6 +456,9 @@ type testCLI struct {
 	deviceID string
 	token    string
 	vaultID  string
+	// confirmSecret is the fake CLI's QR pairing secret `c` (§3.13):
+	// never sent to the server, used to check the returned MAC.
+	confirmSecret []byte
 }
 
 // registerPair runs POST /v1/pair/register for the CLI (§6.16).
@@ -470,6 +473,8 @@ func (e *testEnv) registerPair(t *testing.T) *testCLI {
 		hpkePub:  randBytes(t, wire.SizeX25519Key),
 		nonce:    randHexID(t), // 32 hex chars = 16 raw bytes
 		deviceID: randHexID(t),
+		// The fake CLI generates its own QR secret (§3.13, v2 D).
+		confirmSecret: randBytes(t, wire.SizePairConfirmKey),
 	}
 	nonceRaw, _ := hex.DecodeString(cli.nonce)
 	tb, err := wire.BuildPairRegisterTranscript(nonceRaw, "build-agent-1")
@@ -492,7 +497,9 @@ func (e *testEnv) registerPair(t *testing.T) *testCLI {
 	return cli
 }
 
-// completePair runs POST /v1/pair/complete from the owner (§6.17).
+// completePair runs POST /v1/pair/complete from the owner (§6.17). The
+// fake owner computes the §3.13 pairing confirmation MAC from the fake
+// CLI's QR secret, as the phone would (v2 D).
 func (o *testOwner) completePair(t *testing.T, cli *testCLI, grants []wire.GrantData) {
 	t.Helper()
 	for i := range grants {
@@ -516,6 +523,10 @@ func (o *testOwner) completePair(t *testing.T, cli *testCLI, grants []wire.Grant
 	if err != nil {
 		t.Fatal(err)
 	}
+	mac, err := wire.BuildPairConfirmMAC(cli.confirmSecret, wire.DeviceKindCLI, pairTB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	status, raw := o.env.do("POST", "/v1/pair/complete", o.token, wire.PairCompleteRequest{
 		Nonce: cli.nonce,
 		Device: wire.DeviceInput{
@@ -524,7 +535,7 @@ func (o *testOwner) completePair(t *testing.T, cli *testCLI, grants []wire.Grant
 			SignAlg: wire.SignAlgEd25519, SignPublicKey: cli.signPub,
 			Label: "build-agent-1",
 		},
-		Grants: grants, Signature: sig,
+		Grants: grants, Signature: sig, PairingMAC: mac,
 	})
 	if status != 204 {
 		t.Fatalf("pair complete: status %d %s", status, raw)

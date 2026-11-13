@@ -208,15 +208,23 @@ type PairRegisterResponse struct {
 
 // PairCompleteRequest is the body of POST /v1/pair/complete
 // (protocol §6.17). Signature covers the §3.4 pair transcript rebuilt
-// from these fields.
+// from these fields. PairingMAC is the §3.13 pairing confirmation MAC
+// (v2 D): HMAC-SHA256( c, label NUL kind NUL pair transcript ), computed
+// by the owner from the QR secret c and returned to the paired device
+// through pair/status — the server stores it opaquely and never learns
+// c, so it cannot forge a completion the device would accept.
 type PairCompleteRequest struct {
-	Nonce     string      `json:"nonce"`
-	Device    DeviceInput `json:"device"`
-	Grants    []GrantData `json:"grants"`
-	Signature Blob        `json:"signature"`
+	Nonce      string      `json:"nonce"`
+	Device     DeviceInput `json:"device"`
+	Grants     []GrantData `json:"grants"`
+	Signature  Blob        `json:"signature"`
+	PairingMAC Blob        `json:"pairing_mac"`
 }
 
 // PairStatusResponse is the body of GET /v1/pair/status (protocol §6.18).
+// PairingMAC rides along so the paired device can re-verify the
+// completion against its own QR secret before pinning the owner key
+// (protocol §3.13, v2 D); the server only relays it.
 type PairStatusResponse struct {
 	Status             string      `json:"status"`
 	VaultID            string      `json:"vault_id,omitempty"`
@@ -227,6 +235,7 @@ type PairStatusResponse struct {
 	DirectorySigned    Blob        `json:"directory_signed,omitempty"`
 	DirectorySignature Blob        `json:"directory_signature,omitempty"`
 	Grants             []GrantData `json:"grants,omitempty"`
+	PairingMAC         Blob        `json:"pairing_mac,omitempty"`
 }
 
 // PushTokenRequest is the body of PUT /v1/devices/push-token (design

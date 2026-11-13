@@ -158,12 +158,16 @@ public extension VaultFlows {
 }
 
 public extension PairingOffer {
-    /// Builds an offer from parts (UI tests, previews).
+    /// Builds an offer from parts (UI tests, previews). `kind` is the QR
+    /// `t` parameter and `confirmSecret` the QR `c` secret (§9.1, v2 D).
     static func make(hpkeKEM: String, hpkePublicKey: Data,
                      signAlg: String, signPublicKey: Data,
-                     nonce: String, label: String, origin: URL) -> PairingOffer {
+                     nonce: String, label: String, origin: URL,
+                     kind: String = DeviceKind.cli,
+                     confirmSecret: Data) -> PairingOffer {
         PairingOffer(hpkeKEM: hpkeKEM, hpkePublicKey: hpkePublicKey,
                      signAlg: signAlg, signPublicKey: signPublicKey,
-                     nonce: nonce, label: label, origin: origin)
+                     nonce: nonce, label: label, origin: origin,
+                     kind: kind, confirmSecret: confirmSecret)
     }
 }

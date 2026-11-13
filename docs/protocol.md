@@ -364,6 +364,21 @@ decision_device_id(hex) <NUL> decision <NUL> H(request_ciphertext) <NUL> H(wrap)
 - CLI 在状态为 `approved` 时、**解包之前**验签：在本地保存的 owner 签名目录里查 `decision_device_id`——必须 `status = active`，并且是 `kind = ios`，或在 subject 为 message 时是 `kind = decider`；重建誊本并验签。本地查不到该设备时同步一次、重查一次。**任何失败：退出码 13，不解包。**
 - 理由：HPKE base 模式没有发送方认证，没有这个签名，服务器可以凭空造一个决定（对 message subject 可以直接塞进伪造的短信正文）。
 
+### 3.13 配对确认 MAC（被配对设备验，protocol v2 D）
+
+```text
+pairing_mac = HMAC-SHA256(key = c,
+    msg = "keyref v1 pair-confirm" <NUL> kind <NUL> pair 誊本字节)
+```
+
+- `c`：32 字节随机数，由被配对的设备（`cli` / `source` / `decider`）生成，标准 base64 放进二维码的 `c` 参数（§9.1），**永不发给服务器**——二维码是它到手机的唯一带外通道。
+- `kind`：被接纳设备的类型，与 §6.17 的 `device.kind` 一致。
+- `pair 誊本字节`：§3.4 的完整誊本字节串（含末尾拼接的 grant 誊本）。
+- owner 在 `pair/complete` 时计算并提交（§6.17 必填字段 `pairing_mac`）；服务器不透明保存、经 §6.18 原样返回。
+- 被配对设备用自己的 `c`、自己的 kind 和自己重建的誊本重算 MAC，**常数时间**比较；不一致就中止配对——在钉 owner 公钥、写入任何本地状态之前。
+- 理由：§3.4 的签名只证明「这份誊本自洽」。服务器知道登记的设备公钥与 nonce，可以自造一把 owner key、自签一份自洽誊本，把「完成配对」冒充成另一个 owner——采集端会因此把短信封给服务器选的公钥。`c` 只在二维码里，服务器拿不到，MAC 是它伪造不了的唯一凭证。
+- 签发方与验证方共用同一个实现（Go `proto/wire/pair_confirm.go`、Swift `KeyrefCore/Wire/Transcript.swift`）；`vectors.json` 的 `pair_confirm_mac` 是跨语言闸门。
+
 ---
 
 ## 4. 库可行性结论（2026-10-24 实测）
@@ -593,10 +608,11 @@ digest 与目录不符时 CLI 停用授予并提示（design §9.1/§10.6）。
               "label":"build-agent-1" },
   "grants": [ { "item_id":"…","kind":"view","hpke_enc":"…","wrapped_key":"…",
                 "expires_at":…,"revision":1,"signature":"…" } ],
-  "signature": "<b64 owner 签 §3.4 pair 誊本>" }
+  "signature": "<b64 owner 签 §3.4 pair 誊本>",
+  "pairing_mac": "<b64 32B，§3.13 配对确认 MAC>" }
 ```
 
-→ `204`。服务器核对 nonce 行未消费、设备公钥与登记一致、owner 签名通过，写 `devices`（status=active）与 `grants`，追加变更；`pair_sessions.consumed_at` 置位。错误：`pair_expired`、`bad_signature`。
+→ `204`。`pairing_mac` 必填；服务器只检查 32 字节长度，原样存进配对会话、经 §6.18 返回（它无从验算，`c` 不经过服务器）。服务器核对 nonce 行未消费、设备公钥与登记一致、owner 签名通过，写 `devices`（status=active）与 `grants`，追加变更；`pair_sessions.consumed_at` 置位。错误：`invalid_field`（`pairing_mac` 缺失或不是 32 字节）、`pair_expired`、`bad_signature`。
 
 ### 6.18 `GET /v1/pair/status?nonce=<hex>`（CLI 轮询）
 
@@ -606,11 +622,12 @@ digest 与目录不符时 CLI 停用授予并提示（design §9.1/§10.6）。
 { "status": "complete", "vault_id": "…", "device_id": "…",
   "owner_sign_public_key": "<b64 65B ECDSA 公钥>",
   "pairing_signature": "<b64 §3.4 誊本的 owner 签名>",
+  "pairing_mac": "<b64 32B，§6.17 提交的那份>",
   "directory_revision": 8, "directory_signed": "<b64>", "directory_signature": "<b64>",
   "grants": [ { …该设备的初始授予… } ] }
 ```
 
-CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置；此后只接受这把 key（或其签名目录接纳的后续 owner key）签的目录与授予。错误：`pair_expired`（过期或不存在——同码，不区分）。
+CLI 先验 `pairing_signature`，再用自己的 `c` 重算并常数时间比对 `pairing_mac`（§3.13）——两者都通过才把 `owner_sign_public_key` 钉死进本地配置；此后只接受这把 key（或其签名目录接纳的后续 owner key）签的目录与授予。MAC 不匹配视为配对失败、不写入任何本地状态。错误：`pair_expired`（过期或不存在——同码，不区分）。
 
 ### 6.19 `POST /v1/approvals`（CLI）
 
@@ -803,17 +820,18 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 ### 9.1 二维码负载（design §8.1）
 
 ```text
-keyref://pair?v=1&k=<b64 X25519 hpke_public_key>&s=<b64 ed25519 sign_public_key>&n=<hex nonce 32>&name=<percent-encoded utf-8, ≤32 字节>&u=<percent-encoded origin, https>&t=<cli|source|decider>
+keyref://pair?v=1&k=<b64 X25519 hpke_public_key>&s=<b64 ed25519 sign_public_key>&n=<hex nonce 32>&name=<percent-encoded utf-8, ≤32 字节>&u=<percent-encoded origin, https>[&t=<cli|source|decider>]&c=<b64 32B pairing secret>
 ```
 
-- `k`、`s` 为标准 Base64 后按 RFC 3986 percent-encode 进 query（`+`、`=`、`/` 必须转义）；`n` 是 hex，无需转义；`name`、`u` 是普通 percent-encoding。iOS 必须先 percent-decode 再 base64 解码。
-- `t` 是 v1.2 新增的可选参数，声明请求配对的设备种类；缺省为 `cli`（旧二维码兼容）。iOS 扫到 `t=source` 时确认页写明「只能上传短信」，`t=decider` 时写明「将看到全部短信明文」（design §14.2、§14.8）；非 owner 扫到的 `t` 值以 owner 在 `pair/complete` 里提交的 `device.kind` 为准。
+- `k`、`s`、`c` 为标准 Base64 后按 RFC 3986 percent-encode 进 query（`+`、`=`、`/` 必须转义）；`n` 是 hex，无需转义；`name`、`u` 是普通 percent-encoding。iOS 必须先 percent-decode 再 base64 解码。
+- `t` 是 v1.2 新增的可选参数，声明请求配对的设备种类；缺省为 `cli`（旧二维码兼容）。iOS 扫到 `t=source` 时确认页写明「只能上传短信」，`t=decider` 时写明「将看到全部短信明文」（design §14.2、§14.8）；非 owner 扫到的 `t` 值以 owner 在 `pair/complete` 里提交的 `device.kind` 为准——owner 必须按 `t` 来接纳设备，并把同一个 kind 写进目录行和配对确认 MAC（§3.13，protocol v2 D）。
+- `c` 是 v2 D 新增的**必填**参数：32 字节随机数，由被配对的设备生成，只出现在二维码里，**永不发给服务器**。owner 用它算 §3.13 的 `pairing_mac`；缺 `c` 或长度不是 32 字节的二维码应当被拒绝。
 - `nonce` = CLI 生成的 16 字节随机数，即 §6.16/§3.5 的 nonce；10 分钟有效。
 - 终端同时以文字打印 origin 与指纹：指纹 = `SHA-256(s 原始字节)` 前 8 字节的 hex，按 4 位分组大写显示 `A1B2-C3D4-E5F6-7890`，供扫不出来时人工核对。
 
 ### 9.2 流程对端点
 
-CLI：`keyref pair` 生成密钥（私钥入密钥环）→ 打印二维码 + 指纹 → `POST /v1/pair/register` → 每 2 秒 `GET /v1/pair/status`。iOS：扫码 → 核对指纹/名字/origin（origin 不同须人确认后手机才改自己的服务器 URL）→ 勾选条目（默认空集）→ `POST /v1/pair/complete`。授予集合为空直到人勾选（design §15）。
+CLI：`keyref pair` 生成密钥（私钥入密钥环）与 32 字节配对秘密 `c` → 打印二维码 + 指纹 → `POST /v1/pair/register` → 每 2 秒 `GET /v1/pair/status`，拿到完成后先验 §3.4 签名、再验 §3.13 MAC。iOS：扫码 → 核对指纹/名字/origin（origin 不同须人确认后手机才改自己的服务器 URL）→ 勾选条目（默认空集）→ `POST /v1/pair/complete`（带 §3.13 `pairing_mac`）。授予集合为空直到人勾选（design §15）。
 
 ---
 

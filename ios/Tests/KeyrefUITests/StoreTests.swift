@@ -177,7 +177,8 @@ final class StoreTests: XCTestCase {
             hpkeKEM: KEMName.x25519, hpkePublicKey: Data(repeating: 1, count: 32),
             signAlg: SignAlg.ed25519, signPublicKey: Data(repeating: 2, count: 32),
             nonce: KeyrefEncoding.newID(), label: "build-bot",
-            origin: URL(string: "https://other.example")!)
+            origin: URL(string: "https://other.example")!,
+            confirmSecret: Data(repeating: 3, count: KeyrefSizes.pairConfirmKey))
         let app = makeApp(backend: backend)
         let model = PairingFlowModel(backend: backend, haptics: NoHaptics())
         XCTAssertTrue(model.originMismatch(offer))
@@ -208,7 +209,8 @@ final class StoreTests: XCTestCase {
             hpkeKEM: KEMName.x25519, hpkePublicKey: owner.kemPublicKey,
             signAlg: SignAlg.ecdsaP256, signPublicKey: owner.signPublicKey,
             nonce: KeyrefEncoding.newID(), label: "build-bot",
-            origin: backend.origin)
+            origin: backend.origin,
+            confirmSecret: Data(repeating: 4, count: KeyrefSizes.pairConfirmKey))
         model.handlePayload(offer.payload(), items: app.items.rows)
         model.proceedToSelection(offer)
         // 勾选第一条（默认不勾选 → 人勾选 → 授予 view + use 两条）。
