@@ -88,7 +88,7 @@ func dispatch(cmd string, args []string) int {
 	case "source":
 		return cmdSource(args)
 	case "decider":
-		return cmdDecider(args[1:])
+		return cmdDecider(args)
 	case "pair":
 		return cmdPair(args)
 	case "session":

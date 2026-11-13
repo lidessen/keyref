@@ -234,6 +234,15 @@ func run(req *Request) (int, *Outcome) {
 		return deny(10, "sms-argv")
 	}
 
+	// argv0 selects the program that is policy-checked and spawned; a
+	// placeholder there would substitute a secret into the executable
+	// path, so it is rejected in every mode before any secret is
+	// resolved.
+	if len(req.Argv) > 0 && HasArgvPlaceholder(req.Argv[:1]) {
+		fmt.Fprintln(req.Stderr, "keyref: argv placeholders are not allowed in the command (argv[0])")
+		return deny(exitcode.PolicyRejection, "argv0-placeholder")
+	}
+
 	for r, rr := range req.Refs {
 		if rr.Message {
 			// No item meta, no item policy: an sms: ref is gated by its
@@ -258,12 +267,17 @@ func run(req *Request) (int, *Outcome) {
 			return deny(10, "allow-argv-flag")
 		}
 		for _, ref := range outcome.Refs {
-			if req.Refs[ref].Message {
+			rr, ok := req.Refs[ref]
+			if !ok {
+				fmt.Fprintf(req.Stderr, "keyref: unknown ref %q\n", ref)
+				return deny(11, "unknown-ref")
+			}
+			if rr.Message {
 				// Message refs reach the child through injection values
 				// only; they never take the argv path (design §14.5).
 				continue
 			}
-			if !req.Refs[ref].Meta.Policy.AllowArgv {
+			if !rr.Meta.Policy.AllowArgv {
 				fmt.Fprintf(req.Stderr, "keyref: item %s does not allow argv injection (policy.allowArgv)\n", ref)
 				return deny(10, "allow-argv-policy")
 			}
@@ -569,7 +583,7 @@ func run(req *Request) (int, *Outcome) {
 		// and its child together, even when using SIGKILL.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		cmd = osexec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd = osexec.CommandContext(ctx, resolved.First, argv[1:]...)
 		cmd.WaitDelay = time.Second
 		login := req.Refs[req.LoginRef]
 		cmd.Stdin = io.MultiReader(
@@ -577,9 +591,16 @@ func run(req *Request) (int, *Outcome) {
 			bytes.NewReader(login.Value.Bytes()), strings.NewReader("\n"),
 		)
 	} else {
-		cmd = osexec.Command(argv[0], argv[1:]...)
+		cmd = osexec.Command(resolved.First, argv[1:]...)
 		// This group lets a redaction failure kill the whole tree.
 		cmd.SysProcAttr = childSysProcAttr()
+	}
+	// Spawn exactly the file that was policy-checked (never a second
+	// PATH lookup); the child still sees the caller's argv0.
+	cmd.Args[0] = argv[0]
+	if !stillResolvesTo(resolved) {
+		fmt.Fprintln(req.Stderr, "keyref: command changed after policy check; refusing to start")
+		return deny(exitcode.PolicyRejection, "command-changed")
 	}
 	cmd.Env = childEnv
 	// Core dumps are disabled process-wide before the spawn and
@@ -628,12 +649,15 @@ func run(req *Request) (int, *Outcome) {
 	stderrRed.OnFail = kill
 
 	if serr := cmd.Start(); serr != nil {
-		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %v\n", serr)
+		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %s\n", redactStartError(secrets, serr))
 		return deny(18, "cannot-start")
 	}
 
 	werr := cmd.Wait()
 
+	// The child has run from here on: record its real exit status so an
+	// audited redaction failure is not mistaken for "child never ran".
+	outcome.ChildExit = childExitCode(werr)
 	if stdoutRed.Failed() || stderrRed.Failed() {
 		fmt.Fprintln(req.Stderr, "keyref: redaction failed; output discarded")
 		return deny(14, "redaction")
@@ -649,22 +673,12 @@ func run(req *Request) (int, *Outcome) {
 		return deny(14, "redaction")
 	}
 
-	childExit := 0
-	if werr != nil {
-		var ee *osexec.ExitError
-		if errors.As(werr, &ee) {
-			if status, ok := ee.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-				childExit = 128 + int(status.Signal())
-			} else {
-				childExit = ee.ExitCode()
-			}
-		} else {
-			fmt.Fprintf(req.Stderr, "keyref: child wait failed: %v\n", werr)
-			return deny(14, "wait")
-		}
+	childExit := outcome.ChildExit
+	if werr != nil && !isExitError(werr) {
+		fmt.Fprintf(req.Stderr, "keyref: child wait failed: %v\n", werr)
+		return deny(14, "wait")
 	}
 
-	outcome.ChildExit = childExit
 	outcome.Redactions = stdoutRed.Count() + stderrRed.Count()
 	outcome.PolicyState = "allow"
 	return childExit, outcome
@@ -824,4 +838,48 @@ func CollectRefs(req *Request) []string {
 		}
 	}
 	return out
+}
+
+// childExitCode maps a cmd.Wait error to the exit status keyref
+// reports: 128+signal for a signalled child, the exit code otherwise,
+// 0 for a clean exit.
+func childExitCode(werr error) int {
+	if werr == nil {
+		return 0
+	}
+	var ee *osexec.ExitError
+	if !errors.As(werr, &ee) {
+		return 0
+	}
+	if status, ok := ee.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return ee.ExitCode()
+}
+
+func isExitError(err error) bool {
+	var ee *osexec.ExitError
+	return errors.As(err, &ee)
+}
+
+// stillResolvesTo re-checks, immediately before Start, that the
+// PATH-resolved first-hop path still resolves to the real file that
+// ResolveCommand policy-checked.
+func stillResolvesTo(rc *ResolvedCommand) bool {
+	real, err := filepath.EvalSymlinks(rc.First)
+	return err == nil && real == rc.FirstReal
+}
+
+// redactStartError renders a cmd.Start error with every secret value
+// redacted, so a start failure can never echo a secret.
+func redactStartError(secrets map[string][]byte, err error) string {
+	var buf bytes.Buffer
+	r := newRedactor(secrets, nil)
+	defer r.Destroy()
+	r.Attach(&buf)
+	_, _ = r.Write([]byte(err.Error()))
+	if r.Flush() != nil {
+		return "start failed"
+	}
+	return buf.String()
 }

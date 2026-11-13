@@ -3,7 +3,6 @@
 package exec
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -109,7 +108,7 @@ func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map
 
 	if serr := cmd.Start(); serr != nil {
 		master.Close()
-		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %v\n", serr)
+		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %s\n", redactStartError(secrets, serr))
 		return deny(18, "cannot-start")
 	}
 	kill := func() {
@@ -153,26 +152,21 @@ func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map
 	}
 	// Pump is done: no red.Write can be in flight while we flush, and
 	// every byte the child produced has been fed through the redactor.
+	outcome.ChildExit = childExitCode(werr)
+	if stdoutRed.Failed() {
+		fmt.Fprintln(req.Stderr, "keyref: redaction failed; output discarded")
+		return deny(14, "redaction")
+	}
 	if ferr := stdoutRed.Flush(); ferr != nil {
 		fmt.Fprintln(req.Stderr, "keyref: redaction failed; output discarded")
 		return deny(14, "redaction")
 	}
 
-	childExit := 0
-	if werr != nil {
-		var ee *osexec.ExitError
-		if errors.As(werr, &ee) {
-			if status, ok := ee.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-				childExit = 128 + int(status.Signal())
-			} else {
-				childExit = ee.ExitCode()
-			}
-		} else {
-			fmt.Fprintf(req.Stderr, "keyref: child wait failed: %v\n", werr)
-			return deny(14, "wait")
-		}
+	childExit := outcome.ChildExit
+	if werr != nil && !isExitError(werr) {
+		fmt.Fprintf(req.Stderr, "keyref: child wait failed: %v\n", werr)
+		return deny(14, "wait")
 	}
-	outcome.ChildExit = childExit
 	outcome.Redactions = stdoutRed.Count()
 	outcome.PolicyState = "allow"
 	return childExit, outcome

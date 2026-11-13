@@ -48,6 +48,11 @@ func helperMain(args []string) {
 		fmt.Printf("FD3=%s\n", string(b))
 	case len(args) > 0 && args[0] == "print-argv":
 		fmt.Printf("ARGV=%s\n", strings.Join(args[1:], ","))
+	case len(args) > 0 && args[0] == "print-argv0":
+		fmt.Printf("ARGV0=%s\n", os.Args[0])
+	case len(args) > 0 && args[0] == "out-exit7":
+		fmt.Println("some output")
+		os.Exit(7)
 	case len(args) > 0 && args[0] == "exit42":
 		os.Exit(42)
 	case len(args) > 0 && args[0] == "prompt":
