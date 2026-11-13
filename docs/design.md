@@ -554,7 +554,7 @@ keyref 掌握 pty 主端。子进程的输出先过脱敏器，再交给 agent�
 - 丢掉 `LD_PRELOAD`、`LD_LIBRARY_PATH`、`DYLD_INSERT_LIBRARIES`、`DYLD_LIBRARY_PATH` 以及其他 `DYLD_*` / `LD_*`
 - 加上本次 `--env NAME=REF` 指定的变量（值是该 ref 解出的秘密），以及 `--pass NAME` 从 keyref 自己的环境里按名转发的变量
 
-`--env` 与 `--pass` 的变量名必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，且不得以 `LD_` 或 `DYLD_` 开头——否则退出码 `10`，清洗过的环境不允许从后门加回来。`--pass` 转发的是调用方环境里本来就有的值（例如 `HTTPS_PROXY`、`SSH_AUTH_SOCK`），不是注入的秘密，但仍然要显式写名，不做「全部继承」。
+`--env` 与 `--pass` 的变量名必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，且不得以 `LD_` 或 `DYLD_` 开头，也不得是能把代码带进子进程的 shell/解释器启动与钩子变量（`BASH_ENV`、`ENV`、`NODE_OPTIONS`、`PERL5OPT`、`PYTHONPATH`、`RUBYOPT`、`JAVA_TOOL_OPTIONS`、`GIT_SSH_COMMAND`、`PAGER`、`LESSOPEN` 等，完整名单见 `cli/internal/exec/inject.go`）——否则退出码 `10`，清洗过的环境不允许从后门加回来。这份名单是防误用的滑倒保护，不是安全边界。`--pass` 转发的是调用方环境里本来就有的值（例如 `HTTPS_PROXY`、`SSH_AUTH_SOCK`），不是注入的秘密，但仍然要显式写名，不做「全部继承」。
 
 同时设置 `RLIMIT_CORE = 0`。在 Linux 上于子进程里尝试 `PR_SET_DUMPABLE = 0`，并在实现时验证 `execve` 之后标志是否还在。不要在文档里把它写成已经封死 `/proc/<pid>/environ`。同一用户的 `procfs` 可读性是 B2，靠集成约束和以后的沙箱处理。
 

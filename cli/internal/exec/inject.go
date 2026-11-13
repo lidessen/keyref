@@ -17,13 +17,44 @@ var envShortlist = []string{
 	"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR",
 }
 
-// ValidateEnvName enforces the name grammar and the LD_*/DYLD_* ban
+// envDeniedPrefixes are prefixes no injected or forwarded variable may
+// carry: dynamic-loader hooks. The ban is a slip guard, not a security
+// boundary (design.md §7.2).
+var envDeniedPrefixes = []string{"LD_", "DYLD_"}
+
+// envDeniedNames are exact names that run code on startup, redirect
+// module resolution, or choose the executable a tool spawns. Forwarding
+// one with --pass would reopen the code-execution channel the sanitized
+// environment closes; this list is a slip guard too (design.md §7.2),
+// and it is deliberately concrete rather than exhaustive.
+var envDeniedNames = map[string]struct{}{
+	// Shell startup files and trace hooks.
+	"BASH_ENV": {}, "ENV": {}, "ZDOTDIR": {}, "SHELLOPTS": {}, "BASHOPTS": {},
+	"PS4": {}, "PROMPT_COMMAND": {},
+	// Interpreters and class loaders.
+	"NODE_OPTIONS": {}, "NODE_PATH": {},
+	"PERL5OPT": {}, "PERL5LIB": {}, "PERLLIB": {}, "PERL5DB": {}, "PERL5SHELL": {},
+	"PYTHONSTARTUP": {}, "PYTHONHOME": {}, "PYTHONPATH": {},
+	"RUBYOPT": {}, "RUBYLIB": {},
+	"JAVA_TOOL_OPTIONS": {}, "_JAVA_OPTIONS": {}, "JDK_JAVA_OPTIONS": {}, "CLASSPATH": {},
+	// Tools that execute a helper chosen by the environment.
+	"SSH_ASKPASS": {}, "GIT_SSH_COMMAND": {}, "GIT_SSH": {},
+	"GIT_EXTERNAL_DIFF": {}, "GIT_ASKPASS": {}, "GIT_PAGER": {}, "GIT_EXEC_PATH": {},
+	"PAGER": {}, "LESSOPEN": {}, "LESSCLOSE": {}, "MANPAGER": {}, "MANOPT": {},
+}
+
+// ValidateEnvName enforces the name grammar and the forbidden-name ban
 // (design.md §7.2): the sanitized environment must not re-admit them.
 func ValidateEnvName(name string) error {
 	if !envNameRe.MatchString(name) {
 		return &PolicyError{Reason: fmt.Sprintf("environment variable name %q is invalid", name)}
 	}
-	if strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") {
+	for _, prefix := range envDeniedPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return &PolicyError{Reason: fmt.Sprintf("environment variable name %q is forbidden", name)}
+		}
+	}
+	if _, denied := envDeniedNames[name]; denied {
 		return &PolicyError{Reason: fmt.Sprintf("environment variable name %q is forbidden", name)}
 	}
 	return nil

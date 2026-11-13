@@ -7,16 +7,29 @@ import (
 )
 
 func TestValidateEnvName(t *testing.T) {
-	for _, good := range []string{"PATH", "OPENAI_API_KEY", "_x", "a1"} {
+	for _, good := range []string{"PATH", "OPENAI_API_KEY", "_x", "a1", "HTTPS_PROXY", "SSH_AUTH_SOCK"} {
 		if err := ValidateEnvName(good); err != nil {
 			t.Errorf("rejected valid name %q: %v", good, err)
 		}
 	}
-	for _, bad := range []string{"", "1x", "a-b", "a b", "LD_PRELOAD", "LD_", "DYLD_INSERT_LIBRARIES", "DYLD_X"} {
-		if err := ValidateEnvName(bad); err == nil {
-			t.Errorf("accepted invalid name %q", bad)
+	bad := []string{
+		"", "1x", "a-b", "a b",
+		"LD_PRELOAD", "LD_", "DYLD_INSERT_LIBRARIES", "DYLD_X",
+		// Shell startup and trace hooks.
+		"BASH_ENV", "ENV", "ZDOTDIR", "SHELLOPTS", "BASHOPTS", "PS4", "PROMPT_COMMAND",
+		// Interpreter and class-loader injection.
+		"NODE_OPTIONS", "NODE_PATH", "PERL5OPT", "PERL5LIB", "PERLLIB", "PERL5DB", "PERL5SHELL",
+		"PYTHONSTARTUP", "PYTHONHOME", "PYTHONPATH", "RUBYOPT", "RUBYLIB",
+		"JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH",
+		// Helper executables chosen by the environment.
+		"SSH_ASKPASS", "GIT_SSH_COMMAND", "GIT_SSH", "GIT_EXTERNAL_DIFF", "GIT_ASKPASS",
+		"GIT_PAGER", "GIT_EXEC_PATH", "PAGER", "LESSOPEN", "LESSCLOSE", "MANPAGER", "MANOPT",
+	}
+	for _, name := range bad {
+		if err := ValidateEnvName(name); err == nil {
+			t.Errorf("accepted invalid name %q", name)
 		} else if !isPolicyErr(err) {
-			t.Errorf("name %q error is not a policy error: %T", bad, err)
+			t.Errorf("name %q error is not a policy error: %T", name, err)
 		}
 	}
 }
@@ -46,6 +59,13 @@ func TestSanitizeParentEnv(t *testing.T) {
 	// Missing --pass variable is a rejection.
 	if _, err := SanitizeParentEnv(parent, []string{"NOT_THERE"}); !isPolicyErr(err) {
 		t.Fatalf("missing --pass accepted: %v", err)
+	}
+	// A forbidden name cannot be re-admitted through --pass either.
+	parent = append(parent, "GIT_SSH_COMMAND=sh -c evil", "PAGER=sh")
+	for _, name := range []string{"GIT_SSH_COMMAND", "PAGER"} {
+		if _, err := SanitizeParentEnv(parent, []string{name}); !isPolicyErr(err) {
+			t.Fatalf("forbidden --pass name %q accepted: %v", name, err)
+		}
 	}
 }
 
