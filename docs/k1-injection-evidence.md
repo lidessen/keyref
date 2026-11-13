@@ -26,7 +26,9 @@ go test -C cli -tags=e2e -run '^TestProviderEnvironmentContract$' -count=1 -v ./
 
 已通过本机消息联系 Neowind 项目窗，在其停机回执切片的安全点对接；不占用其活动工作区或替其修改消费者代码。已交付可执行文件 `out/k1/keyref`，生产代码基线 `7979b0f`（执行修复在 `acb0aba`），SHA-256 为 `c3c7541588e954c10263da791aa75f99d8e6b80b5f9a99c30817c94d8665fe7c`。这是二进制 hash，不是凭证 hash。
 
-消费者侧结果尚待回传。需要绑定真实 Neowind 修订与产物，使用内存生成的合成 key，经 Keyref 启动真实命令，再核对认证 header，并扫描 stdout/stderr、日志、回执、计划和状态文件。回执仅保存路径、产物版本、布尔值、计数和退出码，不保存值或其 hash。Keyref helper 的结果不替代这份证据。
+**当前状态：权限阻塞，消费者验收未运行。** 2026-11-14，Neowind 项目窗回报：其会话的自动审批拒绝执行仓库外的固定版本 `out/k1/keyref`，连 `exec --help` 也被拒绝，理由是该二进制缺少该会话内的明确执行授权。此处记录的是对方的拒绝回报，不是 Keyref 自测失败。没有通过其他会话、工具、复制路径或测试包装重放被拒绝的执行；Neowind 继续原有授权下的回执切片。恢复条件是在 Neowind 会话自身完成该产物、合成 key 与回环检查范围的执行授权。
+
+授权解决后，仍需绑定真实 Neowind 修订与产物，使用内存生成的合成 key，经 Keyref 启动真实命令，再核对认证 header，并扫描 stdout/stderr、日志、回执、计划和状态文件。回执仅保存路径、产物版本、布尔值、计数和退出码，不保存值或其 hash。Keyref helper 的结果不替代这份证据；最小联调保持未完成。
 
 ## 边界
 
