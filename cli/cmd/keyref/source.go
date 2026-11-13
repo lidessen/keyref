@@ -120,7 +120,7 @@ func openLocal(spec source.Spec) (*local.Store, error) {
 	if locked(mustStore()) {
 		return nil, errLocalLocked
 	}
-	key, err := localvault.Key(secretStore(), spec.Name, os.LookupEnv)
+	key, err := localvault.Key(secretStore(), spec.Path, os.LookupEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -229,13 +229,11 @@ func cmdInit(args []string) int {
 	if err := checkPrivateDir(spec.Path); err != nil {
 		return fatalf(1, "%v", err)
 	}
-	key, err := localvault.Provision(secretStore(), spec.Name, os.LookupEnv)
+	vault, err := localvault.Create(secretStore(), spec, os.LookupEnv)
 	if err != nil {
-		return fatalf(1, "%v", err)
-	}
-	defer secret.Wipe(key)
-	vault, err := localvault.Create(spec, key)
-	if err != nil {
+		if errors.Is(err, localvault.ErrKey) || errors.Is(err, localvault.ErrKeyExists) {
+			return fatalf(1, "%v", err)
+		}
 		return fatalf(1, "could not create the local vault: %v", err)
 	}
 	if err := vault.Close(); err != nil {

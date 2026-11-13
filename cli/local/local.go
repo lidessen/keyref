@@ -49,6 +49,37 @@ func Create(path string, key []byte) (*Store, error) { return open(path, key, tr
 // Open opens an existing private store and verifies the key without creating one.
 func Open(path string, key []byte) (*Store, error) { return open(path, key, false) }
 
+// StoreID returns the vault's random store id (32 lowercase hex
+// characters). It is not a secret: clients bind external key material
+// (the OS-keyring master key entry) to the vault with it.
+func (s *Store) StoreID() string { return s.id }
+
+// ReadStoreID returns a vault's store id without decrypting anything
+// and without creating the file. It never needs the master key.
+func ReadStoreID(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", ErrInvalidStore
+	}
+	u := &url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return "", ErrInvalidStore
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var id string
+	if err := db.QueryRow("SELECT id FROM metadata").Scan(&id); err != nil {
+		return "", ErrInvalidStore
+	}
+	if len(id) != 32 {
+		return "", ErrInvalidStore
+	}
+	if _, err := hex.DecodeString(id); err != nil || strings.ToLower(id) != id {
+		return "", ErrInvalidStore
+	}
+	return id, nil
+}
+
 func open(path string, key []byte, create bool) (*Store, error) {
 	if len(key) != 32 {
 		return nil, ErrInvalidKey

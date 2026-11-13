@@ -442,3 +442,46 @@ func TestLockCoversLocalSources(t *testing.T) {
 		t.Fatalf("get after unlock exit %d: %s", r.code, r.stderr)
 	}
 }
+
+// TestInitNeverOverwritesAnotherVaultsKey pins issue #2: the keyring
+// entry is bound to the vault's store id, so a second vault in another
+// data directory cannot replace the first vault's master key.
+func TestInitNeverOverwritesAnotherVaultsKey(t *testing.T) {
+	root := t.TempDir()
+	keyringDir := filepath.Join(root, "keyring")
+	home1 := filepath.Join(root, "home1")
+	home2 := filepath.Join(root, "home2")
+	env1 := localEnv(home1, keyringDir)
+	env2 := localEnv(home2, keyringDir)
+
+	if r := localRun(t, env1, "", "init"); r.code != 0 {
+		t.Fatalf("first init exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env1, localSecret, "set", "my-ref"); r.code != 0 {
+		t.Fatalf("first set exit %d: %s", r.code, r.stderr)
+	}
+
+	// A second data directory resolves to the same source name, "local".
+	if r := localRun(t, env2, "", "init"); r.code != 0 {
+		t.Fatalf("second init exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env2, "another-secret-value", "set", "other-ref"); r.code != 0 {
+		t.Fatalf("second set exit %d: %s", r.code, r.stderr)
+	}
+
+	// The first vault still opens with its own key: nothing overwrote it.
+	reveal := localRun(t, env1, "", "get", "my-ref", "--reveal")
+	if reveal.code != 0 || reveal.stdout != localSecret {
+		t.Fatalf("the first vault lost its key after a second init: %q (exit %d): %s",
+			reveal.stdout, reveal.code, reveal.stderr)
+	}
+
+	// One keyring entry per vault, bound to each vault's store id.
+	entries, err := os.ReadDir(keyringDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected one keyring entry per vault, got %d", len(entries))
+	}
+}

@@ -1560,7 +1560,7 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | 一套命令面、选源顺序、升级迁移（§17.1–§17.3） | 已实现 |
 | 本地库的主密钥、私有目录、`init` / `set` / `get` / `delete` / `exec`（v0.9 的形状） | 已实现 |
 | 本地 source 遵守 `keyref lock` | 已实现（标志目前放在 `cache.sqlite` 里，与 §17.8 不符） |
-| 密钥环条目绑定 `store id`、`init` 不覆盖 | 未实现（现状会覆盖，issue #2） |
+| 密钥环条目绑定 `store id`、`init` 不覆盖 | 已实现（issue #2） |
 | `sources.json` 原子替换 | 未实现（issue #6） |
 | 行的加密 meta；local 的 `list`；`get` 不解密 secret；本地 `allowCommands` / `allowedHosts` | 未实现 |
 | `set` 默认去末尾换行、`--raw`、终端不回显、新建/替换、短值警告、ref 语法 | 未实现 |

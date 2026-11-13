@@ -422,3 +422,28 @@ func TestLocalWriteLimitPreservesExistingValue(t *testing.T) {
 		t.Fatalf("counter: %d, %v", count, err)
 	}
 }
+
+// ReadStoreID returns the id the vault was created with, without the
+// master key, and never creates a missing file (issue #2: the keyring
+// entry is bound to this id).
+func TestReadStoreID(t *testing.T) {
+	path := pathForTest(t)
+	if _, err := ReadStoreID(path); !errors.Is(err, ErrInvalidStore) {
+		t.Fatalf("missing vault: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("ReadStoreID created a file: %v", err)
+	}
+	s, err := Create(path, keyForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	id, err := ReadStoreID(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != s.StoreID() || len(id) != 32 {
+		t.Fatalf("store id %q vs %q", id, s.StoreID())
+	}
+}
