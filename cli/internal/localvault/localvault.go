@@ -12,7 +12,7 @@ import (
 
 	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/store"
+	"github.com/lidessen/keyref/cli/local"
 )
 
 // EnvMaster carries the master key as the standard base64 encoding of
@@ -69,13 +69,13 @@ func Provision(ks keyring.SecretStore, sourceName string, lookup func(string) (s
 }
 
 // Open opens an existing local vault. It never creates one.
-func Open(spec source.Spec, key []byte) (store.Store, error) {
-	return store.NewRegistry().Open(store.Options{Config: store.LocalOptions{Path: spec.Path, Key: key}})
+func Open(spec source.Spec, key []byte) (*local.Store, error) {
+	return local.Open(spec.Path, key)
 }
 
 // Create exclusively creates a new local vault, never overwriting one.
-func Create(spec source.Spec, key []byte) (store.Store, error) {
-	return store.NewRegistry().Create(store.Options{Config: store.LocalOptions{Path: spec.Path, Key: key}})
+func Create(spec source.Spec, key []byte) (*local.Store, error) {
+	return local.Create(spec.Path, key)
 }
 
 func decode(encoded string) ([]byte, error) {

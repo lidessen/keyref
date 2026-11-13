@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/lidessen/keyref/cli/internal/approval"
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/meta"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/internal/store"
 )
 
 // `keyref mcp` serves the vault over stdio as an MCP-compatible JSON-RPC
@@ -113,7 +113,7 @@ func mcpTools() []mcpTool {
 // mcpServer holds the lazily initialized store and identity shared by
 // every tool call of one MCP session.
 type mcpServer struct {
-	st   *store.Store
+	st   *cache.Store
 	id   *device.Identity
 	init bool
 }

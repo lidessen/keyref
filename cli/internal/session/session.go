@@ -13,9 +13,9 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
-	"github.com/lidessen/keyref/cli/internal/store"
 )
 
 // KV keys inside cache.sqlite (shared with the pairing/sync layers).
@@ -36,14 +36,14 @@ var ErrNotPaired = errors.New("session: device not paired")
 
 // Manager issues and caches bearer tokens for one device identity.
 type Manager struct {
-	st *store.Store
+	st *cache.Store
 	cl *client.Client
 	id *device.Identity
 }
 
 // New returns a session manager. Wire the client's token source to
 // TokenSource after construction.
-func New(st *store.Store, cl *client.Client, id *device.Identity) *Manager {
+func New(st *cache.Store, cl *client.Client, id *device.Identity) *Manager {
 	return &Manager{st: st, cl: cl, id: id}
 }
 

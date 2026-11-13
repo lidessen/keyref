@@ -9,11 +9,11 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/pair"
 	"github.com/lidessen/keyref/cli/internal/session"
-	"github.com/lidessen/keyref/cli/internal/store"
 	"github.com/lidessen/keyref/cli/internal/testowner"
 )
 
@@ -26,7 +26,7 @@ const (
 
 const fxSecret = "sk-META-TEST-never-in-output"
 
-func fixture(t *testing.T) (*store.Store, *device.Identity, *testowner.Owner) {
+func fixture(t *testing.T) (*cache.Store, *device.Identity, *testowner.Owner) {
 	t.Helper()
 	owner := testowner.New(t, tvVault, tvOwner)
 	base, err := os.MkdirTemp("", "meta-*")
@@ -42,7 +42,7 @@ func fixture(t *testing.T) (*store.Store, *device.Identity, *testowner.Owner) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(base, "cache"))
+	st, err := cache.Open(filepath.Join(base, "cache"))
 	if err != nil {
 		t.Fatal(err)
 	}

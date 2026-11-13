@@ -73,18 +73,16 @@ The CLI must be paired and unlocked, the item must be injectable, and the item's
 
 `--timeout` still bounds the approval wait, not the child's runtime. The child stays in the caller's process group, so the caller can cancel Keyref and the child together. Sending a standalone SIGINT or SIGTERM to the child after it started terminates that child. Operations already issued still have to be settled against the consuming program's receipt. Keyref does not automatically re-issue an approval or restart the child after a cancellation, a timeout or the child's exit.
 
-### Go library: a registrable storage provider
+### Go library: the local store
 
-`github.com/lidessen/keyref/cli/store` provides a unified `Store` interface (`Put`, `Use`, `Delete`, `Close`). `Use` provides the plaintext only inside the callback, and callers should avoid retaining or logging it; in-memory clearing is not isolation from a same-user process. Every `store.NewRegistry()` registers the standalone local store by default:
+`github.com/lidessen/keyref/cli/local` provides the standalone store (`Create`, `Open`, `Put`, `Use`, `Delete`, `Close`). `Use` provides the plaintext only inside the callback; callers should avoid retaining or logging it, and in-memory clearing is not isolation from a same-user process:
 
 ```go
-registry := store.NewRegistry()
-vault, err := registry.Open(store.Options{Config: store.LocalOptions{Path: path, Key: masterKey}})
+vault, err := local.Open(path, masterKey) // local.Create makes a new vault
 // check err; call Close when done with the vault.
 ```
 
-`Create` uses the same Options and creates according to the backend's semantics. An empty `Provider` selects `local`; an explicitly named unknown provider or a backend error returns the error directly — never a fallback. An application can register its own backend with `Registry.Register(name, factory)`; the factory receives that provider's configuration and a create/open flag, and is responsible for validating the configuration and implementing the storage semantics. Registration is per instance. The only backend Keyref ships with today is the local one; that does not mean the synced vault or a cloud service is available. The CLI's local source calls the same local backend through this entry point.
-
+The CLI reaches it through `cli/internal/localvault`, which resolves the master key from the OS keyring or `KEYREF_LOCAL_MASTER`. No other backend ships today: the paired vault is read through the synced path, not through this package.
 
 The default server is the official hosted service. `keyref server set https://keys.example.com` or the `KEYREF_SERVER` environment variable points the CLI at a self-hosted one. The pairing QR code carries that origin, and the phone asks for confirmation before you change the server. Encryption on both sides does not depend on who is running the server.
 
@@ -114,7 +112,7 @@ cli/
 ├── internal/qr/         # terminal QR rendering
 ├── internal/secret/     # memguard guarded buffers, secret JSON parsing without strings
 ├── internal/session/    # challenge → token, token reuse and renewal
-├── internal/store/      # cache.sqlite (0600, ciphertext cache)
+├── internal/cache/      # cache.sqlite (0600, ciphertext cache)
 ├── internal/source/     # the source registry: local (default) and sync
 ├── internal/syncing/    # applying server changes to the local cache
 ├── internal/testowner/  # a software P-256 owner for tests and e2e

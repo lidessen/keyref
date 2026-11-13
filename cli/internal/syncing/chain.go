@@ -7,8 +7,8 @@ import (
 	"github.com/lidessen/keyref/proto/wire"
 
 	"github.com/lidessen/keyref/cli/internal/audit"
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/pair"
-	"github.com/lidessen/keyref/cli/internal/store"
 )
 
 // Warn receives one line per row skipped by the v2 F verification
@@ -47,7 +47,7 @@ type ownerChain struct {
 // loadOwnerChain builds the chain from local state. A saved directory
 // that does not parse contributes no keys and still counts as present,
 // so verification fails closed instead of falling back to the pin.
-func loadOwnerChain(st *store.Store) (*ownerChain, error) {
+func loadOwnerChain(st *cache.Store) (*ownerChain, error) {
 	pinned, err := OwnerSignPub(st)
 	if err != nil {
 		return nil, err
@@ -151,7 +151,7 @@ func (c *ownerChain) verifyDirectory(signed, sig []byte) error {
 // locally, so this check cannot be fully non-circular — it is the exact
 // limitation §F documents (a client that missed the directory version
 // that introduced the current signer must pair again).
-func VerifyStoredDirectory(st *store.Store, signed, sig []byte) error {
+func VerifyStoredDirectory(st *cache.Store, signed, sig []byte) error {
 	c, err := loadOwnerChain(st)
 	if err != nil {
 		return err

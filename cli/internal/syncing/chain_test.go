@@ -7,10 +7,10 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/pair"
-	"github.com/lidessen/keyref/cli/internal/store"
 	"github.com/lidessen/keyref/cli/internal/testowner"
 )
 
@@ -47,7 +47,7 @@ func ownerDirectory(t *testing.T, signer *testowner.Owner, rev uint64, cli *devi
 
 // storeDirectory seeds the saved-directory KV directly (the state a
 // completed pairing leaves behind).
-func storeDirectory(t *testing.T, st *store.Store, d wire.DirectoryData) {
+func storeDirectory(t *testing.T, st *cache.Store, d wire.DirectoryData) {
 	t.Helper()
 	if err := st.SetKV(pair.KVDirectorySigned, d.Signed); err != nil {
 		t.Fatal(err)

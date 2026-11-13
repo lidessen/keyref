@@ -12,10 +12,10 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/keyring"
-	"github.com/lidessen/keyref/cli/internal/store"
 )
 
 const tvDevice = "0123456789abcdef0123456789abcdef"
@@ -38,14 +38,14 @@ func newIdentity(t *testing.T) *device.Identity {
 	return id
 }
 
-func newStore(t *testing.T) *store.Store {
+func newStore(t *testing.T) *cache.Store {
 	t.Helper()
 	base, err := os.MkdirTemp("", "sess-store-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(base) })
-	st, err := store.Open(base)
+	st, err := cache.Open(base)
 	if err != nil {
 		t.Fatal(err)
 	}

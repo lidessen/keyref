@@ -15,10 +15,10 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/keyring"
-	"github.com/lidessen/keyref/cli/internal/store"
 	"github.com/lidessen/keyref/cli/internal/testowner"
 )
 
@@ -99,14 +99,14 @@ func newTestIdentity(t *testing.T) *device.Identity {
 	return id
 }
 
-func newTestStore(t *testing.T) *store.Store {
+func newTestStore(t *testing.T) *cache.Store {
 	t.Helper()
 	base, err := os.MkdirTemp("", "pair-store-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(base) })
-	st, err := store.Open(base)
+	st, err := cache.Open(base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func buildCompletion(t *testing.T, owner *testowner.Owner, id *device.Identity,
 	}
 }
 
-func runPairAsync(t *testing.T, st *store.Store, id *device.Identity, url string) (*pairCapture, chan error) {
+func runPairAsync(t *testing.T, st *cache.Store, id *device.Identity, url string) (*pairCapture, chan error) {
 	return runPairAsyncTimeout(t, st, id, url, 8*time.Second)
 }
 
@@ -287,7 +287,7 @@ func (p *pairCapture) payload(t *testing.T) url.Values {
 	return nil
 }
 
-func runPairAsyncTimeout(t *testing.T, st *store.Store, id *device.Identity, url string, timeout time.Duration) (*pairCapture, chan error) {
+func runPairAsyncTimeout(t *testing.T, st *cache.Store, id *device.Identity, url string, timeout time.Duration) (*pairCapture, chan error) {
 	t.Helper()
 	buf := &bytes.Buffer{}
 	done := make(chan error, 1)

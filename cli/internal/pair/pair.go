@@ -18,11 +18,11 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/qr"
 	"github.com/lidessen/keyref/cli/internal/session"
-	"github.com/lidessen/keyref/cli/internal/store"
 )
 
 // KV keys for the pinned owner key and directory state.
@@ -82,7 +82,7 @@ func Payload(origin string, hpkePub, signPub []byte, nonceHex, name string,
 // Run performs the pairing flow. On success the vault/device ids, the
 // pinned owner signing key, the directory and the initial grants are in
 // the local store.
-func Run(st *store.Store, cl *client.Client, id *device.Identity, opts Options) error {
+func Run(st *cache.Store, cl *client.Client, id *device.Identity, opts Options) error {
 	if opts.Stdout == nil {
 		opts.Stdout = io.Discard
 	}
@@ -171,7 +171,7 @@ func Run(st *store.Store, cl *client.Client, id *device.Identity, opts Options) 
 	}
 }
 
-func complete(st *store.Store, cl *client.Client, id *device.Identity, opts Options,
+func complete(st *cache.Store, cl *client.Client, id *device.Identity, opts Options,
 	nonceHex string, status *wire.PairStatusResponse, confirmSecret []byte) error {
 	if len(status.OwnerSignPublicKey) == 0 || len(status.PairingSignature) == 0 {
 		return errors.New("pair: incomplete pairing response")
@@ -273,7 +273,7 @@ func complete(st *store.Store, cl *client.Client, id *device.Identity, opts Opti
 
 // verifyAndStoreGrant checks the owner signature before caching
 // (design.md §9.1: clients verify before decrypting).
-func verifyAndStoreGrant(st *store.Store, vaultID string, ownerPub []byte, g *wire.GrantData) error {
+func verifyAndStoreGrant(st *cache.Store, vaultID string, ownerPub []byte, g *wire.GrantData) error {
 	if g.DeviceID == "" {
 		return nil // grant rows must address a device; ignore malformed
 	}

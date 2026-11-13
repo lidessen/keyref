@@ -22,10 +22,10 @@ import (
 	"github.com/lidessen/keyref/proto/wire"
 
 	"github.com/lidessen/keyref/cli/internal/audit"
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/pair"
 	"github.com/lidessen/keyref/cli/internal/session"
-	"github.com/lidessen/keyref/cli/internal/store"
 )
 
 // ErrRevoked reports that the directory marks this device revoked; the
@@ -44,7 +44,7 @@ type Result struct {
 
 // Run pulls changes until the cursor is current. It returns ErrRevoked
 // after performing local cleanup.
-func Run(st *store.Store, cl *client.Client, deviceID string) (Result, error) {
+func Run(st *cache.Store, cl *client.Client, deviceID string) (Result, error) {
 	var res Result
 	cursor := int64(0)
 	if raw, ok, _ := st.GetKV("cursor"); ok {
@@ -96,7 +96,7 @@ func Run(st *store.Store, cl *client.Client, deviceID string) (Result, error) {
 	return res, nil
 }
 
-func applyChange(st *store.Store, vaultID, deviceID string, chain *ownerChain, ch *wire.SyncChange) (applied, deleted int, err error) {
+func applyChange(st *cache.Store, vaultID, deviceID string, chain *ownerChain, ch *wire.SyncChange) (applied, deleted int, err error) {
 	switch ch.Entity {
 	case wire.EntityItem:
 		var it wire.ItemData
@@ -252,7 +252,7 @@ func applyChange(st *store.Store, vaultID, deviceID string, chain *ownerChain, c
 // cleanupRevoked drops local wraps and cached ciphertext
 // (design.md §8.2: after discovering revocation, delete local wraps
 // and the cache).
-func cleanupRevoked(st *store.Store) {
+func cleanupRevoked(st *cache.Store) {
 	_ = st.DeleteKV(session.KVToken)
 	_ = st.DeleteKV(session.KVExpiresAt)
 	grants, err := st.Grants()
@@ -271,7 +271,7 @@ func cleanupRevoked(st *store.Store) {
 // the reconciliation: the digest comparison below trusts the delivered
 // set, so accepting an unverified set would let a malicious server
 // suppress capabilities by forging one row.
-func reconcileGrants(st *store.Store, cl *client.Client, vaultID, deviceID string, chain *ownerChain) error {
+func reconcileGrants(st *cache.Store, cl *client.Client, vaultID, deviceID string, chain *ownerChain) error {
 	self, err := cl.GrantsSelf()
 	if err != nil {
 		// Offline-tolerated: reconciliation needs the network.
@@ -342,7 +342,7 @@ func equalBytes(a, b []byte) bool {
 }
 
 // OwnerSignPub reads the pinned owner signing key.
-func OwnerSignPub(st *store.Store) ([]byte, error) {
+func OwnerSignPub(st *cache.Store) ([]byte, error) {
 	v, ok, err := st.GetKV(pair.KVOwnerSignPub)
 	if err != nil {
 		return nil, err
@@ -355,7 +355,7 @@ func OwnerSignPub(st *store.Store) ([]byte, error) {
 
 func nowMillis() int64 { return time.Now().UnixMilli() }
 
-func vaultIDOf(st *store.Store) (string, error) {
+func vaultIDOf(st *cache.Store) (string, error) {
 	v, ok, err := st.GetKV(session.KVVaultID)
 	if err != nil {
 		return "", err

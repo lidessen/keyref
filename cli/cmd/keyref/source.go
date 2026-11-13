@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/exitcode"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
@@ -18,9 +19,7 @@ import (
 	"github.com/lidessen/keyref/cli/internal/secret"
 	"github.com/lidessen/keyref/cli/internal/session"
 	"github.com/lidessen/keyref/cli/internal/source"
-	cachestore "github.com/lidessen/keyref/cli/internal/store"
 	"github.com/lidessen/keyref/cli/local"
-	"github.com/lidessen/keyref/cli/store"
 )
 
 const maxLocalSecretBytes = 1 << 20
@@ -54,7 +53,7 @@ func resolveSource(override string) (source.Spec, error) {
 		// of counting as "not paired" — that would write `local` as the
 		// permanent default on a transient error (review 2026-11).
 		if _, statErr := os.Stat(p.CacheFile); statErr == nil {
-			st, err := cachestore.Open(p.Dir)
+			st, err := cache.Open(p.Dir)
 			if err != nil {
 				return source.Spec{}, fmt.Errorf("could not open the sync cache %s: %w", p.CacheFile, err)
 			}
@@ -111,7 +110,7 @@ func localOpenError(err error) int {
 
 // openLocal opens a local source's vault. The master key is wiped as
 // soon as the backend has derived its own keys from it.
-func openLocal(spec source.Spec) (store.Store, error) {
+func openLocal(spec source.Spec) (*local.Store, error) {
 	if _, err := os.Stat(spec.Path); errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("local source %q has no vault yet; run `keyref init --source %s`", spec.Name, spec.Name)
 	}

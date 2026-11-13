@@ -13,12 +13,12 @@ import (
 
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/pair"
 	"github.com/lidessen/keyref/cli/internal/session"
-	"github.com/lidessen/keyref/cli/internal/store"
 	"github.com/lidessen/keyref/cli/internal/testowner"
 )
 
@@ -50,14 +50,14 @@ func newIdentity(t *testing.T) *device.Identity {
 	return id
 }
 
-func newStore(t *testing.T, owner *testowner.Owner) *store.Store {
+func newStore(t *testing.T, owner *testowner.Owner) *cache.Store {
 	t.Helper()
 	base, err := os.MkdirTemp("", "sync-store-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(base) })
-	st, err := store.Open(base)
+	st, err := cache.Open(base)
 	if err != nil {
 		t.Fatal(err)
 	}

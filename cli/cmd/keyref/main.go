@@ -19,6 +19,7 @@ import (
 
 	"github.com/lidessen/keyref/cli/internal/approval"
 	"github.com/lidessen/keyref/cli/internal/audit"
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/config"
 	"github.com/lidessen/keyref/cli/internal/decider"
@@ -31,7 +32,6 @@ import (
 	"github.com/lidessen/keyref/cli/internal/secret"
 	"github.com/lidessen/keyref/cli/internal/session"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/internal/store"
 	"github.com/lidessen/keyref/cli/internal/syncing"
 )
 
@@ -205,9 +205,9 @@ func mustPaths() config.Paths {
 	return p
 }
 
-func mustStore() *store.Store {
+func mustStore() *cache.Store {
 	p := mustPaths()
-	st, err := store.Open(p.Dir)
+	st, err := cache.Open(p.Dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "keyref:", err)
 		panic(fatalExit{1})
@@ -226,14 +226,14 @@ func mustIdentity() *device.Identity {
 }
 
 // newClient builds the API client with a lazily refreshing token.
-func newClient(st *store.Store, id *device.Identity) *client.Client {
+func newClient(st *cache.Store, id *device.Identity) *client.Client {
 	cl := client.New(config.Origin(mustPaths()), nil)
 	mgr := session.New(st, cl, id)
 	cl.SetTokenSource(mgr.TokenSource())
 	return cl
 }
 
-func locked(st *store.Store) bool {
+func locked(st *cache.Store) bool {
 	v, ok, err := st.GetKV(session.KVLocked)
 	if err != nil {
 		// Fail closed: an unreadable lock state must not open every
@@ -878,7 +878,7 @@ func approvalResultOf(policyState string, approvalUsed bool) string {
 // secret ciphertext (protocol §6.21). Key and value are destroyed after
 // the single exec — neither reaches the keyring or the cache
 // (design.md §15).
-func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
+func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
 	auditRecips []audit.OwnerRecipient, dirDevices []audit.DeviceRecord,
 	refreshDevices func() ([]audit.DeviceRecord, error),
 	opts execOptions, rr *exec.ResolvedRef, itemID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
@@ -1098,7 +1098,7 @@ func decryptExecValue(stderr io.Writer, key *secret.Key, blob []byte, vaultID, i
 // approval round even for a sensitivity = standard item. Presence and
 // expiry decide the route; a grant that fails to unwrap stays an unwrap
 // error (exit 16), never a silent fallback.
-func hasUsableUseGrant(st *store.Store, itemID string) (bool, error) {
+func hasUsableUseGrant(st *cache.Store, itemID string) (bool, error) {
 	grants, err := st.Grants()
 	if err != nil {
 		return false, err
@@ -1120,7 +1120,7 @@ func hasUsableUseGrant(st *store.Store, itemID string) (bool, error) {
 // its live use grant. It runs only when the item is not an approval item
 // and a usable grant exists (v2 I). Exit codes follow §7.6: 16 unwrap
 // failure.
-func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, rr *exec.ResolvedRef, itemID string, login bool) (*secret.Plaintext, int, string) {
+func resolveValueFor(st *cache.Store, id *device.Identity, vaultID string, ownerPub []byte, rr *exec.ResolvedRef, itemID string, login bool) (*secret.Plaintext, int, string) {
 	ref := rr.Ref
 	grants, err := st.Grants()
 	if err != nil {
@@ -1159,7 +1159,7 @@ func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, owner
 // metaByRef finds the cached item whose decrypted meta carries ref. One
 // undecryptable item must not hide every other ref (review 2026-11): its
 // error is remembered and only surfaces when no item matches.
-func metaByRef(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, ref string) (string, *itemcrypt.Meta, error) {
+func metaByRef(st *cache.Store, id *device.Identity, vaultID string, ownerPub []byte, ref string) (string, *itemcrypt.Meta, error) {
 	ids, err := st.ItemIDs()
 	if err != nil {
 		return "", nil, err
@@ -1189,7 +1189,7 @@ func metaByRef(st *store.Store, id *device.Identity, vaultID string, ownerPub []
 // decryptMetaFor decrypts one item's meta (guarded key, wiped after). A
 // failed grant is tried-no-more but does not stop the item: another view
 // grant may still unwrap.
-func decryptMetaFor(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, itemID string) (*itemcrypt.Meta, error) {
+func decryptMetaFor(st *cache.Store, id *device.Identity, vaultID string, ownerPub []byte, itemID string) (*itemcrypt.Meta, error) {
 	grants, err := st.Grants()
 	if err != nil {
 		return nil, err

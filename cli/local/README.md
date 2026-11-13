@@ -41,10 +41,9 @@ between checks. If initialization fails after creating the file, the incomplete
 file is left for inspection; the library will not silently overwrite it.
 
 The package is in the Go `cli` module, which pins its `proto` dependency.
-Applications normally use `github.com/lidessen/keyref/cli/store`: its registry
-defaults to this local provider and allows other providers to be registered.
-Only local is built in; explicitly selected unavailable providers fail without
-falling back. `cli/local` remains the local backend implementation.
+Applications use `github.com/lidessen/keyref/cli/local` directly (`Open` /
+`Create`); `cli/internal/localvault` resolves the master key from the OS
+keyring or `KEYREF_LOCAL_MASTER`. No other backend ships today.
 
 The Keyref repository is private. Consumers need authorized Git access and should
 set `GOPRIVATE=github.com/lidessen/keyref` when resolving its modules.

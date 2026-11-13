@@ -141,7 +141,7 @@ cli/internal/pair/          // 二维码生成、pair/register、pair/status 轮
 cli/internal/qr/            // skip2/go-qrcode 封装；ToSmallString 的 ▀▄█ 半块字符写 stdout
 cli/internal/secret/        // memguard 守护缓冲区、秘密 JSON 无字符串解析
 cli/internal/session/       // 挑战→令牌、token 复用与续期
-cli/internal/store/         // cache.sqlite（模式 0600，密文缓存 + 已验签 revision）
+cli/internal/cache/         // cache.sqlite（模式 0600，密文缓存 + 已验签 revision）
 cli/internal/syncing/       // 把服务器变更应用到本地缓存（cursor=0 引导、撤销检测）
 cli/internal/testowner/     // 测试与 e2e 用的软件 P-256 owner（§11.2）
 cli/e2e/doc.go              // package e2e；无 build 标签，只有包注释（防 ./... 报 exclude all Go files）

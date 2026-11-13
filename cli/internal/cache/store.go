@@ -1,4 +1,4 @@
-// Package store persists the CLI's local cache: server ciphertext,
+// Package cache persists the CLI's local cache: server ciphertext,
 // revisions, verified signatures and the sync cursor
 // (design.md §6.5). The cache holds only end-to-end ciphertext — never
 // plaintext, never unwrapped keys (design §15) — so it gets no second
@@ -10,7 +10,7 @@
 // delivers those to CLI devices (docs/protocol.md §8.3), and the CLI
 // cannot rebuild item transcripts anyway — its integrity guarantees are
 // the owner-signed grants, the AEAD tags and revision monotonicity.
-package store
+package cache
 
 import (
 	"database/sql"

@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/store"
 )
 
 // ErrUnknownRef maps to exit code 11 (design.md §7.6).
@@ -37,7 +37,7 @@ type Entry struct {
 // Items returns the decrypted meta of every cached, non-tombstoned
 // item that has a view grant. Unwrapping failures are reported as
 // errors (fail closed, design.md §4.4).
-func Items(st *store.Store, id *device.Identity) ([]Entry, error) {
+func Items(st *cache.Store, id *device.Identity) ([]Entry, error) {
 	grants, err := st.Grants()
 	if err != nil {
 		return nil, err
@@ -84,7 +84,7 @@ func Items(st *store.Store, id *device.Identity) ([]Entry, error) {
 }
 
 // Lookup returns the entry for one ref.
-func Lookup(st *store.Store, id *device.Identity, ref string) (*Entry, error) {
+func Lookup(st *cache.Store, id *device.Identity, ref string) (*Entry, error) {
 	entries, err := Items(st, id)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ func Lookup(st *store.Store, id *device.Identity, ref string) (*Entry, error) {
 	return nil, ErrUnknownRef
 }
 
-func decryptMeta(st *store.Store, id *device.Identity, itemID string) (*itemcrypt.Meta, error) {
+func decryptMeta(st *cache.Store, id *device.Identity, itemID string) (*itemcrypt.Meta, error) {
 	grants, err := st.Grants()
 	if err != nil {
 		return nil, err
@@ -137,7 +137,7 @@ func decryptMeta(st *store.Store, id *device.Identity, itemID string) (*itemcryp
 	return nil, ErrNoViewGrant
 }
 
-func vaultIDOf(st *store.Store) (string, error) {
+func vaultIDOf(st *cache.Store) (string, error) {
 	v, ok, err := st.GetKV("vault_id")
 	if err != nil || !ok || len(v) == 0 {
 		return "", errors.New("meta: not paired")
@@ -145,7 +145,7 @@ func vaultIDOf(st *store.Store) (string, error) {
 	return string(v), nil
 }
 
-func OwnerSignPub(st *store.Store) ([]byte, error) {
+func OwnerSignPub(st *cache.Store) ([]byte, error) {
 	v, ok, err := st.GetKV("owner_sign_public_key")
 	if err != nil {
 		return nil, err
