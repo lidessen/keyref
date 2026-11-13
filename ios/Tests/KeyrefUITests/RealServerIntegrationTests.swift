@@ -204,7 +204,10 @@ final class RealServerIntegrationTests: XCTestCase {
         try await backend.uploadCreatedVault(await backend.prepareCreation(label: "integration-iphone"))
         let localDraft = ItemDraft(ref: "totp-seed", name: "TOTP seed",
                                    itemDescription: "", type: "note",
-                                   value: "totp-seed-1234567890", policy: ItemPolicy(),
+                                   value: "totp-seed-1234567890",
+                                   // v2 H: an empty allowCommands list allows
+                                   // nothing on the paired vault.
+                                   policy: ItemPolicy(allowCommands: ["awk"]),
                                    injectable: true, storageClass: .localOnly)
         do {
             try await backend.createItem(localDraft)
@@ -317,7 +320,12 @@ final class RealServerIntegrationTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(250))
         }
         guard approved else {
-            XCTFail("no approval request reached the iOS inbox\nserver log:\n\(Self.logTail(handle))")
+            // The CLI is still waiting for an approval that never arrived;
+            // its output says why (policy refusal, submit error, …).
+            if exec.isRunning { exec.terminate() }
+            try? await Self.waitForExit(exec, timeout: 10)
+            let cliOutput = Self.drain(execOut)
+            XCTFail("no approval request reached the iOS inbox\nCLI output:\n\(cliOutput)\nserver log:\n\(Self.logTail(handle))")
             return
         }
         do {
