@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/lidessen/keyref/cli/internal/cache"
@@ -19,6 +19,7 @@ import (
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/localvault"
+	"github.com/lidessen/keyref/cli/internal/meta"
 	"github.com/lidessen/keyref/cli/internal/secret"
 	"github.com/lidessen/keyref/cli/internal/session"
 	"github.com/lidessen/keyref/cli/internal/source"
@@ -27,6 +28,19 @@ import (
 )
 
 const maxLocalSecretBytes = 1 << 20
+
+// stringList collects a repeatable flag value.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	if v == "" {
+		return errors.New("must not be empty")
+	}
+	*l = append(*l, v)
+	return nil
+}
 
 // secretStore is the OS keyring, or the directory implementation the
 // tests and e2e runs point at. The MCP layer uses secretStoreOrError:
@@ -261,13 +275,17 @@ func cmdSet(args []string) int {
 	fs := flag.NewFlagSet("set", flag.ContinueOnError)
 	sourceName := fs.String("source", "", "source to operate on")
 	raw := fs.Bool("raw", false, "store piped stdin byte for byte (default: strip one trailing newline)")
+	description := fs.String("description", "", "description stored in the entry meta")
+	var allowCommands, allowHosts stringList
+	fs.Var(&allowCommands, "allow-command", "allow this command name for this entry (repeatable)")
+	fs.Var(&allowHosts, "allow-host", "allow URL hosts in argv (repeatable)")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseExit(err)
 	}
 	if len(rest) != 1 {
-		return fatalf(2, "usage: keyref set <ref> [--raw] [--source NAME]  (the secret is read from stdin)")
+		return fatalf(2, "usage: keyref set <ref> [--raw] [--description TEXT] [--allow-command NAME] [--allow-host HOST] [--source NAME]  (the secret is read from stdin)")
 	}
 	ref := rest[0]
 	if !local.ValidRef(ref) {
@@ -291,7 +309,11 @@ func cmdSet(args []string) int {
 		return fatalf(1, "%v", err)
 	}
 	defer secret.Wipe(value)
-	created, err := vault.Put(context.Background(), ref, value)
+	created, err := vault.Put(context.Background(), ref, value, local.PutOptions{
+		Description:   *description,
+		AllowCommands: allowCommands,
+		AllowedHosts:  allowHosts,
+	})
 	if err != nil {
 		return fatalf(1, "could not store %q: %v", ref, err)
 	}
@@ -340,8 +362,8 @@ func cmdDelete(args []string) int {
 	return 0
 }
 
-// runLocalGet shows one local entry. Without --reveal it prints a mask
-// computed locally, never the value; --reveal writes the raw secret
+// runLocalGet shows one local entry from its encrypted meta. Without
+// --reveal it never decrypts the secret; --reveal writes the raw secret
 // bytes to stdout and nothing else.
 func runLocalGet(p config.Paths, spec source.Spec, ref, format string, reveal bool) int {
 	if reveal && format == "json" {
@@ -368,47 +390,48 @@ func runLocalGet(p config.Paths, spec source.Spec, ref, format string, reveal bo
 		}
 		return 0
 	}
-	var masked string
-	var size int
-	err = vault.Use(context.Background(), ref, func(value []byte) error {
-		size = len(value)
-		masked = maskSecret(value)
-		return nil
-	})
+	m, err := vault.Stat(context.Background(), ref)
 	if errors.Is(err, local.ErrNotFound) {
 		return fatalf(exitcode.UnknownRef, "unknown ref %q", ref)
 	}
 	if err != nil {
 		return fatalf(1, "could not read %q: %v", ref, err)
 	}
-	if format == "json" {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(map[string]any{
-			"ref": ref, "source": spec.Name, "masked": masked, "bytes": size,
-		}); err != nil {
-			return fatalf(1, "%v", err)
-		}
-		return 0
-	}
-	fmt.Printf("ref: %s\nsource: %s\nmasked: %s\nbytes: %d\n", ref, spec.Name, masked, size)
-	return 0
+	e := localEntry(*m)
+	return printEntry(&e, format)
 }
 
-// maskSecret keeps the shape of the synced mask — a hint of the head and
-// the last four characters — and refuses to hint at binary, whitespace-
-// containing or short values at all. It runs on plaintext the caller
-// already holds; nothing here reaches the value itself.
-func maskSecret(value []byte) string {
-	for _, b := range value {
-		if b < 0x21 || b > 0x7e {
-			return "***"
-		}
+// localEntry renders a local row in the same shape as a synced entry,
+// so an agent only has to understand one list/get format (design §17.4).
+func localEntry(m local.Meta) meta.Entry {
+	return meta.Entry{
+		Ref:         m.Ref,
+		Name:        m.Ref,
+		Description: m.Description,
+		Type:        "local",
+		Masked:      m.Masked,
+		Sensitivity: "standard",
+		Injectable:  true,
 	}
-	if len(value) < 16 {
-		return "***"
+}
+
+// runLocalList prints every local entry's meta. The secret column is
+// never read: list decrypts the meta blob only.
+func runLocalList(p config.Paths, spec source.Spec, format string) int {
+	vault, err := openLocal(p, spec)
+	if err != nil {
+		return localOpenError(err)
 	}
-	return string(value[:3]) + "****" + string(value[len(value)-4:])
+	defer vault.Close()
+	metas, err := vault.List(context.Background())
+	if err != nil {
+		return fatalf(1, "could not list source %q: %v", spec.Name, err)
+	}
+	entries := make([]meta.Entry, len(metas))
+	for i, m := range metas {
+		entries[i] = localEntry(m)
+	}
+	return printEntries(entries, format)
 }
 
 // readLocalSecret reads one secret from stdin. On a terminal it reads one
@@ -494,16 +517,20 @@ func checkSecretSize(value []byte) ([]byte, error) {
 
 // ---- exec on a local source ----
 
-// localMeta is the policy a local entry gets. A local vault has no
-// per-item policy record, so the deny-shells command policy applies and
-// argv injection stays off: there is no item policy that could consent
-// to putting a secret in process arguments.
-func localMeta(ref string) *itemcrypt.Meta {
+// localItemMeta maps a local row onto the exec meta the shared engine
+// consumes. A row that names its own allowCommands gets exactly that
+// whitelist; without one the built-in deny list applies. argv injection
+// stays off: nothing in a local vault records consent to putting a
+// secret in process arguments.
+func localItemMeta(m *local.Meta) *itemcrypt.Meta {
 	return &itemcrypt.Meta{
-		V: 1, Ref: ref, Name: ref, Type: "local", Injectable: true,
+		V: 1, Ref: m.Ref, Name: m.Ref, Description: m.Description,
+		Type: "local", Masked: m.Masked, Injectable: true,
 		Policy: itemcrypt.MetaPolicy{
 			Sensitivity:   "standard",
 			CommandPolicy: "deny-shells",
+			AllowCommands: m.Policy.AllowCommands,
+			AllowedHosts:  m.Policy.AllowedHosts,
 		},
 	}
 }
@@ -531,7 +558,18 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 		ParentEnv: os.Environ(), Stdout: opts.Stdout, Stderr: opts.Stderr,
 	}
 	for _, ref := range exec.CollectRefs(req) {
-		req.Refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: localMeta(ref)}
+		m, err := vault.Stat(context.Background(), ref)
+		switch {
+		case err == nil:
+			req.Refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: localItemMeta(m)}
+		case errors.Is(err, local.ErrNotFound):
+			// An unknown ref still needs a meta for the policy pass;
+			// it resolves to exit 11 before any value is read.
+			req.Refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: localItemMeta(&local.Meta{Ref: ref})}
+		default:
+			fmt.Fprintf(opts.Stderr, "keyref: could not read %q: %v\n", ref, err)
+			return 1
+		}
 	}
 	req.ResolveValue = func(ref string) (*secret.Plaintext, int, string) {
 		var out *secret.Plaintext

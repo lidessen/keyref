@@ -14,9 +14,9 @@ Commands (design §12.2 and §17, implemented):
 | --- | --- |
 | `keyref init` | Create the local vault; the master key goes to the OS keyring |
 | `keyref set <ref>` | Store a secret read from stdin (`--raw` keeps every byte); local sources |
-| `keyref get <ref>` | One entry: names, descriptions, `ref`, masks. `--reveal` prints the raw bytes (local sources only) |
+| `keyref get <ref>` | One entry from encrypted meta: names, descriptions, `ref`, masks. `--reveal` prints the raw bytes (local sources only) |
 | `keyref delete <ref>` | Delete an entry (local sources) |
-| `keyref list` | Names, descriptions, `ref`, masks (paired vault) |
+| `keyref list` | Names, descriptions, `ref`, masks from encrypted meta (local and paired vaults) |
 | `keyref exec -- ...` | Inject secrets into a child process, redact stdout/stderr; supports `--env`, `--stdin`, `--stdin-login`, `--fd`, `--pty`/`--reply` |
 | `keyref source list\|default\|add\|remove` | Show or configure the sources |
 | `keyref pair` | Generate a device key, show a QR code in the terminal, pair with the iOS vault |
@@ -48,7 +48,8 @@ Every data command takes `--source NAME`. `KEYREF_SOURCE` does the same, and `ke
 ```sh
 keyref init                                   # create the local vault
 keyref set my-ref < /path/to/secret-input     # store a secret, read from stdin
-keyref get my-ref                             # ref, source, mask, size
+keyref set my-ref --allow-command curl --description "docs proxy" < key
+keyref get my-ref                             # ref, name, description, type, mask
 keyref get my-ref --reveal                    # the raw bytes, nothing else
 keyref delete my-ref
 keyref exec --env TOKEN=my-ref -- /absolute/path/to/consumer
@@ -56,11 +57,11 @@ keyref exec --env TOKEN=my-ref -- /absolute/path/to/consumer
 
 The master key is 32 random bytes. `keyref init` generates one and stores it in the OS keyring (macOS Keychain, Linux Secret Service); `KEYREF_LOCAL_MASTER` overrides it for headless use, carrying the same key as the standard base64 encoding of 32 bytes. An environment-provided key is used as-is and never copied into the keyring. Losing the key means losing the vault — keyref cannot recover or regenerate it.
 
-`set` reads 1 byte to 1 MiB from stdin. By default exactly one trailing newline (`\n` or `\r\n`) is stripped, so `echo "$TOKEN" | keyref set tok` stores the token itself; `--raw` keeps every byte. When stdin is a terminal the value is read as one line without echo. The value never appears in the command arguments or in any output, and the result says `created "tok"` or `replaced "tok"`. A value shorter than 8 bytes gets a warning on stderr because redaction is less reliable for short values. A ref follows design §6.1 — one lowercase letter, or 2–64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit — and `set` refuses anything else. `get` prints a mask computed from the value (the head and the last four characters, and nothing at all for short, binary or whitespace-containing values). `--reveal` is the one deliberate plaintext path: it writes the raw secret bytes to stdout and nothing else, it exists for local sources only, and the paired vault rejects it.
+`set` reads 1 byte to 1 MiB from stdin. By default exactly one trailing newline (`\n` or `\r\n`) is stripped, so `echo "$TOKEN" | keyref set tok` stores the token itself; `--raw` keeps every byte. When stdin is a terminal the value is read as one line without echo. The value never appears in the command arguments or in any output, and the result says `created "tok"` or `replaced "tok"`. A value shorter than 8 bytes gets a warning on stderr because redaction is less reliable for short values. A ref follows design §6.1 — one lowercase letter, or 2–64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit — and `set` refuses anything else. `--description`, repeatable `--allow-command` and repeatable `--allow-host` write the entry meta; a replacement rewrites the whole meta, so a caller that does not know the value cannot keep or widen the old policy. `get` prints the mask sealed at write time (a known §6.1 prefix plus the last four characters when the value is long enough, otherwise `***`). `--reveal` is the one deliberate plaintext path: it writes the raw secret bytes to stdout and nothing else, it exists for local sources only, and the paired vault rejects it.
 
-A local vault stores its refs one-way — the row id is an HMAC of the ref — so `keyref list` cannot enumerate them and a ref cannot be recovered from the file. You need the ref to get the entry.
+A local vault stores each row id as an HMAC of the ref, but the ref itself, mask, size, description and policy live in a separately encrypted meta blob; `list` and `get` decrypt only that meta, never the secret. Without the master key the file reveals neither refs nor values. Vaults created before encrypted meta keep working: a row whose ref has not been seen yet is omitted from `list` until `get <ref>` or `exec` supplies it and a degraded meta is written.
 
-`exec` on a local source is the same code path as on the paired one: the injection shapes, the redactor and the pre-spawn checks are identical (design §7.3, §7.4). Command policy differs: a local source keeps the built-in deny list (a slip guard, not a boundary), while a paired-vault item must name its commands in `allowCommands` — an empty list allows nothing unless the owner set `commandPolicy = allow-all` on iOS (protocol v2 H). There is no grant, no approval round and no remote audit on a local source, and `list` is the paired vault's command only.
+`exec` on a local source is the same code path as on the paired one: the injection shapes, the redactor and the pre-spawn checks are identical (design §7.3, §7.4). Command policy differs: a local row with an empty `allowCommands` keeps the built-in deny list (a slip guard, not a boundary); a non-empty list written by `keyref set --allow-command` is an exact whitelist; `allowedHosts` checks URL hosts in argv. A paired-vault item must name its commands in `allowCommands` — an empty list allows nothing unless the owner set `commandPolicy = allow-all` on iOS (protocol v2 H). There is no grant, no approval round and no remote audit on a local source.
 
 ### Synced login items
 
@@ -76,7 +77,7 @@ The CLI must be paired and unlocked, the item must be injectable, and the item's
 
 ### Go library: the local store
 
-`github.com/lidessen/keyref/cli/local` provides the standalone store (`Create`, `Open`, `Put`, `Use`, `Delete`, `Close`). `Use` provides the plaintext only inside the callback; callers should avoid retaining or logging it, and in-memory clearing is not isolation from a same-user process:
+`github.com/lidessen/keyref/cli/local` provides the standalone store (`Create`, `Open`, `Put`, `Use`, `Stat`, `List`, `Delete`, `Close`, plus `ValidRef` and `Mask`). `Put` takes `PutOptions` (description, allowCommands, allowedHosts) and reports whether it created the row; `Stat` and `List` decrypt only the encrypted meta. `Use` provides the plaintext only inside the callback; callers should avoid retaining or logging it, and in-memory clearing is not isolation from a same-user process:
 
 ```go
 vault, err := local.Open(path, masterKey) // local.Create makes a new vault

@@ -197,15 +197,50 @@ func TestLocalSourceLifecycle(t *testing.T) {
 	}
 }
 
-// A local vault keeps its refs one-way, so there is nothing to list.
-func TestLocalSourceCannotBeListed(t *testing.T) {
+// Local list is served from the encrypted meta; the secret ciphertext is
+// never decrypted (design §17.4).
+func TestLocalSourceListShowsMetaWithoutSecret(t *testing.T) {
 	_, _, env := localHome(t)
-	list := localRun(t, env, "", "list")
-	if list.code != 2 {
-		t.Fatalf("list on a local source exit %d, want 2", list.code)
+	if r := localRun(t, env, "", "init"); r.code != 0 {
+		t.Fatalf("init exit %d: %s", r.code, r.stderr)
 	}
-	if !strings.Contains(list.stderr, "one-way") {
-		t.Fatalf("list did not explain itself: %q", list.stderr)
+	if r := localRun(t, env, localSecret, "set", "my-ref", "--description", "local entry"); r.code != 0 {
+		t.Fatalf("set exit %d: %s", r.code, r.stderr)
+	}
+
+	list := localRun(t, env, "", "list")
+	if list.code != 0 {
+		t.Fatalf("list on a local source exit %d: %s", list.code, list.stderr)
+	}
+	if !strings.Contains(list.stdout, "my-ref") || !strings.Contains(list.stdout, "local") ||
+		!strings.Contains(list.stdout, "MASKED") {
+		t.Fatalf("local list output:\n%s", list.stdout)
+	}
+	assertNoLocalLeak(t, "local list", list.stdout, list.stderr)
+
+	jsonList := localRun(t, env, "", "list", "--format", "json")
+	if jsonList.code != 0 {
+		t.Fatalf("list --format json exit %d: %s", jsonList.code, jsonList.stderr)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(jsonList.stdout), &entries); err != nil {
+		t.Fatalf("list json: %v\n%s", err, jsonList.stdout)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("list json entries = %v", entries)
+	}
+	e := entries[0]
+	if e["ref"] != "my-ref" || e["name"] != "my-ref" || e["description"] != "local entry" ||
+		e["type"] != "local" || e["sensitivity"] != "standard" || e["injectable"] != true {
+		t.Fatalf("local list entry = %v", e)
+	}
+	assertNoLocalLeak(t, "local list json", jsonList.stdout, jsonList.stderr)
+
+	// A local source without a vault explains how to create one.
+	_, _, emptyEnv := localHome(t)
+	missing := localRun(t, emptyEnv, "", "list")
+	if missing.code == 0 || !strings.Contains(missing.stderr, "keyref init") {
+		t.Fatalf("list without a vault: exit %d, %q", missing.code, missing.stderr)
 	}
 }
 
@@ -247,6 +282,56 @@ func TestLocalSourceKeepsTheExecPolicy(t *testing.T) {
 		helperBin, "{{keyref:my-ref}}")
 	if argv.code != 10 {
 		t.Fatalf("exec with an argv placeholder exit %d, want 10", argv.code)
+	}
+}
+
+// A local row can name its commands: a non-empty list is an exact
+// whitelist, and it replaces the built-in deny list (design §17.4).
+func TestLocalAllowCommandsIsAnExactWhitelist(t *testing.T) {
+	_, _, env := localHome(t)
+	if r := localRun(t, env, "", "init"); r.code != 0 {
+		t.Fatalf("init exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env, localSecret, "set", "my-ref", "--allow-command", "cat"); r.code != 0 {
+		t.Fatalf("set exit %d: %s", r.code, r.stderr)
+	}
+
+	// cat is on the built-in deny list, but the row names it explicitly.
+	allowed := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", "/bin/cat", "/dev/null")
+	if allowed.code != 0 {
+		t.Fatalf("explicitly allowed cat exit %d: %s", allowed.code, allowed.stderr)
+	}
+	// The whitelist admits nothing else, even a command the deny list
+	// would allow.
+	tightened := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", helperBin, "print-env")
+	if tightened.code != 10 {
+		t.Fatalf("non-listed command exit %d, want 10: %s", tightened.code, tightened.stderr)
+	}
+	assertNoLocalLeak(t, "local allowCommands", tightened.stdout, tightened.stderr)
+}
+
+func TestLocalAllowedHostsChecksArgv(t *testing.T) {
+	_, _, env := localHome(t)
+	if r := localRun(t, env, "", "init"); r.code != 0 {
+		t.Fatalf("init exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env, localSecret, "set", "my-ref", "--allow-host", "api.openai.com"); r.code != 0 {
+		t.Fatalf("set exit %d: %s", r.code, r.stderr)
+	}
+	allowed := localRun(t, env, "", "exec", "--env", "K=my-ref", "--",
+		helperBin, "https://api.openai.com/v1")
+	if allowed.code != 0 {
+		t.Fatalf("allowed host exit %d: %s", allowed.code, allowed.stderr)
+	}
+	for _, bad := range []string{
+		"https://api.openai.com.evil.example/v1",
+		"https://evil.example/v1",
+	} {
+		r := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", helperBin, bad)
+		if r.code != 10 || !strings.Contains(r.stderr, "allowedHosts") {
+			t.Fatalf("%s: exit %d, %q", bad, r.code, r.stderr)
+		}
+		assertNoLocalLeak(t, "local allowedHosts", r.stdout, r.stderr)
 	}
 }
 

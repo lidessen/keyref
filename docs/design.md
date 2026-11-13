@@ -1562,7 +1562,7 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | 本地 source 遵守 `keyref lock` | 已实现（标志是数据目录里的 `locked` 文件，本地 source 不依赖 sync 的任何文件） |
 | 密钥环条目绑定 `store id`、`init` 不覆盖 | 已实现（issue #2） |
 | `sources.json` 原子替换 | 已实现（issue #6；`server.conf` 一并改为原子替换） |
-| 行的加密 meta；local 的 `list`；`get` 不解密 secret；本地 `allowCommands` / `allowedHosts` | 未实现 |
+| 行的加密 meta；local 的 `list`；`get` 不解密 secret；本地 `allowCommands` / `allowedHosts` | 已实现（2026-11-14） |
 | `set` 默认去末尾换行、`--raw`、终端不回显、新建/替换、短值警告、ref 语法 | 已实现（2026-11-13） |
 | §7.4 对去掉首尾空白的值建立匹配；只扣留可能成为匹配前缀的尾部 | 已实现（2026-11-13） |
 | `get --reveal` 的控制终端确认 | 未实现（现状没有任何确认） |
@@ -1570,4 +1570,4 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | 库独立 module、导出执行引擎、引擎自有策略类型、错误分类 | 未实现（注册表已删除；`GOWORK=off` 构建已修复并进 CI，issue #5） |
 | `status` 按 source 报告、只读命令不建文件、帮助退出 `0`、`--version` | 已实现（issue #7） |
 
-建议顺序：先做行的加密 meta，它同时解锁 `list`、不解密的 `get`、本地 `allowCommands` 和 MCP 的 local 模式；最后做库的 module 拆分与引擎导出。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。
+建议顺序：先交付 Neowind 的最小凭证注入路径（`exec --env` 与 `import-env`），再做 `get --reveal` 的控制终端确认、`keyref mcp --source` 与项目级 allowlist；最后做库的 module 拆分与引擎导出。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。

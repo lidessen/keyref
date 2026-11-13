@@ -3,6 +3,7 @@
 package local
 
 import (
+	"bytes"
 	"context"
 	"crypto/hkdf"
 	"crypto/hmac"
@@ -10,14 +11,18 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	keycrypto "github.com/lidessen/keyref/proto/crypto"
 	_ "modernc.org/sqlite"
@@ -28,11 +33,76 @@ var (
 	ErrInvalidKey   = errors.New("invalid local vault key")
 	ErrInvalidStore = errors.New("invalid local vault")
 	ErrInvalidRef   = errors.New("invalid ref")
+	ErrMetaTooLarge = errors.New("local entry meta is too large")
 	ErrClosed       = errors.New("local vault closed")
 )
 
 const maxValue = 1 << 20
+const maxMeta = 64 << 10
 const checkText = "keyref-local-v1"
+
+// Policy is the per-entry execution policy stored in the encrypted
+// meta (design.md §17.4). An empty AllowCommands keeps the built-in
+// deny list for a local source; a non-empty list is an exact whitelist.
+type Policy struct {
+	AllowCommands []string `json:"allowCommands"`
+	AllowedHosts  []string `json:"allowedHosts"`
+}
+
+// Meta is one entry's metadata plaintext before encryption. Masked and
+// Bytes are computed from the value at write time, so List and Stat
+// never need to decrypt the secret (design.md §17.4).
+type Meta struct {
+	V           int    `json:"v"`
+	Ref         string `json:"ref"`
+	Description string `json:"description"`
+	Masked      string `json:"masked"`
+	Bytes       int    `json:"bytes"`
+	UpdatedAt   int64  `json:"updated_at"`
+	Policy      Policy `json:"policy"`
+}
+
+// PutOptions carries the caller-supplied part of the meta. Every Put
+// writes a complete meta: a replacement without these options resets
+// the description and policy, because a caller that does not know the
+// value must not be able to widen its policy (design.md §17.4).
+type PutOptions struct {
+	Description   string
+	AllowCommands []string
+	AllowedHosts  []string
+}
+
+// maskPrefixes is the §6.1 longest-prefix table used for non-password
+// values. A local entry has no type, so the generic branch applies.
+var maskPrefixes = []string{
+	"github_pat_", "sk-proj-", "sk-ant-", "glpat-", "xoxb-", "xoxp-", "xoxa-",
+	"ghp_", "gho_", "sk-", "AKIA",
+}
+
+// Mask derives the display mask at write time (design.md §6.1). Values
+// that are not printable ASCII are masked completely: the suffix of an
+// arbitrary byte string is not safe to show and may not render.
+func Mask(value []byte) string {
+	if len(value) == 0 {
+		return "***"
+	}
+	for _, b := range value {
+		if b < 0x21 || b > 0x7e {
+			return "***"
+		}
+	}
+	s := value
+	prefix := ""
+	for _, p := range maskPrefixes {
+		if bytes.HasPrefix(s, []byte(p)) && len(p) > len(prefix) {
+			prefix = p
+		}
+	}
+	if len(s) < len(prefix)+8 {
+		return "***"
+	}
+	return prefix + "****" + string(s[len(s)-4:])
+}
 
 // refPattern is the ref grammar of design.md §6.1: one lowercase letter,
 // or a lowercase-letter head, up to 62 lowercase letters/digits/hyphens
@@ -52,6 +122,7 @@ type Store struct {
 	db       *sql.DB
 	key      []byte
 	indexKey []byte
+	metaKey  []byte
 	id       string
 }
 
@@ -130,6 +201,7 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		return fail(ErrInvalidStore)
 	}
 	s := &Store{db: db}
+	wipe := func() { keycrypto.WipeKey(s.key); keycrypto.WipeKey(s.indexKey); keycrypto.WipeKey(s.metaKey) }
 	derive := func() error {
 		var e error
 		s.key, e = hkdf.Key(sha256.New, key, []byte(s.id), "keyref-local-encryption-v1", 32)
@@ -138,11 +210,15 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		}
 		s.indexKey, e = hkdf.Key(sha256.New, key, []byte(s.id), "keyref-local-index-v1", 32)
 		if e != nil {
-			keycrypto.WipeKey(s.key)
+			wipe()
+			return e
+		}
+		s.metaKey, e = hkdf.Key(sha256.New, key, []byte(s.id), "keyref-local-meta-v1", 32)
+		if e != nil {
+			wipe()
 		}
 		return e
 	}
-	wipe := func() { keycrypto.WipeKey(s.key); keycrypto.WipeKey(s.indexKey) }
 	if create {
 		id := make([]byte, 16)
 		if _, err = rand.Read(id); err != nil {
@@ -164,7 +240,7 @@ func open(path string, key []byte, create bool) (*Store, error) {
 			return fail(ErrInvalidStore)
 		}
 		defer tx.Rollback()
-		if _, e = tx.Exec(`CREATE TABLE metadata (id TEXT NOT NULL, check_blob BLOB NOT NULL, writes INTEGER NOT NULL); CREATE TABLE entries (id TEXT PRIMARY KEY, blob BLOB NOT NULL);`); e == nil {
+		if _, e = tx.Exec(`CREATE TABLE metadata (id TEXT NOT NULL, check_blob BLOB NOT NULL, writes INTEGER NOT NULL); CREATE TABLE entries (id TEXT PRIMARY KEY, meta BLOB NOT NULL, blob BLOB NOT NULL);`); e == nil {
 			_, e = tx.Exec("INSERT INTO metadata(id,check_blob,writes) VALUES (?,?,1)", s.id, blob)
 		}
 		if e == nil {
@@ -194,8 +270,49 @@ func open(path string, key []byte, create bool) (*Store, error) {
 			return fail(ErrInvalidKey)
 		}
 		keycrypto.WipeKey(plain)
+		// Vaults created before encrypted meta existed get the nullable
+		// column. Their rows have no ref stored, so they stay out of List
+		// until Stat is called with the ref and writes a degraded meta.
+		if e := ensureMetaColumn(db); e != nil {
+			wipe()
+			return fail(ErrInvalidStore)
+		}
 	}
 	return s, nil
+}
+
+// ensureMetaColumn adds the meta column to a vault created before
+// encrypted meta (design.md §17.4). New vaults already have it.
+func ensureMetaColumn(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(entries)")
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "meta" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec("ALTER TABLE entries ADD COLUMN meta BLOB")
+	return err
 }
 
 func (s *Store) entryID(ref string) (string, error) {
@@ -208,8 +325,10 @@ func (s *Store) entryID(ref string) (string, error) {
 }
 
 // Put atomically creates or replaces a secret at ref and reports whether
-// the row is new. The caller retains ownership of value.
-func (s *Store) Put(ctx context.Context, ref string, value []byte) (created bool, err error) {
+// the row is new. The meta (mask, size, description, policy) is sealed
+// with its own key and AAD; List and Stat can read it without touching
+// the secret. The caller retains ownership of value.
+func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptions) (created bool, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.db == nil {
@@ -221,9 +340,35 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte) (created bool
 	if len(value) == 0 || len(value) > maxValue {
 		return false, ErrInvalidStore
 	}
+	for _, list := range [][]string{opts.AllowCommands, opts.AllowedHosts} {
+		for _, v := range list {
+			if v == "" || strings.ContainsRune(v, 0) {
+				return false, ErrInvalidStore
+			}
+		}
+	}
 	id, err := s.entryID(ref)
 	if err != nil {
 		return false, err
+	}
+	m := &Meta{
+		V:           1,
+		Ref:         ref,
+		Description: opts.Description,
+		Masked:      Mask(value),
+		Bytes:       len(value),
+		UpdatedAt:   time.Now().UnixMilli(),
+		Policy: Policy{
+			AllowCommands: append([]string{}, opts.AllowCommands...),
+			AllowedHosts:  append([]string{}, opts.AllowedHosts...),
+		},
+	}
+	metaBlob, err := s.sealMeta(id, m)
+	if err != nil {
+		return false, err
+	}
+	if len(metaBlob) > maxMeta {
+		return false, ErrMetaTooLarge
 	}
 	aad, err := keycrypto.SecretAAD(s.id, id)
 	if err != nil {
@@ -235,6 +380,9 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte) (created bool
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
 		return false, ErrInvalidStore
 	}
 	defer tx.Rollback()
@@ -250,7 +398,7 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte) (created bool
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?)", id).Scan(&exists); err != nil {
 		return false, ErrInvalidStore
 	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO entries(id,blob) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET blob=excluded.blob", id, blob)
+	_, err = tx.ExecContext(ctx, "INSERT INTO entries(id,meta,blob) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET meta=excluded.meta, blob=excluded.blob", id, metaBlob, blob)
 	if err == nil {
 		err = tx.Commit()
 	}
@@ -258,6 +406,148 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte) (created bool
 		return false, ErrInvalidStore
 	}
 	return exists == 0, nil
+}
+
+// sealMeta encrypts one meta plaintext with the meta key. The AAD binds
+// the store and the row id, so a meta blob cannot be moved to another
+// row or vault (design.md §17.4).
+func (s *Store) sealMeta(id string, m *Meta) ([]byte, error) {
+	plain, err := json.Marshal(m)
+	if err != nil {
+		return nil, ErrInvalidStore
+	}
+	aad, err := keycrypto.MetaAAD(s.id, id)
+	if err != nil {
+		return nil, ErrInvalidStore
+	}
+	blob, err := keycrypto.SealBlob(s.metaKey, aad, plain)
+	if err != nil {
+		return nil, ErrInvalidStore
+	}
+	return blob, nil
+}
+
+// openMeta decrypts and validates one meta blob.
+func (s *Store) openMeta(id string, blob []byte) (*Meta, error) {
+	if len(blob) < 28 || len(blob) > maxMeta {
+		return nil, ErrInvalidStore
+	}
+	aad, err := keycrypto.MetaAAD(s.id, id)
+	if err != nil {
+		return nil, ErrInvalidStore
+	}
+	plain, err := keycrypto.OpenBlob(s.metaKey, aad, blob)
+	if err != nil {
+		return nil, ErrInvalidStore
+	}
+	defer keycrypto.WipeKey(plain)
+	var m Meta
+	dec := json.NewDecoder(bytes.NewReader(plain))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		return nil, ErrInvalidStore
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, ErrInvalidStore
+	}
+	if m.V != 1 || !ValidRef(m.Ref) || m.Bytes < 0 || m.Bytes > maxValue || m.Masked == "" {
+		return nil, ErrInvalidStore
+	}
+	gotID, err := s.entryID(m.Ref)
+	if err != nil || gotID != id {
+		return nil, ErrInvalidStore
+	}
+	return &m, nil
+}
+
+// List returns every row's meta, sorted by ref. It never decrypts a
+// secret. Rows from a pre-meta vault have no stored ref, so they are
+// absent until Stat(ref) writes their degraded meta.
+func (s *Store) List(ctx context.Context) ([]Meta, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return nil, ErrClosed
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT id, meta FROM entries WHERE meta IS NOT NULL")
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrInvalidStore
+	}
+	defer rows.Close()
+	var out []Meta
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, ErrInvalidStore
+		}
+		m, err := s.openMeta(id, blob)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	if err := rows.Err(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrInvalidStore
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
+	return out, nil
+}
+
+// Stat returns one row's meta without decrypting the secret. A row
+// written before encrypted meta gets a degraded meta (mask "***",
+// zero bytes) from the ref the caller supplied; it is persisted so
+// later List calls include it. The secret itself is untouched.
+func (s *Store) Stat(ctx context.Context, ref string) (*Meta, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return nil, ErrClosed
+	}
+	id, err := s.entryID(ref)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+	var blob []byte
+	err = s.db.QueryRowContext(ctx, "SELECT meta FROM entries WHERE id = ?", id).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, ErrInvalidStore
+	}
+	if blob != nil {
+		return s.openMeta(id, blob)
+	}
+	m := &Meta{
+		V: 1, Ref: ref, Masked: "***", UpdatedAt: time.Now().UnixMilli(),
+		Policy: Policy{AllowCommands: []string{}, AllowedHosts: []string{}},
+	}
+	sealed, err := s.sealMeta(id, m)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.db.ExecContext(ctx, "UPDATE entries SET meta=? WHERE id=? AND meta IS NULL", sealed, id)
+	if err != nil {
+		return nil, ErrInvalidStore
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		// Another writer filled the row first; return the stored meta.
+		if err := s.db.QueryRowContext(ctx, "SELECT meta FROM entries WHERE id = ?", id).Scan(&blob); err == nil && blob != nil {
+			return s.openMeta(id, blob)
+		}
+	}
+	return m, nil
 }
 
 // Use decrypts only for the callback and wipes its buffer afterwards. A callback
@@ -343,7 +633,9 @@ func (s *Store) Close() error {
 	s.db = nil
 	keycrypto.WipeKey(s.key)
 	keycrypto.WipeKey(s.indexKey)
+	keycrypto.WipeKey(s.metaKey)
 	s.key = nil
 	s.indexKey = nil
+	s.metaKey = nil
 	return err
 }

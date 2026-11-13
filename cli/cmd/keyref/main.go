@@ -415,7 +415,7 @@ func cmdList(args []string) int {
 		return fatalf(1, "%v", err)
 	}
 	if spec.Kind == source.KindLocal {
-		return fatalf(2, "local sources store refs one-way (HMAC), so they cannot be listed; use keyref get <ref>")
+		return runLocalList(p, spec, *format)
 	}
 	st, err := existingStore(p)
 	if errors.Is(err, errNotPaired) {
@@ -433,12 +433,19 @@ func cmdList(args []string) int {
 	if err != nil {
 		return unwrapOrGeneric(os.Stderr, err)
 	}
-	if *format == "json" {
-		out := make([]meta.Entry, len(entries))
-		copy(out, entries)
+	return printEntries(entries, *format)
+}
+
+// printEntries renders the same table and JSON array for every source,
+// so list output does not depend on which backend answered.
+func printEntries(entries []meta.Entry, format string) int {
+	if format == "json" {
+		if entries == nil {
+			entries = []meta.Entry{}
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(out); err != nil {
+		if err := enc.Encode(entries); err != nil {
 			return fatalf(1, "%v", err)
 		}
 		return 0
@@ -447,6 +454,22 @@ func cmdList(args []string) int {
 	for _, e := range entries {
 		fmt.Printf("%-24s %-28s %-10s %s\n", e.Ref, truncate(e.Name, 28), e.Type, e.Masked)
 	}
+	return 0
+}
+
+// printEntry renders one get result in the text or JSON shape shared by
+// both sources.
+func printEntry(e *meta.Entry, format string) int {
+	if format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(e); err != nil {
+			return fatalf(1, "%v", err)
+		}
+		return 0
+	}
+	fmt.Printf("ref: %s\nname: %s\ndescription: %s\ntype: %s\nmasked: %s\nsensitivity: %s\ninjectable: %v\n",
+		e.Ref, e.Name, e.Description, e.Type, e.Masked, e.Sensitivity, e.Injectable)
 	return 0
 }
 
@@ -496,17 +519,7 @@ func cmdGet(args []string) int {
 		}
 		return unwrapOrGeneric(os.Stderr, err)
 	}
-	if *format == "json" {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(e); err != nil {
-			return fatalf(1, "%v", err)
-		}
-		return 0
-	}
-	fmt.Printf("ref: %s\nname: %s\ndescription: %s\ntype: %s\nmasked: %s\nsensitivity: %s\ninjectable: %v\n",
-		e.Ref, e.Name, e.Description, e.Type, e.Masked, e.Sensitivity, e.Injectable)
-	return 0
+	return printEntry(e, *format)
 }
 
 // unwrapOrGeneric maps an unwrap failure to its exit code, writing the

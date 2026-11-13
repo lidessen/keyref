@@ -11,34 +11,14 @@ import (
 	"github.com/lidessen/keyref/cli/internal/config"
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/source"
+	"github.com/lidessen/keyref/cli/local"
 )
 
-func TestMaskSecret(t *testing.T) {
-	cases := []struct {
-		name  string
-		value []byte
-		want  string
-	}{
-		{"long printable value", []byte("sk-abc1234567890wxyz"), "sk-****wxyz"},
-		{"short value", []byte("short"), "***"},
-		{"empty value", []byte{}, "***"},
-		{"binary value", []byte{0x00, 0x01, 0x02, 0x03, 0xff, 0x10, 0x20, 0x30}, "***"},
-		{"value with a trailing newline", []byte("sk-abc1234567890wxyz\n"), "***"},
-		{"value with a space", []byte("two words here ok"), "***"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := maskSecret(tc.value); got != tc.want {
-				t.Fatalf("maskSecret(%q) = %q, want %q", tc.value, got, tc.want)
-			}
-		})
-	}
-}
-
-// A local entry has no per-item policy record: deny-shells applies and
-// argv injection is never consented to.
+// A local row without its own allowCommands keeps the built-in deny
+// list; a row that names commands gets exactly that whitelist, and argv
+// injection is never consented to.
 func TestLocalMetaPolicy(t *testing.T) {
-	meta := localMeta("my-ref")
+	meta := localItemMeta(&local.Meta{Ref: "my-ref"})
 	if !meta.Injectable {
 		t.Fatal("local entries must be injectable")
 	}
@@ -52,7 +32,23 @@ func TestLocalMetaPolicy(t *testing.T) {
 		t.Fatal("an ordinary command should be allowed under deny-shells")
 	}
 	if exec.ItemAllowsCommand("sh", meta.Policy, false) {
-		t.Fatal("sh must stay denied for local entries")
+		t.Fatal("sh must stay denied for a local entry without allowCommands")
+	}
+	named := localItemMeta(&local.Meta{
+		Ref: "my-ref",
+		Policy: local.Policy{
+			AllowCommands: []string{"cat"},
+			AllowedHosts:  []string{"api.openai.com"},
+		},
+	})
+	if !exec.ItemAllowsCommand("cat", named.Policy, false) {
+		t.Fatal("a named allowCommands entry must whitelist that command")
+	}
+	if exec.ItemAllowsCommand("curl", named.Policy, false) {
+		t.Fatal("a non-empty allowCommands list must allow nothing else")
+	}
+	if len(named.Policy.AllowedHosts) != 1 || named.Policy.AllowedHosts[0] != "api.openai.com" {
+		t.Fatalf("allowedHosts = %v", named.Policy.AllowedHosts)
 	}
 }
 

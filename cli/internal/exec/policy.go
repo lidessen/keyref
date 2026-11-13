@@ -89,7 +89,8 @@ const CommandPolicyAllowAll = "allow-all"
 //     aliased interpreters pass it — so it is not offered as protection
 //     for items that came from the phone.
 //   - On a local source an empty list keeps the built-in deny list; a
-//     local vault has no per-item policy record to consent with.
+//     non-empty list is the per-item whitelist written with
+//     `keyref set --allow-command`.
 func ItemAllowsCommand(base string, policy itemcrypt.MetaPolicy, paired bool) bool {
 	if len(policy.AllowCommands) > 0 {
 		for _, w := range policy.AllowCommands {
@@ -121,8 +122,12 @@ func commandDenial(ref, layer string, policy itemcrypt.MetaPolicy, paired bool) 
 		return &PolicyError{Reason: fmt.Sprintf(
 			"%s allows no commands: an empty allowCommands list allows nothing on the paired vault; set the commands it may run on iOS", item)}
 	default:
+		if ref != "" {
+			return &PolicyError{Reason: fmt.Sprintf(
+				"command %q is denied by the local source's deny list; allow it with `keyref set %s --allow-command %s` or run another command", layer, ref, layer)}
+		}
 		return &PolicyError{Reason: fmt.Sprintf(
-			"command %q is denied by the built-in deny list; local sources have no per-item allowCommands", layer)}
+			"command %q is denied by the built-in deny list; a local item can allow it with --allow-command", layer)}
 	}
 }
 
