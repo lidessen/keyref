@@ -72,7 +72,7 @@ go test -C cli -tags=e2e ./e2e
 
 在 review 用的 Linux 沙箱里有两个失败，**改动之前就失败，与本次改动无关**，在正常机器上应当通过，请确认：
 
-- `cli/internal/exec` 的 `TestStageFdFileUnlinksImmediately`：断言在不存在的目录里暂存会失败，但沙箱里 memfd 路径直接成功。
+- `cli/internal/exec` 的 `TestStageFdFileUnlinksImmediately`：断言在不存在的目录里暂存会失败，但沙箱里 memfd 路径直接成功。**更正（2026-11-13 lib + CLI review）：这不是沙箱问题。** Linux 上 `stageFdFile` 先走 memfd，根本不碰目录，断言在任何有 memfd 的 Linux 上都不成立；CI 跑在 `ubuntu-latest`，`main` 最近几次 `ci` 都是失败。见 issue #4。
 - e2e 的 `TestPtyReplyFlow`：沙箱没有可用的 pty，`exec --pty` 以退出码 18 结束。因此本次对 pty 路径的改动（启动失败文本脱敏、`ChildExit`、`Failed()` 检查）**编译过但没有运行过**，请在有 pty 的机器上跑一遍 `go test -C cli ./internal/exec` 和这个 e2e。
 
 iOS 在第 1 步已全量编译与测试通过；Android 在第 10 步已编译、通过 vectors 测试与 lint（未在真机上运行）。
@@ -133,8 +133,8 @@ iOS 在第 1 步已全量编译与测试通过；Android 在第 10 步已编译�
 6. **誊本编码不是单射。** 见 v2 E。
 7. **授予过期是装饰性的。** 每次解锁静默续期；后台续期密钥没有落地。
 8. **iOS 的关键逻辑不在可测的那一层。** 撤销、轮换、接管、快照的编排全在 `KeyrefUI/Backend/LiveBackend.swift`（约 2400 行），UI 测试跑的是平行实现 `MemoryBackend`。本次 iOS 的问题几乎都出在这里。建议把编排逻辑下沉到 `KeyrefCore`，让 `LiveBackend` 只做胶水。
-9. **本地库占了四个包，其中两个叫 store**：`cli/local`、`cli/store`（只有一个 provider 的注册表）、`cli/internal/localvault`、`cli/internal/source`，另有 `cli/internal/store` 是同步缓存。
-10. **「一套命令面」是名义上的。** `list` 只有 sync 有，`set` 和 `--reveal` 只有 local 有，`mcp` 只对 sync，`lock` 对 local 无效。本地 source 的主密钥在同一用户的 keyring 里，对同机 agent 没有保护，文档应当直说它是「防意外回显」的工具。
+9. **本地库占了四个包，其中两个叫 store**：`cli/local`、`cli/store`（只有一个 provider 的注册表）、`cli/internal/localvault`、`cli/internal/source`，另有 `cli/internal/store` 是同步缓存。（注册表已删除、缓存包已改名 `cache`——§0 第 9 步；剩下的库边界见 design v0.10 §17.7。）
+10. **「一套命令面」是名义上的。** `list` 只有 sync 有，`set` 和 `--reveal` 只有 local 有，`mcp` 只对 sync，`lock` 对 local 无效。本地 source 的主密钥在同一用户的 keyring 里，对同机 agent 没有保护，文档应当直说它是「防意外回显」的工具。（→ design v0.10 §17：local 的 `list`、`mcp --source`、统一的 `get` 形状、§17.6 的直白表述；`lock` 已覆盖 local。）
 11. **未兑现的「已完成」和死代码。** `secret.Vault` 无人使用；决策摘要里的 Argon2id 恢复口令没有实现；`billing/apple` 是恒 404 的桩；`commandPolicy` 字段无人读取。
 12. **design.md 是按版本追加的。** §14、§17 覆盖了前面章节却没有回头改（§2.2 仍写「MVP 不做 Android」，§12.2 的命令清单过时）。建议给每个功能标状态：已实现 / 部分 / 仅设计。
 
@@ -164,3 +164,29 @@ iOS 在第 1 步已全量编译与测试通过；Android 在第 10 步已编译�
 - 已配对的库 `exec` 默认白名单；本地 source 保持拒绝名单。
 - 「存在哪」与「是否每次审批」是两个正交的轴，保留「同步 + 审批」。
 - 多 owner 走链式验证，不移出范围。
+
+## 7. lib + CLI review（2026-11-13）
+
+范围：`cli/local`（库）、`cli/cmd/keyref` 与 `cli/internal/exec`、`source`、`localvault`（CLI 的本地路径），目标是「作为库集成」和「agent 在本机直接用 CLI」。基于 `0bb3cec`。server、iOS、Android 不在范围内。
+
+**设计问题** 写进了 design.md v0.10：§17 重写（本地库的加密 meta 与 `list`、`set` 的换行与策略、`--reveal` 的终端确认、密钥环条目的绑定、`mcp --source`、§17.6 local source 挡什么、§17.7 库的边界、§17.8 命令面细则），§7.4 增加两条，§16 改两条、加三条。实现状态与建议顺序在 design §17.9。
+
+**bug** 各有一条 issue，都在 `0bb3cec` 上复现过（#6、#8 是读代码得出的）：
+
+| issue | 内容 |
+| --- | --- |
+| #2 | `keyref init` 覆盖另一个本地库在密钥环里的主密钥——丢数据 |
+| #3 | MCP 的 `exec` 工具丢错误信息：多条路径写进程 stderr 而不是工具结果 |
+| #4 | `TestStageFdFileUnlinksImmediately` 在 Linux 上失败，`main` 的 CI 是红的 |
+| #5 | `cli` module 在 `go.work` 之外编译不过：`go.mod` 钉的 `proto` 版本过旧 |
+| #6 | `sources.json` 非原子写入、无锁 |
+| #7 | 只用本地 source 的安装也会生成 `cache.sqlite`；`<command> --help` 退出码是 2 |
+| #8 | Ctrl-C 对子进程组发的是 SIGKILL，不是转发信号 |
+
+**整理项**（不是设计，也不是 bug；做 §17.7 的引擎导出时一并处理）：
+
+- 一次 exec 引用了哪些 ref，算了四遍：`runExecCore` 的 `addRef`、`refsOf`、`exec.CollectRefs`、`baseOutcome`；`injectionModes` 与 `baseOutcome` 重复，`splitSpec` 与 `splitEnvSpec` 重复，`placeholdersInArgv` 与 `ArgvPlaceholderRefs` 重复。有的排序、有的不排序，迟早漂移。让 `exec` 包解析一次、其余地方读结果。
+- `execOptions` 到 `exec.Request` 是逐字段拷贝；`approvalBaseOptions` 有 12 个参数、`resolveViaApproval` 有 13 个。把一次 sync exec 的上下文（store、identity、client、vault id、目录、审计收件人）收成一个结构。
+- `cli/cmd/keyref/main.go` 1400 行，按命令拆文件。
+- `exec.go` 里退出码的数字字面量（`10`、`11`、`15`、`18`）与 `exitcode` 常量混用。
+- `cli/local/README.md` 末尾写「仓库是私有的、需要 `GOPRIVATE`」，而仓库目前是公开的；二者取其一。

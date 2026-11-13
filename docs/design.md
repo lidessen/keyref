@@ -1,8 +1,10 @@
 # keyref 设计文档
 
-状态：草案 v0.9。本文是规格，不是实现记录。仓库里的 `ios/`、`cli/`、`server/` 已有 Phase 1/2 的非 iOS 实现与 iOS app。
+状态：草案 v0.10。本文是规格，不是实现记录。仓库里的 `ios/`、`cli/`、`server/` 已有 Phase 1/2 的非 iOS 实现与 iOS app。
 
 日期：2026-11-13。
+
+v0.10：按 2026-11-13 的 lib + CLI review 重写 §17，面向「作为库集成」与「agent 在本机直接用 CLI」两条路径。本地库的每一行多一份加密的 meta（ref、掩码、策略），因此 local source 也有 `list`，`get` 不再解密 secret，条目可以带自己的 `allowCommands`；`set` 默认去掉一个末尾换行（`--raw` 保留）；`get --reveal` 必须在控制终端上确认；密钥环条目绑定到库本身而不是 source 名；`keyref mcp` 跟随选中的 source。新增 §17.6（local source 挡什么）、§17.7（Go 库的边界）、§17.8（命令面细则）、§17.9（实现状态）。§7.4 的脱敏增加「去掉首尾空白后的值」这一组匹配。§16 改两条、加三条。**本版是规格先行**，尚未实现的部分列在 §17.9。
 
 v0.9：新增 §17「统一命令面与 source」——CLI 只有一套命令，后端由 source 决定：`local`（本机离线库，默认）与 `sync`（已配对的 iOS 库，CLI 只读）；`keyref local` 子命令取消。选源顺序为 `--source` > `KEYREF_SOURCE` > 配置的默认 > `local`；本地主密钥放操作系统密钥环，`KEYREF_LOCAL_MASTER`（32 随机字节的 base64）为无头环境的覆盖项。`get --reveal` 是 §16「没有 reveal 路径」在 local source 上的唯一例外：只有 local 接受它，sync 拒绝。§16 相应补一条不变量。
 
@@ -606,7 +608,10 @@ osascript socat
 - Base64url 与去掉填充
 - 小写 hex、大写 hex
 - RFC 3986 percent-encoding
+- 秘密值首尾带 ASCII 空白时（典型是 `echo $TOKEN | keyref set` 留下的末尾换行），**另外**对去掉首尾空白之后的值建立同一组匹配。消费秘密的程序几乎都会先 trim 再使用和回显（HTTP 客户端打印 `Authorization` 头就是这样），只按原始字节匹配会让 trim 过的明文原样通过
 - 跨 read 缓冲区的切分：重叠窗口按编码后最长长度定基数——percent-encoding 对非 unreserved 字节最高 3 倍，hex 是 2 倍，base64 是 4/3，所以窗口取 `len(secret) * 3 + 16` 字节。窗口比这短会让恰好跨缓冲区边界的编码漏检；更长只是浪费
+
+窗口是扣留量的上限，不是固定扣留量：实现只需要扣留「仍然可能是某个匹配的前缀」的那段尾部，其余字节立即转交。固定扣留整个窗口会让长时间运行的子进程的最后一段输出卡到进程退出。
 
 替换文本是固定的 ASCII：
 
@@ -1393,9 +1398,12 @@ A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设�
 - 服务器进程、日志、错误响应和分析里不出现解开的秘密，也不出现用户的名称和 `ref`。`ref` 出现在已解锁客户端的 `list` 输出里，这是 agent 能引用条目的前提；它不出现在服务器能读的列里。
 - 自托管二进制不打电话回家，不校验付费许可。官方托管必须打开配额；不能以「先不限额」的方式公开注册。
 - 客户端把任何服务器 URL 都当成不可信的存储。官方托管不因为是我们在运行就少做一层加密。
-- `list` 和 `get` 不解密 secret。掩码用 meta 里已经算好的 `masked`。
+- `list` 和 `get` 不解密 secret。掩码用 meta 里已经算好的 `masked`。两种 source 都一样：本地库的掩码在 `set` 时算好，放进该行的加密 meta（§17.4）。
 - 不增加 `keyref get --reveal`、环境变量开关或调试 flag 来打印明文。需要明文的是子进程，不是父进程的 stdout。
-- 上一条的唯一例外是 local source 的 `keyref get <ref> --reveal`（§17.4）：它必须显式点名、只对 local 有效、只写原始字节、不带任何其他输出；sync source 一律拒绝。
+- 上一条的唯一例外是 local source 的 `keyref get <ref> --reveal`（§17.4）：它必须显式点名、只对 local 有效、只写原始字节、不带任何其他输出，并且必须先在控制终端（`/dev/tty`）上得到人的确认——没有控制终端就拒绝，不提供跳过确认的 flag 或环境变量；sync source 一律拒绝，MCP 没有 reveal。
+- `keyref init` 不覆盖已有的密钥环条目；本地主密钥的条目绑定到库自身的 id，而不是 source 名（§17.4）。
+- 本地条目的策略只能随一次 `set`（即一个新的秘密值）写入；没有「只改策略、不换值」的命令（§17.4）。
+- 任何文档都不把 local source 写成能挡对抗性 agent 的边界：它挡的是意外（§17.6）。
 - 不用 `system()` 或 `sh -c` 执行 agent 的命令。
 - 不把 VMK 放进任何 `kind = cli` 的包裹。
 - 不把 `approval` 条目的 item key 写进 CLI 的密钥环或 sqlite。
@@ -1419,17 +1427,23 @@ A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设�
 
 ## 17. 统一命令面与 source
 
+v0.10 按 2026-11-13 的 lib + CLI review 重写了本节。**本节是规格先行**：哪些已经实现、哪些还没有，见 §17.9。
+
 ### 17.1 问题
 
 CLI 原本只有一套命令，全部对着已配对的 iOS 库（`pair` / `session` / `sync` / `list` / `get` / `exec` …），另有一个孤立的 `keyref local init|set|delete` 子命令管本机离线库。两套命令面意味着两套帮助、两套退出码、两套心智模型，而本机离线库这条路径其实更基础：它不需要手机、不需要服务器、不需要审批。
 
 决定：**只有一套命令面**，后端由 **source** 决定。没有 `keyref local` 子命令。
 
+v0.9 落地之后，这句话只在名义上成立：`list` 只有 sync 有，`mcp` 只对 sync，`get` 在两边的输出形状不同。v0.10 把差异收敛到「谁能写」和「有没有审批」这两件真正不同的事上，其余命令在两个 source 上行为一致。
+
+用词：本节的 source 是**凭据来源**（CLI 读哪个库）。§14 的 `kind = source` 设备是**短信采集设备**，同词不同义；文档和代码注释里后者一律写「采集设备」或 `source device`，不单用 source。
+
 ### 17.2 内置 source
 
-| source | 类型 | 读 | 写 | 说明 |
+| source | 类型 | `list` / `get` / `exec` | `set` / `delete` | 说明 |
 | --- | --- | --- | --- | --- |
-| `local` | 本机离线库 | 是 | 是 | `<data dir>/local.db`，SQLite，明文不落盘之外任何地方 |
+| `local` | 本机离线库 | 是 | 是 | `<data dir>/local.db`，SQLite；没有授予、没有审批、没有远程审计 |
 | `sync` | 已配对的 iOS 库 | 是 | 否 | CLI 不能创建、修改或删除条目（§2.1 编辑权） |
 
 `local` 是**默认** source：一条新的安装，`keyref set` 直接就是本机库。
@@ -1438,22 +1452,122 @@ CLI 原本只有一套命令，全部对着已配对的 iOS 库（`pair` / `sess
 
 `--source NAME` > `KEYREF_SOURCE` > 配置的默认（`<data dir>/sources.json`）> `local`。
 
-`keyref source list|default|add|remove` 管理这套配置：`add` 注册另一个本地库（`--path` 必须是绝对路径），`remove` 只删配置、不删文件。
+`keyref source list|default|add|remove` 管理这套配置：`add` 注册另一个本地库（`--path` 必须是绝对路径），`remove` 只删配置、不删文件，也不删密钥环条目。
 
 升级兼容：已经配对过的数据目录在没有 `sources.json` 时，第一次运行把默认 source 记成 `sync`——升级不能让老用户原本能用的命令落到一个空库上。`keyref pair` 成功也把默认 source 设为 `sync`（配对意味着这台 CLI 由 iOS 库支撑）。`keyref source default local` 切回来。
 
+`sources.json` 用「写临时文件再 rename」的方式替换，读—改—写的路径串行化；并发的 keyref 命令不能读到半个文件。
+
 ### 17.4 本地库
 
-- **主密钥**：32 随机字节。`keyref init` 生成并写进操作系统密钥环（macOS Keychain、Linux Secret Service）；`KEYREF_LOCAL_MASTER` 覆盖它，值是同一把钥匙的**标准 base64**。环境变量给的钥匙只用不抄，绝不写进密钥环。钥匙丢了库就没了——CLI 不生成、不恢复、不备份它。
-- **目录**：库文件所在目录必须是私有目录（0700），否则拒绝创建或打开。
-- **ref 单向存**：行 id 是 ref 的 HMAC，文件里没有可读的 ref。因此 `list` 只属于 `sync` source；本机库只能凭 ref 取。`set` 存的是原始字节（1 字节到 1 MiB，含末尾换行），取回来还是同样的字节。
-- **`get`**：默认只给掩码——头三个字符加末四个字符，短值、二进制值和含空白字符的值什么都不给。`--reveal` 写原始字节到 stdout，别的什么都不写。这是 §16 那条不变量的唯一例外，且只有 local source 接受。
-- **`exec`**：与 `sync` 同一套代码路径——同样的注入形态、同样的脱敏器、同样的 spawn 前检查；没有授予、没有审批、没有远程审计，条目的策略是合成的 `deny-shells`（§7.3：已配对库要求显式 `allowCommands`，本地源保留内置拒绝名单，v2 H）。argv 注入在本地库上不可用：本地条目没有策略记录可以同意把秘密放进进程参数。
+**主密钥。** 32 随机字节。`keyref init` 生成并写进操作系统密钥环（macOS Keychain、Linux Secret Service）；`KEYREF_LOCAL_MASTER` 覆盖它，值是同一把钥匙的**标准 base64**。环境变量给的钥匙只用不抄，绝不写进密钥环。钥匙丢了库就没了——CLI 不生成、不恢复、不备份它。
+
+密钥环条目绑定到**库本身**，不是 source 名：账户名是 `local-master-<store id>`，`store id` 是库文件里那个随机的 16 字节 id。`init` 的顺序是：生成钥匙 → 创建库文件 → 以该库的 id 写密钥环；密钥环写失败就删掉刚创建的文件。`init` **绝不覆盖**已有的密钥环条目。打开时先从库文件读出 id（它不是秘密），再按 id 取钥匙。这样两个数据目录、或者 `source remove` 之后重新 `add` 的同名 source，都不可能互相冲掉对方的钥匙。
+
+**目录。** 库文件所在目录必须是私有目录（0700），否则拒绝创建或打开。
+
+**行的形状。** 每一行有三样东西：
+
+| 列 | 内容 | 钥匙 |
+| --- | --- | --- |
+| `id` | ref 的 HMAC，文件里没有可读的 ref | 索引钥匙（HKDF `keyref-local-index-v1`） |
+| `meta` | AES-256-GCM 密文，明文是下面的 JSON | meta 钥匙（HKDF `keyref-local-meta-v1`） |
+| `blob` | AES-256-GCM 密文，明文是秘密值 | 加密钥匙（HKDF `keyref-local-encryption-v1`） |
+
+```json
+{
+  "v": 1,
+  "ref": "openai-prod",
+  "description": "",
+  "masked": "sk-****abcd",
+  "bytes": 51,
+  "updated_at": 1790000000000,
+  "policy": { "allowCommands": [], "allowedHosts": [] }
+}
+```
+
+meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id` 与行 id），两份密文不能互换。文件仍然不泄漏 ref 和掩码——没有主密钥什么都读不出来；持钥者则可以枚举。v0.9 的「ref 单向存、所以没有 `list`」是把「文件不泄漏名字」和「持钥者也不能列」混在了一起，后者不是需求，而且让 agent 无从发现有哪些 ref 可用。
+
+本地库的文件格式随 v0.9 当天引入，按没有存量处理，直接改格式；实现时如果发现已有存量库，补一次性迁移（解开旧行、补写 meta）。
+
+**ref。** 语法与 §6.1 相同：`^[a-z][a-z0-9-]{0,62}[a-z0-9]$` 或单字符 `[a-z]`。`sms:` 前缀、空白、`=`、花括号都不是合法的本地 ref。
+
+**`set`。** 秘密从 stdin 读，1 字节到 1 MiB，绝不出现在参数和任何输出里。
+
+- 默认去掉**一个**末尾换行（`\n` 或 `\r\n`）：`echo "$TOKEN" | keyref set tok` 存下的是 token 本身。`--raw` 原样保存每一个字节。v0.9 的「含末尾换行原样存」会把换行带进 `Authorization` 头，并且让 §7.4 的整串匹配对 trim 过的回显失效。
+- stdin 是终端时，不回显地读一行，而不是读到 EOF。
+- 输出说明是新建还是替换：`created "tok"` / `replaced "tok"`。
+- 值短于 8 字节时在 stderr 警告：§7.4 对短值的误伤和漏检都更严重（1 字节的值会把输出里所有同样的字节替换掉）。
+- `--description TEXT`、`--allow-command NAME`（可重复）、`--allow-host HOST`（可重复）写进这一行的 meta。掩码按 §6.1 的规则在这时算好。
+- **策略只能随一次 `set` 写入**，也就是随一个新的秘密值。没有「只改策略、不换值」的命令：不知道秘密值的调用方（比如 agent）没法在保留秘密的同时放宽它的策略。
+
+**`list` / `get`。** 只解 meta，不碰 secret（§16）。输出字段与 sync 完全相同——`ref`、`name`、`description`、`type`、`masked`、`sensitivity`、`injectable`——本地条目的 `name` 等于 `ref`，`type` 是 `local`，`sensitivity` 是 `standard`，`injectable` 是 `true`。agent 只需要认一种形状。
+
+**`get --reveal`。** 把原始字节写到 stdout，别的什么都不写。这是 §16「没有 reveal 路径」的唯一例外，只有 local source 接受，并且：
+
+- keyref 打开控制终端（`/dev/tty`），在上面打印 ref 并要求输入 `y` 确认；确认与 stdin / stdout 无关，所以 `keyref get tok --reveal | pbcopy` 照常可用。
+- 没有控制终端就拒绝，退出码 `10`。没有跳过确认的 flag，也没有环境变量开关。
+- MCP 没有 reveal。
+
+理由：v0.9 的 `--reveal` 对 agent 没有任何门槛，一条命令就把明文读进上下文。agent harness 的工具调用通常没有控制终端，这道确认挡住的正是「模型想帮忙看一眼值」这种非对抗性的泄漏。它不是边界：有 pty 的 shell 可以伪造终端，那是 B2。
+
+**`exec`。** 与 `sync` 同一套代码路径——同样的注入形态、同样的脱敏器、同样的 spawn 前检查；没有授予、没有审批、没有远程审计。命令策略（§7.3）：
+
+- 行的 `allowCommands` 非空：精确白名单，与 sync 条目同义，只会收紧。
+- 为空：内置拒绝名单（滑倒保护，不是边界）。本地 source 的默认值保持拒绝名单不变。
+- `allowedHosts` 非空时做与 sync 相同的参数检查。
+- argv 注入在本地库上仍然不可用。
 
 ### 17.5 MCP
 
-`keyref mcp` 始终对着 `sync` source：它是「一台已配对的 CLI 设备」（§7.8），三个工具（list / get / exec）必须说同一种话。MCP 没有 local 模式——`list` 在本机库上不存在（§17.4）。
+`keyref mcp [--source NAME]` 按 §17.3 在启动时选定一个 source，整个会话不变。三个工具（list / get / exec）在两个 source 上都存在、形状相同（§17.4），所以 v0.9 的「MCP 始终对着 sync」不再需要。选中 `sync` 时它仍然是「一台已配对的 CLI 设备」（§7.8）。
 
-### 17.6 不变的东西
+工具调用期间产生的每一条消息都进这次调用的结果，不写进程的 stderr：MCP 客户端看不到 server 的 stderr，只拿到一个退出码等于没有报错。
 
-本地 source 不改变威胁模型的其余部分：明文仍然只进子进程（除非人显式 `--reveal`），`exec` 仍然先做策略检查再 spawn，仍然不经过 shell，仍然脱敏输出。区别只在范围——本机库没有远端、没有授予、没有审批，所以也没有审批后的审计事件。
+### 17.6 local source 挡什么，不挡什么
+
+本地 source 的保证比已配对的库弱，文档、帮助文本和集成说明都要直说：
+
+- **挡的是意外。** 秘密不出现在命令行、shell 历史、`list` / `get` 的输出和 keyref 转发的子进程输出里。一个配合的 agent 不会「不小心」把明文带进上下文。
+- **不挡对抗性的 agent。** 主密钥在同一用户的密钥环里；无头环境下 `KEYREF_LOCAL_MASTER` 就在调用 keyref 的那个进程的环境里，也就是在 agent harness 的环境里。内置拒绝名单拦不住 `awk`、`sed`、`curl` 这类把秘密变形输出或直接发走的命令，脱敏器只认整串和几种固定编码。这些都是 B1 / B2，不是待修的 bug。
+- **收紧的手段只有两个**：给条目写 `allowCommands`（§17.4），或者把秘密放进已配对的库并设 `sensitivity = approval`。需要「人点头才能用」的秘密不属于本地 source。
+
+其余不变：明文只进子进程（除非人在终端上确认 `--reveal`），`exec` 先做策略检查再 spawn，不经过 shell，输出脱敏。
+
+### 17.7 Go 库的边界
+
+§7.8 的 embed 形态在本地库上的落点。v0.9 的库只导出了一个带 `Use` 回调的键值存储，而 keyref 真正的价值——注入与脱敏——在 `cli/internal/exec` 里，嵌入方拿不到，只能重写。
+
+- **独立 module。** 库不放在 `cli` module 里：那会让嵌入方的依赖图带上密钥环、D-Bus、二维码这些只有 CLI 才用的东西，并且 `cli/go.mod` 对 `proto` 的版本钉在 workspace 之外从未被验证过。库 module 只依赖 `proto` 与 SQLite 驱动。CI 对每个 module 各做一次 `GOWORK=off` 的构建。
+- **导出两样东西。**
+  1. 本地库：`Create` / `Open` / `Put` / `Use` / `Delete` / `List` / `Stat` / `Close`。`Stat` 与 `List` 只解 meta。
+  2. 执行引擎：`Run(Request)` 与 `Redactor`。嵌入方用自己的方式拿到秘密（本地库、或自己的后端），把注入、spawn 前检查和脱敏交给同一份代码。
+- **引擎不认识 source。** 引擎的输入是它自己定义的策略类型（`AllowCommands`、`AllowedHosts`、`AllowArgv`、`RequireAllowList`），不是 sync 的 `itemcrypt.MetaPolicy`，也没有 `Paired` 这样的开关。「已配对的库空白名单即拒绝」由 sync 的适配层把 `RequireAllowList` 置真来表达；本地适配层不置。
+- **错误可区分。** 现在几乎所有失败都是 `ErrInvalidStore`，CLI 自己不得不先 `os.Stat` 和检查目录权限才能给出人话。库至少区分：库不存在、库已存在、目录权限不安全、钥匙不对、ref 不合法、值的大小不合法、条目不存在、写次数用尽、库损坏；底层错误用 `%w` 包住；`context` 的取消与超时原样返回，不折叠成别的错误。
+- **不做注册表。** 没有 provider 注册机制；需要抽象的调用方自己声明它要的小接口。
+
+### 17.8 命令面细则
+
+- **`status`** 按 source 报告。local：库文件是否存在、主密钥来自密钥环还是 `KEYREF_LOCAL_MASTER`、是否上锁。sync：服务器、配对、会话、授予有效期。只报告选中的 source；`--all` 报告全部。
+- **只读命令不创建文件。** `status`、`list`、`get` 不创建 `cache.sqlite`；只用本地 source 的安装里不出现这个文件。`keyref lock` 的标志是数据目录里的独立状态，不放在 sync 的缓存库里——本地 source 不依赖 sync 的任何文件。
+- **帮助与版本。** 显式的 `-h` / `--help` 把帮助写到 stdout、退出 `0`。`keyref --version` 打印版本；MCP 的 `serverInfo.version` 用同一个值。
+- **退出码。** 用法错误（未知 flag、缺参数）是 `2`；§7.6 的码只用于它表里写的含义。代码里只用 `exitcode` 包的常量，不写数字。
+
+### 17.9 实现状态
+
+| 条目 | 状态 |
+| --- | --- |
+| 一套命令面、选源顺序、升级迁移（§17.1–§17.3） | 已实现 |
+| 本地库的主密钥、私有目录、`init` / `set` / `get` / `delete` / `exec`（v0.9 的形状） | 已实现 |
+| 本地 source 遵守 `keyref lock` | 已实现（标志目前放在 `cache.sqlite` 里，与 §17.8 不符） |
+| 密钥环条目绑定 `store id`、`init` 不覆盖 | 未实现（现状会覆盖，issue #2） |
+| `sources.json` 原子替换 | 未实现（issue #6） |
+| 行的加密 meta；local 的 `list`；`get` 不解密 secret；本地 `allowCommands` / `allowedHosts` | 未实现 |
+| `set` 默认去末尾换行、`--raw`、终端不回显、新建/替换、短值警告、ref 语法 | 未实现 |
+| §7.4 对去掉首尾空白的值建立匹配；只扣留可能成为匹配前缀的尾部 | 未实现 |
+| `get --reveal` 的控制终端确认 | 未实现（现状没有任何确认） |
+| `keyref mcp --source`；工具消息进结果 | 未实现（现状固定 sync；消息问题见 issue #3） |
+| 库独立 module、导出执行引擎、引擎自有策略类型、错误分类 | 未实现（注册表已删除；`GOWORK=off` 构建问题见 issue #5） |
+| `status` 按 source 报告、只读命令不建文件、帮助退出 `0`、`--version` | 未实现（issue #7） |
+
+建议顺序：先修 issue #2（会丢数据）和末尾换行（会漏脱敏），两者都是小改动；再做行的加密 meta，它同时解锁 `list`、不解密的 `get`、本地 `allowCommands` 和 MCP 的 local 模式；最后做库的 module 拆分与引擎导出。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。
