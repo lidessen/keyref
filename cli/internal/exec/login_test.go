@@ -234,8 +234,11 @@ func TestStdinLoginCancellationReapsDirectChild(t *testing.T) {
 	select {
 	case err := <-done:
 		ee, ok := err.(*osexec.ExitError)
-		if !ok || ee.ExitCode() != 128+int(syscall.SIGKILL) {
-			t.Fatal("login parent did not return the cancelled child status")
+		// The login child stays in the caller's group; keyref forwards
+		// the SIGTERM it received, so the child dies by SIGTERM (issue
+		// #8 — it used to be killed with SIGKILL).
+		if !ok || ee.ExitCode() != 128+int(syscall.SIGTERM) {
+			t.Fatal("login parent did not return the forwarded signal status")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("login parent did not settle cancellation")

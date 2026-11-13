@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -39,13 +41,33 @@ func main() {
 		_, _ = os.Stdout.Write(input)
 		return
 	}
-	if len(os.Args) == 3 && os.Args[1] == "sleep" {
-		// A long-running child for the interrupt test: copies of system
+	if len(os.Args) >= 3 && os.Args[1] == "sleep" {
+		// A long-running child for the interrupt tests: copies of system
 		// binaries are killed by macOS code signing, so the fixture
-		// sleeps on its own.
+		// sleeps on its own. An optional marker file records that a
+		// signal handler ran (issue #8: the signal must arrive, not
+		// SIGKILL), or "ignore" makes the child ignore SIGINT so the
+		// caller's SIGKILL escalation can be observed.
 		d, err := time.ParseDuration(os.Args[2])
 		if err != nil {
 			os.Exit(31)
+		}
+		if len(os.Args) >= 4 {
+			switch marker := os.Args[3]; marker {
+			case "ignore":
+				signal.Ignore(os.Interrupt)
+			default:
+				sigCh := make(chan os.Signal, 1)
+				signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+				// "ready" tells the test the handler is installed, so
+				// its signal cannot race the Notify call.
+				_ = os.WriteFile(marker, []byte("ready"), 0o600)
+				go func() {
+					s := <-sigCh
+					_ = os.WriteFile(marker, []byte(s.String()), 0o600)
+					os.Exit(0)
+				}()
+			}
 		}
 		time.Sleep(d)
 		return

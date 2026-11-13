@@ -3,6 +3,7 @@
 package exec
 
 import (
+	"os/exec"
 	"sync"
 	"syscall"
 )
@@ -25,4 +26,20 @@ func DisableCoreDumps() {
 // process never goes through a shell (design.md §15).
 func childSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+// forwardSignal sends the signal keyref received to the child's process
+// group, or to the child alone when it stays in the caller's group
+// (--stdin-login). issue #8: children get to run their cleanup instead
+// of receiving SIGKILL.
+func forwardSignal(cmd *exec.Cmd, sig syscall.Signal) {
+	if cmd.Process == nil {
+		return
+	}
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid {
+		if syscall.Kill(-cmd.Process.Pid, sig) == nil {
+			return
+		}
+	}
+	_ = cmd.Process.Signal(sig)
 }

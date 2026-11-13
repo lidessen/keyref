@@ -597,13 +597,46 @@ func run(req *Request) (int, *Outcome) {
 	}
 
 	var cmd *osexec.Cmd
+	stopLoginWatch := func() {}
 	if req.LoginRef != "" {
 		// Stay in the caller's group so a fixed launcher can cancel Keyref
 		// and its child together, even when using SIGKILL.
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
+		ctx, cancel := context.WithCancel(context.Background())
 		cmd = osexec.CommandContext(ctx, resolved.First, argv[1:]...)
 		cmd.WaitDelay = time.Second
+		// Forward the signal keyref received to the child instead of the
+		// default Cancel (= SIGKILL); WaitDelay escalates if the child
+		// ignores it (issue #8).
+		var loginSig atomic.Int32
+		loginSigCh := make(chan os.Signal, 1)
+		signal.Notify(loginSigCh, os.Interrupt, syscall.SIGTERM)
+		loginDone := make(chan struct{})
+		go func() {
+			select {
+			case s := <-loginSigCh:
+				if sig, ok := s.(syscall.Signal); ok {
+					loginSig.Store(int32(sig))
+				} else {
+					loginSig.Store(int32(syscall.SIGINT))
+				}
+				cancel()
+			case <-loginDone:
+			}
+		}()
+		cmd.Cancel = func() error {
+			if cmd.Process == nil {
+				return os.ErrProcessDone
+			}
+			sig := syscall.Signal(loginSig.Load())
+			if sig == 0 {
+				sig = syscall.SIGINT
+			}
+			return cmd.Process.Signal(sig)
+		}
+		stopLoginWatch = func() {
+			signal.Stop(loginSigCh)
+			close(loginDone)
+		}
 		login := req.Refs[req.LoginRef]
 		cmd.Stdin = io.MultiReader(
 			bytes.NewReader(login.Username.Bytes()), strings.NewReader("\n"),
@@ -686,25 +719,46 @@ func run(req *Request) (int, *Outcome) {
 	}
 
 	// The child runs in its own process group, so the terminal's SIGINT
-	// reaches only keyref. Forward an interrupt to the child's group and
-	// report 128+signal, otherwise Ctrl-C would leave the child running
-	// with the secrets in its environment (review 2026-11). The login
-	// path already has this through signal.NotifyContext above.
+	// reaches only keyref. Forward the signal keyref received to the
+	// child's group — not SIGKILL, children have cleanup to do — and
+	// escalate to SIGKILL only after a grace period or on a second
+	// signal (issue #8). Redaction failures still kill immediately:
+	// there the output must stop at once. The login path forwards
+	// through cmd.Cancel above.
 	var interrupted atomic.Int32
+	const signalGrace = 2 * time.Second
+	childExited := make(chan struct{})
 	if req.LoginRef == "" {
-		sigCh := make(chan os.Signal, 1)
+		sigCh := make(chan os.Signal, 2)
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		stopSigs := make(chan struct{})
 		go func() {
+			first := true
 			for {
 				select {
 				case s := <-sigCh:
-					if sig, ok := s.(syscall.Signal); ok {
-						interrupted.CompareAndSwap(0, int32(128+int(sig)))
-					} else {
-						interrupted.CompareAndSwap(0, 130)
+					sig, ok := s.(syscall.Signal)
+					if !ok {
+						sig = syscall.SIGINT
 					}
-					kill()
+					interrupted.CompareAndSwap(0, int32(128+int(sig)))
+					if !first {
+						kill()
+						continue
+					}
+					first = false
+					forwardSignal(cmd, sig)
+					go func() {
+						select {
+						case <-time.After(signalGrace):
+							select {
+							case <-childExited:
+							default:
+								kill()
+							}
+						case <-stopSigs:
+						}
+					}()
 				case <-stopSigs:
 					return
 				}
@@ -717,6 +771,8 @@ func run(req *Request) (int, *Outcome) {
 	}
 
 	werr := cmd.Wait()
+	stopLoginWatch()
+	close(childExited)
 
 	// The child has run from here on: record its real exit status so an
 	// audited redaction failure is not mistaken for "child never ran".

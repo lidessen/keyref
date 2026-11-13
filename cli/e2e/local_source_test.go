@@ -335,10 +335,11 @@ func TestLocalSourceSelection(t *testing.T) {
 	}
 }
 
-// TestInterruptTerminatesTheChild pins the 2026-11 fix: the child runs in
-// its own process group, so the terminal's SIGINT reaches only keyref.
-// Keyref must forward the interrupt, kill the child tree and exit with a
-// handled 130 rather than leaving an orphan that holds the injected secret.
+// TestInterruptTerminatesTheChild pins the 2026-11 fix and issue #8: the
+// child runs in its own process group, so the terminal's SIGINT reaches
+// only keyref. Keyref must forward the signal itself — not SIGKILL — so
+// the child can run its cleanup, then exit with a handled 130 rather
+// than leave an orphan that holds the injected secret.
 func TestInterruptTerminatesTheChild(t *testing.T) {
 	_, _, env := localHome(t)
 	if r := localRun(t, env, "", "init"); r.code != 0 {
@@ -350,9 +351,10 @@ func TestInterruptTerminatesTheChild(t *testing.T) {
 
 	// The long-running child is the e2e helper's sleep mode, keyed by the
 	// run's unique helper path so the process scan cannot match anything
-	// else on the machine.
+	// else on the machine. Its marker file records which signal arrived.
+	markerFile := filepath.Join(t.TempDir(), "signal.txt")
 	marker := helperBin + " sleep"
-	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30s")
+	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30s", markerFile)
 	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -361,12 +363,15 @@ func TestInterruptTerminatesTheChild(t *testing.T) {
 	}
 	defer cmd.Process.Kill()
 
-	// Wait for the child to exist: keyref installs the handler right
-	// after Start, so a running child means the handler is in place.
+	// Wait for the child's handler to be installed: it writes "ready"
+	// after signal.Notify, so the interrupt cannot race the setup.
 	deadline := time.Now().Add(10 * time.Second)
-	for !processRunning(t, marker) {
+	for {
+		if raw, err := os.ReadFile(markerFile); err == nil && string(raw) == "ready" {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the child never started; output: %s", out.String())
+			t.Fatalf("the child never installed its signal handler; output: %s", out.String())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -397,7 +402,76 @@ func TestInterruptTerminatesTheChild(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// And it must have received SIGINT, not SIGKILL: its handler ran.
+	got, err := os.ReadFile(markerFile)
+	if err != nil {
+		t.Fatalf("the child ran no signal handler: %v", err)
+	}
+	if !strings.Contains(string(got), "interrupt") {
+		t.Fatalf("the child received %q, want SIGINT", got)
+	}
 	assertNoLocalLeak(t, "interrupted exec", out.String())
+}
+
+// TestInterruptEscalatesToSIGKILL covers the rest of issue #8: a child
+// that ignores SIGINT gets SIGKILL after the grace period, and keyref
+// still exits with the handled 128+signal after the grace rather than
+// immediately.
+func TestInterruptEscalatesToSIGKILL(t *testing.T) {
+	_, _, env := localHome(t)
+	if r := localRun(t, env, "", "init"); r.code != 0 {
+		t.Fatalf("init exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env, localSecret, "set", "my-ref"); r.code != 0 {
+		t.Fatalf("set exit %d: %s", r.code, r.stderr)
+	}
+
+	marker := helperBin + " sleep"
+	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30s", "ignore")
+	cmd.Env = env
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !processRunning(t, marker) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the child never started; output: %s", out.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	sent := time.Now()
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case werr := <-done:
+		ee, ok := werr.(*exec.ExitError)
+		if !ok || ee.ExitCode() != 130 {
+			t.Fatalf("keyref exit = %v, want a handled exit 130", werr)
+		}
+		// The old handler sent SIGKILL at once; the grace period is the
+		// difference between "forwarded" and "escalated".
+		if elapsed := time.Since(sent); elapsed < 1500*time.Millisecond {
+			t.Fatalf("keyref killed the child after %v, before the grace period", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("keyref did not exit after SIGINT")
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for processRunning(t, marker) {
+		if time.Now().After(deadline) {
+			t.Fatal("the child outlived keyref")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	assertNoLocalLeak(t, "escalated exec", out.String())
 }
 
 // processRunning reports whether a process whose command line contains
