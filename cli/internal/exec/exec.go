@@ -713,6 +713,27 @@ func run(req *Request) (int, *Outcome) {
 	stdoutRed.OnFail = kill
 	stderrRed.OnFail = kill
 
+	// Register the signal handler BEFORE the spawn. A Ctrl-C that lands
+	// in the child's first instants (the e2e interrupt test sends SIGINT
+	// as soon as the child exists) must be queued in the buffered
+	// channel and forwarded once the child has started — never kill
+	// keyref itself, which is what happened when Notify came after
+	// Start (the race showed up on Linux).
+	var interrupted atomic.Int32
+	const signalGrace = 2 * time.Second
+	childExited := make(chan struct{})
+	var sigCh chan os.Signal
+	var stopSigs chan struct{}
+	if req.LoginRef == "" {
+		sigCh = make(chan os.Signal, 2)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+		stopSigs = make(chan struct{})
+		defer func() {
+			signal.Stop(sigCh)
+			close(stopSigs)
+		}()
+	}
+
 	if serr := cmd.Start(); serr != nil {
 		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %s\n", redactStartError(secrets, serr))
 		return deny(18, "cannot-start")
@@ -725,13 +746,7 @@ func run(req *Request) (int, *Outcome) {
 	// signal (issue #8). Redaction failures still kill immediately:
 	// there the output must stop at once. The login path forwards
 	// through cmd.Cancel above.
-	var interrupted atomic.Int32
-	const signalGrace = 2 * time.Second
-	childExited := make(chan struct{})
 	if req.LoginRef == "" {
-		sigCh := make(chan os.Signal, 2)
-		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-		stopSigs := make(chan struct{})
 		go func() {
 			first := true
 			for {
@@ -763,10 +778,6 @@ func run(req *Request) (int, *Outcome) {
 					return
 				}
 			}
-		}()
-		defer func() {
-			signal.Stop(sigCh)
-			close(stopSigs)
 		}()
 	}
 

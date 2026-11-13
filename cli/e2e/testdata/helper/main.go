@@ -44,27 +44,30 @@ func main() {
 	if len(os.Args) >= 3 && os.Args[1] == "sleep" {
 		// A long-running child for the interrupt tests: copies of system
 		// binaries are killed by macOS code signing, so the fixture
-		// sleeps on its own. An optional marker file records that a
-		// signal handler ran (issue #8: the signal must arrive, not
-		// SIGKILL), or "ignore" makes the child ignore SIGINT so the
-		// caller's SIGKILL escalation can be observed.
+		// sleeps on its own. The optional marker file proves the handler
+		// (or the deliberate ignore) is installed before the test sends
+		// a signal; issue #8 requires the signal to arrive, not SIGKILL.
+		//   sleep <dur> <marker>          install handlers, then "ready"
+		//   sleep <dur> ignore <marker>   ignore SIGINT, then "ignored"
 		d, err := time.ParseDuration(os.Args[2])
 		if err != nil {
 			os.Exit(31)
 		}
 		if len(os.Args) >= 4 {
-			switch marker := os.Args[3]; marker {
-			case "ignore":
+			if os.Args[3] == "ignore" {
 				signal.Ignore(os.Interrupt)
-			default:
+				if len(os.Args) >= 5 {
+					_ = os.WriteFile(os.Args[4], []byte("ignored"), 0o600)
+				}
+			} else {
 				sigCh := make(chan os.Signal, 1)
 				signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 				// "ready" tells the test the handler is installed, so
 				// its signal cannot race the Notify call.
-				_ = os.WriteFile(marker, []byte("ready"), 0o600)
+				_ = os.WriteFile(os.Args[3], []byte("ready"), 0o600)
 				go func() {
 					s := <-sigCh
-					_ = os.WriteFile(marker, []byte(s.String()), 0o600)
+					_ = os.WriteFile(os.Args[3], []byte(s.String()), 0o600)
 					os.Exit(0)
 				}()
 			}

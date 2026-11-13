@@ -427,7 +427,8 @@ func TestInterruptEscalatesToSIGKILL(t *testing.T) {
 	}
 
 	marker := helperBin + " sleep"
-	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30s", "ignore")
+	markerFile := filepath.Join(t.TempDir(), "ignoring")
+	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30s", "ignore", markerFile)
 	cmd.Env = env
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -436,8 +437,15 @@ func TestInterruptEscalatesToSIGKILL(t *testing.T) {
 	}
 	defer cmd.Process.Kill()
 
+	// Wait for the child itself to prove it is ignoring SIGINT. pgrep
+	// would match keyref's own argv here — the child's path and "sleep"
+	// are both in keyref's command line — and an interrupt sent before
+	// keyref reaches its signal handler kills keyref on Linux.
 	deadline := time.Now().Add(10 * time.Second)
-	for !processRunning(t, marker) {
+	for {
+		if _, err := os.Stat(markerFile); err == nil {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the child never started; output: %s", out.String())
 		}

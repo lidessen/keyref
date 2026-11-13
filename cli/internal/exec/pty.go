@@ -89,6 +89,7 @@ func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map
 
 	master, slave, err := openPty()
 	if err != nil {
+		fmt.Fprintf(req.Stderr, "keyref: cannot start child: pty: %v\n", err)
 		return deny(18, "pty")
 	}
 	defer slave.Close()

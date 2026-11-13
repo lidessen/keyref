@@ -24,7 +24,9 @@ func openPty() (master, slave *os.File, err error) {
 		m.Close()
 		return nil, nil, fmt.Errorf("pty unlock: %w", err)
 	}
-	n, err := unix.IoctlRetInt(fd, unix.TIOCGPTN)
+	// TIOCGPTN writes the pty number through a pointer; IoctlRetInt
+	// passes NULL and fails with EFAULT, so read it as a uint32.
+	n, err := unix.IoctlGetUint32(fd, unix.TIOCGPTN)
 	if err != nil {
 		m.Close()
 		return nil, nil, fmt.Errorf("pty number: %w", err)
