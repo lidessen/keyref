@@ -370,61 +370,125 @@ func TestRevokedCLIBootstrapTombstones(t *testing.T) {
 	}
 }
 
-// TestDirectoryReviveRevokedCLICeiling is the second half of the device
-// ceiling regression: a signed directory may not raise the active device
-// count over the tier by reviving a revoked CLI or by minting a
-// brand-new active device row that was never paired (design §10.5, §11
-// item 6). A plain revive that stays under the ceiling stays allowed —
-// the ceiling is on the count, not on the revive.
-func TestDirectoryReviveRevokedCLICeiling(t *testing.T) {
+// TestDirectoryCLICeilingOnRevokeAndMint is the CLI half of the device
+// ceiling regression: a signed directory may not raise the active CLI
+// count over the tier by minting a brand-new active device that was
+// never paired (design §10.5, §11 item 6). Dropping a device in the same
+// update makes room, because an omitted device is revoked (v2 G).
+func TestDirectoryCLICeilingOnRevokeAndMint(t *testing.T) {
 	e := newTestEnv(t, true)
 	owner := e.createVault(t)
 	cli1 := e.registerPair(t)
 	owner.completePair(t, cli1, nil) // the free tier's single CLI slot
 	cli2 := e.registerPair(t)        // registered for pairing, never paired: no device row
 
-	// rev2 revokes cli1 — dropping below the ceiling is always allowed.
-	_, dirBytes := owner.directoryFor(t, 2, map[string]string{
+	push := func(rev uint64, statuses map[string]string) (int, []byte) {
+		t.Helper()
+		_, dirBytes := owner.directoryFor(t, rev, statuses)
+		sig, _ := wire.SignOwnerECDSA(dirBytes, owner.signKey)
+		return e.do("PUT", "/v1/directory", owner.token, wire.PutDirectoryRequest{
+			DirectoryRevision: rev, DirectorySigned: dirBytes, Signature: sig,
+		})
+	}
+
+	// rev2 mints cli2 next to cli1: two active CLIs on a one-CLI tier.
+	if s, raw := push(2, map[string]string{
+		owner.deviceID: wire.DeviceStatusActive,
+		cli1.deviceID:  wire.DeviceStatusActive,
+		cli2.deviceID:  wire.DeviceStatusActive,
+	}); s != 429 {
+		t.Fatalf("mint over CLI ceiling: want 429, got %d %s", s, raw)
+	}
+
+	// rev2 again, revoking cli1: one active CLI, so the mint fits.
+	if s, raw := push(2, map[string]string{
 		owner.deviceID: wire.DeviceStatusActive,
 		cli1.deviceID:  wire.DeviceStatusRevoked,
+		cli2.deviceID:  wire.DeviceStatusActive,
+	}); s != 200 {
+		t.Fatalf("revoke-and-mint at the ceiling: %d %s", s, raw)
+	}
+	var acct wire.AccountResponse
+	e.doOut("GET", "/v1/account", owner.token, nil, &acct)
+	if acct.Usage.DevicesActive != 2 { // the owner iPhone + the minted CLI
+		t.Fatalf("devices_active = %d, want 2", acct.Usage.DevicesActive)
+	}
+}
+
+// TestDirectoryOmissionRevokesDevice is the v2 G regression: a device
+// the signed directory does not mention is revoked even though the owner
+// never listed it as revoked. The directory is the single authority for
+// device state, so omission must not leave the old row untouched.
+func TestDirectoryOmissionRevokesDevice(t *testing.T) {
+	e := newTestEnv(t, false)
+	owner := e.createVault(t)
+	cli := e.registerPair(t)
+	owner.completePair(t, cli, nil)
+	cli.session(t)
+
+	// rev2 mentions the owner only; the paired CLI is silently dropped.
+	_, dirBytes := owner.directoryFor(t, 2, map[string]string{
+		owner.deviceID: wire.DeviceStatusActive,
 	})
 	sig, _ := wire.SignOwnerECDSA(dirBytes, owner.signKey)
 	if s, raw := e.do("PUT", "/v1/directory", owner.token, wire.PutDirectoryRequest{
 		DirectoryRevision: 2, DirectorySigned: dirBytes, Signature: sig,
 	}); s != 200 {
-		t.Fatalf("revoke directory: %d %s", s, raw)
+		t.Fatalf("omitting directory: %d %s", s, raw)
 	}
 
-	// rev3 revives cli1 AND mints cli2 as active in one directory: the
-	// projected active CLI count is 2 on a 1-CLI tier, so the update
-	// must be refused even though cli2 has no device row at all.
-	_, dirBytes = owner.directoryFor(t, 3, map[string]string{
-		owner.deviceID: wire.DeviceStatusActive,
-		cli1.deviceID:  wire.DeviceStatusActive,
-		cli2.deviceID:  wire.DeviceStatusActive,
-	})
-	sig, _ = wire.SignOwnerECDSA(dirBytes, owner.signKey)
-	if s, raw := e.do("PUT", "/v1/directory", owner.token, wire.PutDirectoryRequest{
-		DirectoryRevision: 3, DirectorySigned: dirBytes, Signature: sig,
-	}); s != 429 {
-		t.Fatalf("revive+mint over CLI ceiling: want 429, got %d %s", s, raw)
+	// Every non-sync endpoint answers device_revoked (§8.4); the session
+	// keeps sync access, which is how the revocation reaches the device.
+	if s, raw := e.do("GET", "/v1/account", cli.token, nil); s != 403 {
+		t.Fatalf("omitted CLI: want 403 device_revoked, got %d %s", s, raw)
 	}
-
-	// Reviving only cli1 stays at 1 active CLI and must succeed.
-	_, dirBytes = owner.directoryFor(t, 3, map[string]string{
-		owner.deviceID: wire.DeviceStatusActive,
-		cli1.deviceID:  wire.DeviceStatusActive,
-	})
-	sig, _ = wire.SignOwnerECDSA(dirBytes, owner.signKey)
-	if s, raw := e.do("PUT", "/v1/directory", owner.token, wire.PutDirectoryRequest{
-		DirectoryRevision: 3, DirectorySigned: dirBytes, Signature: sig,
-	}); s != 200 {
-		t.Fatalf("plain revive under the ceiling: %d %s", s, raw)
+	if s, raw := e.do("GET", "/v1/sync?cursor=0", cli.token, nil); s != 200 {
+		t.Fatalf("omitted CLI sync: want 200, got %d %s", s, raw)
 	}
 	var acct wire.AccountResponse
 	e.doOut("GET", "/v1/account", owner.token, nil, &acct)
-	if acct.Usage.DevicesActive != 2 { // the owner iPhone + the revived CLI
-		t.Fatalf("devices_active = %d, want 2", acct.Usage.DevicesActive)
+	if acct.Usage.DevicesActive != 1 {
+		t.Fatalf("devices_active = %d, want 1 after omission", acct.Usage.DevicesActive)
+	}
+}
+
+// TestDirectoryRevokeIsTerminal pins the second half of v2 G: a revoked
+// device never comes back. Re-pairing mints a fresh device id with fresh
+// keys, so a directory that lists the old id as active is a bug or a
+// replay and must be refused without consuming the revision.
+func TestDirectoryRevokeIsTerminal(t *testing.T) {
+	e := newTestEnv(t, false)
+	owner := e.createVault(t)
+	cli := e.registerPair(t)
+	owner.completePair(t, cli, nil)
+
+	push := func(rev uint64, status string) (int, []byte) {
+		t.Helper()
+		_, dirBytes := owner.directoryFor(t, rev, map[string]string{
+			owner.deviceID: wire.DeviceStatusActive,
+			cli.deviceID:   status,
+		})
+		sig, _ := wire.SignOwnerECDSA(dirBytes, owner.signKey)
+		return e.do("PUT", "/v1/directory", owner.token, wire.PutDirectoryRequest{
+			DirectoryRevision: rev, DirectorySigned: dirBytes, Signature: sig,
+		})
+	}
+
+	if s, raw := push(2, wire.DeviceStatusRevoked); s != 200 {
+		t.Fatalf("revoke directory: %d %s", s, raw)
+	}
+	if s, raw := push(3, wire.DeviceStatusActive); s != 400 {
+		t.Fatalf("revive a revoked device: want 400 invalid_field, got %d %s", s, raw)
+	}
+	// The refused update rolled back, so the same revision is still free
+	// for a directory that keeps the device revoked.
+	if s, raw := push(3, wire.DeviceStatusRevoked); s != 200 {
+		t.Fatalf("revision reusable after a refused revive: %d %s", s, raw)
+	}
+	var acct wire.AccountResponse
+	e.doOut("GET", "/v1/account", owner.token, nil, &acct)
+	if acct.Usage.DevicesActive != 1 {
+		t.Fatalf("devices_active = %d, want 1 (revoked stays revoked)", acct.Usage.DevicesActive)
 	}
 }
 

@@ -2,7 +2,14 @@
 
 本文记录一次完整 review（设计 + CLI + server + proto + iOS + Android）之后的状态：已经修了什么、哪些经过验证、还剩什么、按什么顺序做。协议层的变更方案单独写在 [protocol-v2.md](protocol-v2.md)。
 
-分支：`claude/adoring-euler-2yzqeu`。
+分支：`claude/adoring-euler-2yzqeu`（已并入 `main`）。
+
+## 0. 进展（2026-11-13，macOS）
+
+第 5 节的前两步已完成：
+
+- **第 1 步（验证）通过。** `TestStageFdFileUnlinksImmediately` 与 e2e 的 `TestPtyReplyFlow` 在本机通过（第 2 节的两个失败确认为沙箱环境所致）。`d7c3d6b` 的 iOS 改动在 macOS 上编译通过，`KeyrefCoreTests` 119 个用例全绿，含三条新回归；整个 `Keyref` scheme 也全绿。
+- **第 2 步（v2 G）已实现。** 见 [protocol-v2.md](protocol-v2.md) §G 与 protocol.md §6.3/§6.15：目录是设备行的唯一真相来源，省略即撤销，`revoked` 终态，设备上限按目录记录投影。测试：`server/internal/store/directory_test.go`（新增）、`server/internal/api/regress_test.go`。
 
 ## 1. 已经提交的修复
 

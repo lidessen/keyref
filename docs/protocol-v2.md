@@ -122,9 +122,11 @@ H(vault_wrapped_item_key) NUL writer_device_id
 
 ## G. 服务器：设备行由签名目录派生
 
+**已实现**（server + protocol.md §6.3/§6.15），测试见 `server/internal/api/regress_test.go` 与 `server/internal/store/directory_test.go`。
+
 - `PUT /v1/directory`（以及恢复接管）时，该 vault 里**不在新目录中**的设备行一律置为 `revoked`。
 - `revoked` 是终态：已保存为 `revoked` 的设备，如果新目录把它列为其他状态，返回 `invalid_field`。
-- `server/internal/api/regress_test.go`（约 293 行）目前断言的是旧行为（被省略的设备仍为 active），需要改为新规则。
+- 计划设备上限按新目录的记录投影计算，被省略的行不再计入。
 
 修掉的问题：签名目录和 `devices` 表是两个真相来源，「省略」不等于撤销，被省略的 owner 设备仍保有除签目录外的全部 owner 权限。
 

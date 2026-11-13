@@ -444,7 +444,7 @@ policy_json(utf-8)
 }
 ```
 
-服务器用存储的 `recovery_sign_pub` 验 `recovery_signature`、用誊本内新 owner 公钥自洽验证 `owner_signature`，落库并追加 `directory:` 变更；旧设备会话立即失效。响应即新 owner 会话（形状同 §6.7 第二步）：
+服务器用存储的 `recovery_sign_pub` 验 `recovery_signature`、用誊本内新 owner 公钥自洽验证 `owner_signature`，落库并追加 `directory:` 变更；旧设备会话立即失效。接管目录同样按 §6.15 的三条规则生效：没列出的设备一律置为 `revoked`，列出 `revoked` 设备的其他状态返回 `400 invalid_field`。响应即新 owner 会话（形状同 §6.7 第二步）：
 
 ```json
 { "token": "<64 hex>", "expires_at": 1790000000000,
@@ -532,6 +532,12 @@ digest 与目录不符时 CLI 停用授予并提示（design §9.1/§10.6）。
 ### 6.15 `PUT /v1/directory`（owner）
 
 `{"directory_revision":8,"directory_signed":"<b64 §3.3 誊本>","signature":"<b64>"}` → `200 {"directory_revision":8}`。要求 revision 严格递增；签名用**上一版目录内**的 owner 公钥验证。撤销设备后其会话立即按 §8.4 送达语义收缩。
+
+誊本是该库里**设备行的唯一真相来源**：
+
+- 目录里没列出的设备行，在同一次写入里一律置为 `revoked`（「省略即撤销」）。
+- `revoked` 是终态：已存为 `revoked` 的设备，新目录如果把它的状态写成别的值，返回 `400 invalid_field`，整次写入回滚，revision 不被消耗。重新配对会生成新的 `device_id` 和密钥。
+- 计划设备上限按新目录投影计算：目录里 `active` 的记录数，被省略的行一律不计入。
 
 ### 6.16 `POST /v1/pair/register`（CLI，无鉴权）
 

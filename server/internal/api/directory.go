@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"log"
 	"net/http"
 
@@ -82,17 +83,14 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 
 	// Plan device ceilings apply to directory updates too (design §10.5,
 	// §11 item 6): a directory may not raise the active device count
-	// above the tier, including by reviving a revoked device.
+	// above the tier by minting a device that was never paired. The
+	// directory is the whole device set (omission revokes, v2 G), so the
+	// records alone project the post-update count.
 	if s.cfg.EnforceQuotas {
 		plan := quotas.EffectivePlan(ac.vault, s.cfg.Now().UnixMilli())
 		if plan != quotas.PlanUnlimited {
 			limits := s.quota.LimitsFor(plan)
-			ios, cli, err := s.st.CountActiveDevicesAfterDirectory(r.Context(), ac.vault.ID, parsed.Devices)
-			if err != nil {
-				log.Printf("api: directory device count: %v", err)
-				writeError(w, "internal")
-				return
-			}
+			ios, cli := store.DirectoryDeviceCounts(parsed.Devices)
 			if (limits.DevicesIOS != nil && ios > *limits.DevicesIOS) ||
 				(limits.DevicesCLI != nil && cli > *limits.DevicesCLI) {
 				writeError(w, "quota_exceeded")
@@ -106,6 +104,10 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 		parsed.Devices, s.cfg.Now().UnixMilli()); err != nil {
 		if err == store.ErrRevisionConflict {
 			writeError(w, "revision_conflict") // lost a concurrent update race
+			return
+		}
+		if errors.Is(err, store.ErrDeviceRevoked) {
+			writeError(w, "invalid_field") // revoked is terminal (v2 G)
 			return
 		}
 		log.Printf("api: directory update: %v", err)

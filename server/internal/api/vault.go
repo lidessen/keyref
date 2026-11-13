@@ -298,6 +298,10 @@ func (s *Server) handleRecoveryTakeover(w http.ResponseWriter, r *http.Request) 
 			writeError(w, "revision_conflict") // lost a concurrent takeover race
 			return
 		}
+		if errors.Is(err, store.ErrDeviceRevoked) {
+			writeError(w, "invalid_field") // revoked is terminal (v2 G)
+			return
+		}
 		writeError(w, "internal")
 		return
 	}

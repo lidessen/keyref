@@ -29,6 +29,13 @@ var ErrRevisionConflict = errors.New("store: revision conflict")
 // indistinguishable to the client (protocol §6.18).
 var ErrPairConsumed = errors.New("store: pair session already consumed")
 
+// ErrDeviceRevoked is returned by directory writes that try to move a
+// device out of the revoked status. Revocation is terminal (protocol
+// v2 G): a re-paired device gets a fresh device id and keys, so a
+// directory that revives an old id can only be a mistake or an attack.
+// Callers map it to invalid_field.
+var ErrDeviceRevoked = errors.New("store: device is revoked")
+
 // WithTx runs fn inside one transaction. Composed operations below build
 // on it so that row writes and change-log appends commit atomically
 // (design §6.3: a grant write and its synthetic item change must land
@@ -130,6 +137,11 @@ func (s *Store) UpdateVaultDirectory(ctx context.Context, vaultID string, revisi
 				revoked = append(revoked, rec.DeviceID)
 			}
 		}
+		omitted, err := txRevokeOmittedDevices(ctx, tx, vaultID, records, now)
+		if err != nil {
+			return err
+		}
+		revoked = append(revoked, omitted...)
 		eid, err := wire.EntityIDDirectory(vaultID)
 		if err != nil {
 			return err
@@ -167,6 +179,12 @@ func (s *Store) TakeoverDirectory(ctx context.Context, vaultID string, revision 
 			if _, err := txUpsertDeviceFromDirectory(ctx, tx, vaultID, rec, now); err != nil {
 				return err
 			}
+		}
+		// Recovery takeover re-anchors the vault on the new owner: devices
+		// the takeover directory leaves out are revoked too (protocol v2 G,
+		// design §6.3).
+		if _, err := txRevokeOmittedDevices(ctx, tx, vaultID, records, now); err != nil {
+			return err
 		}
 		if err := txDeleteSessionsByVault(ctx, tx, vaultID); err != nil {
 			return err
@@ -311,46 +329,25 @@ func (s *Store) CountActiveDevices(ctx context.Context, vaultID, kind string) (i
 	return n, nil
 }
 
-// CountActiveDevicesAfterDirectory projects a candidate directory onto
-// the devices table and returns the resulting active device counts per
-// kind ("ios", "cli"): records override row statuses, table rows not
-// mentioned keep theirs. Used by PUT /v1/directory to enforce plan
-// device ceilings (design §10.5).
-func (s *Store) CountActiveDevicesAfterDirectory(ctx context.Context, vaultID string, records []wire.DirectoryDevice) (ios, cli int64, err error) {
-	inDirectory := map[string]bool{}
+// DirectoryDeviceCounts returns the active device counts per kind
+// ("ios", "cli") a candidate directory would produce. The directory
+// alone decides: the records are the whole device set, and a row the
+// directory omits is revoked by the same update (protocol v2 G), so it
+// contributes nothing. Used by PUT /v1/directory to enforce plan device
+// ceilings (design §10.5).
+func DirectoryDeviceCounts(records []wire.DirectoryDevice) (ios, cli int64) {
 	for _, rec := range records {
-		if rec.Status == wire.DeviceStatusActive {
-			switch rec.Kind {
-			case wire.DeviceKindIOS:
-				ios++
-			case wire.DeviceKindCLI:
-				cli++
-			}
+		if rec.Status != wire.DeviceStatusActive {
+			continue
 		}
-		inDirectory[rec.DeviceID] = true
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT device_id, kind FROM devices WHERE vault_id = ? AND status = 'active'`, vaultID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("store: count devices after directory: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var deviceID, kind string
-		if err := rows.Scan(&deviceID, &kind); err != nil {
-			return 0, 0, fmt.Errorf("store: scan device: %w", err)
-		}
-		if inDirectory[deviceID] {
-			continue // already counted via its record
-		}
-		switch kind {
+		switch rec.Kind {
 		case wire.DeviceKindIOS:
 			ios++
 		case wire.DeviceKindCLI:
 			cli++
 		}
 	}
-	return ios, cli, rows.Err()
+	return ios, cli
 }
 
 func txInsertDevice(ctx context.Context, tx *sql.Tx, d *Device) error {
@@ -368,7 +365,24 @@ func txInsertDevice(ctx context.Context, tx *sql.Tx, d *Device) error {
 // txUpsertDeviceFromDirectory mirrors one directory record into the
 // devices table. Returns true when the record transitioned the device to
 // revoked (sessions of such devices are killed by the caller).
+//
+// Revocation is terminal (protocol v2 G): a stored revoked row is never
+// brought back, because the signed directory is the single source of
+// truth for device state and a revived id would contradict the keys the
+// owner already rotated away from.
 func txUpsertDeviceFromDirectory(ctx context.Context, tx *sql.Tx, vaultID string, rec wire.DirectoryDevice, now int64) (bool, error) {
+	if rec.Status != wire.DeviceStatusRevoked {
+		var stored string
+		err := tx.QueryRowContext(ctx,
+			`SELECT status FROM devices WHERE device_id = ? AND vault_id = ?`,
+			rec.DeviceID, vaultID).Scan(&stored)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("store: read device status: %w", err)
+		}
+		if err == nil && stored == wire.DeviceStatusRevoked {
+			return false, ErrDeviceRevoked
+		}
+	}
 	var revokedAt any
 	if rec.Status == wire.DeviceStatusRevoked {
 		revokedAt = now
@@ -397,6 +411,48 @@ WHERE device_id = ? AND vault_id = ?`,
 		return false, fmt.Errorf("store: insert device from directory: %w", err)
 	}
 	return rec.Status == wire.DeviceStatusRevoked, nil
+}
+
+// txRevokeOmittedDevices revokes every device row the new directory does
+// not mention (protocol v2 G). Omission is revocation: the signed
+// directory is the only authority for device state, so a device the
+// owner left out must not keep the row-level permissions the directory
+// no longer grants it. Already-revoked rows are left untouched (they are
+// terminal), and returns the ids this call transitioned.
+func txRevokeOmittedDevices(ctx context.Context, tx *sql.Tx, vaultID string, records []wire.DirectoryDevice, now int64) ([]string, error) {
+	listed := make(map[string]bool, len(records))
+	for _, rec := range records {
+		listed[rec.DeviceID] = true
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT device_id FROM devices WHERE vault_id = ? AND status != 'revoked'`, vaultID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list devices to revoke: %w", err)
+	}
+	var omitted []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("store: scan device to revoke: %w", err)
+		}
+		if !listed[id] {
+			omitted = append(omitted, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("store: list devices to revoke: %w", err)
+	}
+	rows.Close()
+	for _, id := range omitted {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE devices SET status = ?, revoked_at = ? WHERE device_id = ? AND vault_id = ?`,
+			wire.DeviceStatusRevoked, now, id, vaultID); err != nil {
+			return nil, fmt.Errorf("store: revoke omitted device: %w", err)
+		}
+	}
+	return omitted, nil
 }
 
 // SetPushToken stores (overwriting) the APNs push token of one device
