@@ -142,6 +142,26 @@ public final class SyncEngine: Sendable {
     private func applyItem(_ row: ItemData, store: SyncStateStore) throws -> ChangeResult {
         let vaultID = try vaultIDOf(store)
         if row.tombstone {
+            // The owner signs the §3.1 transcript with four zero-length
+            // ciphertext fields (ItemCrypto.signTombstone); the server keeps
+            // writer_device_id and signature on tombstone rows, so rebuild
+            // and verify before deleting anything.
+            // Only a tombstone that would actually delete a local row is
+            // checked: tombstones signed by a previous owner key (before a
+            // recovery takeover) still arrive on bootstrap and must not
+            // abort the sync when there is nothing to delete.
+            if let ownerKey = try store.pinnedOwnerKey(), !ownerKey.isEmpty,
+               try store.item(row.itemID) != nil {
+                do {
+                    let t = ItemTranscript.tombstone(vaultID: vaultID, itemID: row.itemID,
+                                                     revision: row.revision,
+                                                     writerDeviceID: row.writerDeviceID)
+                    try verifyOwnerSignature(transcript: try t.buildBytes(), signature: row.signature,
+                                             ownerSignPublicKey: ownerKey)
+                } catch {
+                    throw SyncError.tampered("item \(row.itemID) tombstone signature")
+                }
+            }
             try store.deleteItem(row.itemID)  // drops grants and cached wraps
             return .deleted
         }
@@ -210,6 +230,11 @@ public final class SyncEngine: Sendable {
                                      ownerSignPublicKey: ownerKey)
         } catch {
             throw SyncError.tampered("directory signature")
+        }
+        // A validly signed but older (or equal) directory must not replace
+        // a newer one: skip it, like stale item revisions.
+        if let stored = try store.directory(), stored.directoryRevision >= row.directoryRevision {
+            return false
         }
         try store.storeDirectory(row)
         if let own = try store.ownDeviceID(),

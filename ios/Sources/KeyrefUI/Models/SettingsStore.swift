@@ -103,6 +103,9 @@ public final class SettingsStore {
         self.backend = backend
         self.haptics = haptics
         self.autoLock = autoLock
+        // 持久化的开关值在启动时推给 backend（backend 默认 true）——否则
+        // 重启后开关为关，快照仍会上传。AppModel 在任何上传之前构造本对象。
+        backend.setCloudBackupEnabled(cloudBackupOn)
     }
 
     public var originDisplay: String { backend.origin.absoluteString }

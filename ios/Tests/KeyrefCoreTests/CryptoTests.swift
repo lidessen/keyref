@@ -167,6 +167,45 @@ final class CryptoTests: XCTestCase {
                                                     owner: owner, ownerDeviceID: ownerDev))
     }
 
+    // Multi-owner envelope (§6.23): the body follows ALL wraps, so every
+    // recipient — not only the last — must be able to open it.
+    func testAuditEnvelopeTwoRecipientsBothOpen() throws {
+        let ownerA = try OwnerKeys.generate(preferEnclave: false)
+        let ownerB = try OwnerKeys.generate(preferEnclave: false)
+        let devA = ownerDev
+        let devB = "11112222333344445555666677778888"
+        let event = AuditEventPayload(time: 1790000000000, deviceID: cliDev, refs: ["openai-prod"],
+                                      injection: ["env"], argv: ["curl"],
+                                      allowArgv: false, policyResult: "allow",
+                                      childExit: 0, redactions: 1)
+        let eventKey = randomKey()
+        let aad = try auditAAD(vaultID: vaultID, deviceID: cliDev)
+        let blob = try BlobCrypto.sealBlob(key: eventKey, aad: aad,
+                                           plaintext: try WireJSON.encoder.encode(event))
+        var envelope = Data([2])  // wrap_count
+        for (dev, keys) in [(devA, ownerA), (devB, ownerB)] {
+            let info = try hpkeInfo(purpose: KeyrefPurpose.auditEventKey, vaultID: vaultID,
+                                    recipientDeviceID: dev)
+            let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: AuditEnvelope.kemOf(keys.kemPublicKey),
+                                                   recipientPublicKey: keys.kemPublicKey,
+                                                   info: info, plaintext: eventKey)
+            var lenBytes = Data()
+            KeyrefEncoding.appendU64BE(UInt64(enc.count), to: &lenBytes)
+            envelope.append(contentsOf: lenBytes.suffix(2))
+            envelope.append(enc)
+            envelope.append(ct)
+        }
+        envelope.append(blob)
+        let openedA = try AuditEnvelope.open(envelope: envelope, vaultID: vaultID,
+                                             reportingDeviceID: cliDev,
+                                             owner: ownerA, ownerDeviceID: devA)
+        XCTAssertEqual(openedA, event)
+        let openedB = try AuditEnvelope.open(envelope: envelope, vaultID: vaultID,
+                                             reportingDeviceID: cliDev,
+                                             owner: ownerB, ownerDeviceID: devB)
+        XCTAssertEqual(openedB, event)
+    }
+
     // decision_device_id is OPTIONAL (protocol §6.22, design v0.8 §14.5):
     // audit payloads sealed before the field existed must still decode,
     // and payloads carrying it must expose it.
