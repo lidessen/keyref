@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -36,6 +37,17 @@ func main() {
 		}
 		// The test captures the echo only through Keyref's redactors.
 		_, _ = os.Stdout.Write(input)
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "sleep" {
+		// A long-running child for the interrupt test: copies of system
+		// binaries are killed by macOS code signing, so the fixture
+		// sleeps on its own.
+		d, err := time.ParseDuration(os.Args[2])
+		if err != nil {
+			os.Exit(31)
+		}
+		time.Sleep(d)
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "prompt" {

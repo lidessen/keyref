@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // The local source: one command surface over an offline vault. No
@@ -329,4 +331,76 @@ func TestLocalSourceSelection(t *testing.T) {
 	if _, err := os.Stat(other); err != nil {
 		t.Fatalf("removing a source deleted its vault file: %v", err)
 	}
+}
+
+// TestInterruptTerminatesTheChild pins the 2026-11 fix: the child runs in
+// its own process group, so the terminal's SIGINT reaches only keyref.
+// Keyref must forward the interrupt, kill the child tree and exit with a
+// handled 130 rather than leaving an orphan that holds the injected secret.
+func TestInterruptTerminatesTheChild(t *testing.T) {
+	_, _, env := localHome(t)
+	if r := localRun(t, env, "", "init"); r.code != 0 {
+		t.Fatalf("init exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env, localSecret, "set", "my-ref"); r.code != 0 {
+		t.Fatalf("set exit %d: %s", r.code, r.stderr)
+	}
+
+	// The long-running child is the e2e helper's sleep mode, keyed by the
+	// run's unique helper path so the process scan cannot match anything
+	// else on the machine.
+	marker := helperBin + " sleep"
+	cmd := exec.Command(cliBin, "exec", "--env", "KEY=my-ref", "--", helperBin, "sleep", "30")
+	cmd.Env = env
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+
+	// Wait for the child to exist: keyref installs the handler right
+	// after Start, so a running child means the handler is in place.
+	deadline := time.Now().Add(10 * time.Second)
+	for !processRunning(t, marker) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the child never started; output: %s", out.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case werr := <-done:
+		ee, ok := werr.(*exec.ExitError)
+		if !ok || ee.ExitCode() != 130 {
+			t.Fatalf("keyref exit = %v, want a handled exit 130", werr)
+		}
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			t.Fatal("keyref died from the signal instead of handling it")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("keyref did not exit after SIGINT")
+	}
+
+	// The child must be gone too: no orphan holding the injected secret.
+	deadline = time.Now().Add(3 * time.Second)
+	for processRunning(t, marker) {
+		if time.Now().After(deadline) {
+			t.Fatal("the child outlived keyref")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	assertNoLocalLeak(t, "interrupted exec", out.String())
+}
+
+// processRunning reports whether a process whose command line contains
+// name exists (pgrep matches the full argv).
+func processRunning(t *testing.T, name string) bool {
+	t.Helper()
+	return exec.Command("pgrep", "-f", name).Run() == nil
 }

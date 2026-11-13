@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -635,7 +636,9 @@ func run(req *Request) (int, *Outcome) {
 			return deny(18, "stdin-setup")
 		}
 		defer stdinPipe.Close()
+		stdinDone := make(chan struct{})
 		go func(ref string) {
+			defer close(stdinDone)
 			v := req.Refs[ref].Value.Bytes()
 			_, _ = stdinPipe.Write(v)
 			if len(v) == 0 || v[len(v)-1] != '\n' {
@@ -643,6 +646,17 @@ func run(req *Request) (int, *Outcome) {
 			}
 			_ = stdinPipe.Close()
 		}(req.StdinRef)
+		// The guarded value this goroutine reads is destroyed when Run
+		// returns; wait for the write to finish first (review 2026-11:
+		// the writer raced Value.Destroy). The child has already exited
+		// here, so a blocked write fails promptly with EPIPE; the timeout
+		// is only a backstop.
+		defer func() {
+			select {
+			case <-stdinDone:
+			case <-time.After(2 * time.Second):
+			}
+		}()
 	}
 	kill := func() {
 		if cmd.Process != nil {
@@ -658,6 +672,37 @@ func run(req *Request) (int, *Outcome) {
 	if serr := cmd.Start(); serr != nil {
 		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %s\n", redactStartError(secrets, serr))
 		return deny(18, "cannot-start")
+	}
+
+	// The child runs in its own process group, so the terminal's SIGINT
+	// reaches only keyref. Forward an interrupt to the child's group and
+	// report 128+signal, otherwise Ctrl-C would leave the child running
+	// with the secrets in its environment (review 2026-11). The login
+	// path already has this through signal.NotifyContext above.
+	var interrupted atomic.Int32
+	if req.LoginRef == "" {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+		stopSigs := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case s := <-sigCh:
+					if sig, ok := s.(syscall.Signal); ok {
+						interrupted.CompareAndSwap(0, int32(128+int(sig)))
+					} else {
+						interrupted.CompareAndSwap(0, 130)
+					}
+					kill()
+				case <-stopSigs:
+					return
+				}
+			}
+		}()
+		defer func() {
+			signal.Stop(sigCh)
+			close(stopSigs)
+		}()
 	}
 
 	werr := cmd.Wait()
@@ -688,6 +733,10 @@ func run(req *Request) (int, *Outcome) {
 
 	outcome.Redactions = stdoutRed.Count() + stderrRed.Count()
 	outcome.PolicyState = "allow"
+	if code := interrupted.Load(); code != 0 {
+		fmt.Fprintln(req.Stderr, "keyref: interrupted; the child was terminated")
+		return int(code), outcome
+	}
 	return childExit, outcome
 }
 
