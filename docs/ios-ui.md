@@ -10,7 +10,7 @@
 2. **「旧手机扫新手机」配对：已交付。** 第二台 iPhone 在线配对落地（SecondDeviceFlowModel.swift、KeyrefCore/SecondDevice/OwnerPairing.swift），不再只有恢复码接管一条路；恢复码接管（§8.5、§9.4）仍是兜底。
 3. **Plus 内购入口：仍然没有。** 内购需要 Apple 开发者凭据，另行接入（ios/README.md）。内购上线前托管只有免费档（§10.5），超额页只给出路（删除、自托管），不给升级按钮。
 
-另注：条目编辑的敏感级别仍固定「标准」、不提供 approval 档位（ItemViews.swift 策略区注释与 §2.6 一致）；`allowCommands` / `allowedHosts` 的精细编辑（命令搜索、覆盖默认拒绝的红色警示卡）已交付，§2.6 相应更新。自 protocol v2 H 起，「拒绝 shell 与解释器」开关（`commandPolicy`）真正被 CLI 读取：已配对库上关掉它（`allow-all`）是不为条目设置 `allowCommands` 的唯一方式；approval 档位与存储类别仍是同一个轴，拆成两轴需要改界面（protocol-v2.md §I 的后续项）。
+另注：条目编辑的敏感级别仍固定「标准」、不提供 approval 档位（ItemViews.swift 策略区注释与 §2.6 一致）；`allowCommands` / `allowedHosts` 的精细编辑（命令搜索、覆盖默认拒绝的红色警示卡）已交付，§2.6 相应更新。自协议 v2 H 起，「拒绝 shell 与解释器」开关（`commandPolicy`）真正被 CLI 读取：已配对库上关掉它（`allow-all`）是不为条目设置 `allowCommands` 的唯一方式；approval 档位与存储类别仍是同一个轴，拆成两轴需要改界面（design §15 的开放问题）。
 
 文案约定：界面与本地通知文案一律简体中文；代码标识保持英文——`ref`、`VMK`、`Face ID`、`allowArgv`、`{{keyref:openai-prod}}`。服务器错误码（`quota_exceeded` 等）原样展示并配一句中文解释。CLI 的机器可读输出是英文，那是 §12.2 的规定，不在本文件范围。文中「文案」栏给出的字符串就是最终文案，不是占位句。
 

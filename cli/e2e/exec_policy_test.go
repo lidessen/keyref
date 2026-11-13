@@ -9,7 +9,7 @@ import (
 	"github.com/lidessen/keyref/proto/wire"
 )
 
-// The protocol-v2 H/I additions (docs/protocol-v2.md §H, §I), end to
+// The protocol-v2 H/I additions (design.md §7.3, §6.6), end to
 // end against the real server and CLI:
 //
 //   - H: a paired-vault item must name its commands. An empty

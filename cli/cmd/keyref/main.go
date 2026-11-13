@@ -37,7 +37,7 @@ import (
 
 func main() {
 	// Rows skipped by the v2 F verification surface on stderr without
-	// failing the sync (docs/protocol-v2.md §F).
+	// failing the sync (protocol.md §8.3).
 	syncing.Warn = os.Stderr
 	// Purge runs on every path out of protectedMain — normal returns
 	// AND panic unwinding — and always BEFORE os.Exit, which would

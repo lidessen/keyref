@@ -148,7 +148,7 @@ These come from `docs/design.md` §16 — read that section before changing secu
 - A paired item names the commands it may run: `allowCommands` empty means no command at all (exit 10) unless `commandPolicy = allow-all` (v2 H). The built-in deny list is a local-source slip guard, never a security boundary.
 - Approval is required when the meta says `sensitivity = approval` **or** the device holds no valid `use` grant (v2 I); the meta can only tighten that, and the row — not the meta — decides whether the decision carries the secret value or a one-time item key.
 - No `system()` / `sh -c`; the child is spawned directly.
-- Local-only items (storage class from design v0.7) never upload their secret ciphertext.
+- Local-only items (storage class from design v0.7) never upload their secret ciphertext to the keyref server. The iCloud snapshot and the second-device handover QR carry the ciphertext by design — that is not this invariant's business.
 - `sms:<message_id>` is not resolvable by `list`/`get` — it appears only in an approval-gated `exec`.
 
 ## Language and output conventions

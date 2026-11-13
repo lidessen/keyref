@@ -12,7 +12,7 @@ import (
 )
 
 // Warn receives one line per row skipped by the v2 F verification
-// (docs/protocol-v2.md §F). It is nil by default; main points it at
+// (protocol.md §8.3). It is nil by default; main points it at
 // stderr so the skip is visible without failing the sync.
 var Warn io.Writer
 

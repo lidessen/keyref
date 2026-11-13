@@ -2,6 +2,8 @@
 
 状态：v1.2，对应 design.md v0.8。本文是唯一的线格式依据：并行的 Go 服务器实现者与 Go CLI 实现者都只按本文写字节。design.md 讲「为什么」，本文讲「精确是什么」。两者冲突时，以本文对线格式的拍板为准，并把差异登记在第 12 节。
 
+本文包含 2026-11 协议 v2 破坏性变更批次的全部内容（原变更规格 protocol-v2.md，已逐节并入后删除）：标注「v2 X」的段落属于该批次，不兼容旧客户端（没有存量部署需要兼容）。
+
 日期：2026-11-02（v1.2 修订：随 design v0.8 新增短信验证码采集——`source`/`decider` 设备种类、消息端点与信封、审批 subject 扩展、委托策略誊本、§5.28–§5.32；v1.1 2026-10-27 补推送令牌端点；初版 2026-10-24）。实现语言：Go（design §12.2，v0.4 起 CLI 与服务器同为 Go）。
 
 ---
@@ -33,6 +35,8 @@
 | --- | --- | --- |
 | `invalid_json` | 400 | 正文不是合法 JSON |
 | `invalid_field` | 400 | 字段缺失、类型错、未知字段、hex/base64 不合法、`ref` 类字段越界 |
+| `local_item_grant_conflict` | 400 | 仅本机条目（无 `secret_ciphertext`）被建/续 `use` 授予，或带 `use` 授权的条目改为本地（§6.10、§6.12） |
+| `invalid_receiver_role` | 400 | 目录 `receiver_role` 非法：非 `0x00` 角色出现在非 ios 设备上，或同一库出现第二条 `0x01` 主接收端（§3.3） |
 | `unauthorized` | 401 | 无/坏 token；session 第二步签名不通过；未知设备 |
 | `pow_required` | 401 | 托管上创建保险库缺工作量证明（响应附 `challenge`，见 §10.1） |
 | `delete_challenge_required` | 401 | 删除保险库第一步（响应附 `challenge`，见 §7.2.5） |
@@ -493,13 +497,13 @@ pairing_mac = HMAC-SHA256(key = c,
 {
   "vault_id": "…",
   "directory_revision": 8,
-  "directory_signed": "<b64：旧设备全部 revoked、新 owner active 的新目录誊本>",
+  "directory_signed": "<b64：接管后的新目录誊本>",
   "recovery_signature": "<b64 Ed25519，用恢复码派生私钥>",
   "owner_signature": "<b64 ECDSA ASN.1，新 owner>"
 }
 ```
 
-服务器用存储的 `recovery_sign_pub` 验 `recovery_signature`、用誊本内新 owner 公钥自洽验证 `owner_signature`，落库并追加 `directory:` 变更；旧设备会话立即失效。接管目录同样按 §6.15 的三条规则生效：没列出的设备一律置为 `revoked`，列出 `revoked` 设备的其他状态返回 `400 invalid_field`。响应即新 owner 会话（形状同 §6.7 第二步）：
+服务器用存储的 `recovery_sign_pub` 验 `recovery_signature`、用誊本内新 owner 公钥自洽验证 `owner_signature`，落库并追加 `directory:` 变更；旧设备会话立即失效。接管目录同样按 §6.15 的三条规则生效：没列出的设备一律置为 `revoked`，列出 `revoked` 设备的其他状态返回 `400 invalid_field`。**服务器不检查「旧设备是否都写成了 revoked」**——它只按目录应用；把旧设备写成 revoked 是构造接管目录的客户端（iOS）的责任。响应即新 owner 会话（形状同 §6.7 第二步）：
 
 ```json
 { "token": "<64 hex>", "expires_at": 1790000000000,
@@ -532,13 +536,13 @@ pairing_mac = HMAC-SHA256(key = c,
   "origin": "https://sync.example", "plan": "unlimited", "limits": { …同 §6.3… } }
 ```
 
-令牌 12 小时有效，续期即重新走两步。数据库只存 `token_hash = hex(SHA-256(token 原始 32 字节))`。错误：`unauthorized`、`device_revoked`（revoked 设备不发新令牌）、`rate_limited`。
+令牌 12 小时有效，续期即重新走两步。数据库只存 `token_hash = hex(SHA-256(token 原始 32 字节))`。错误：`unauthorized`、`device_revoked`（revoked 设备不发新令牌）。（`/v1/session` 本身没有限流——挑战与令牌都不占配额；这是已知残余，见 design §15。）
 
 ### 6.8 `GET /v1/sync?cursor=<int>` — 增量同步（§8 详述）
 
 ### 6.9 `GET /v1/items/:item_id` — 按需单条
 
-响应行 = §8.3 的 item `data` 对象，按调用者身份过滤（owner 全量；CLI 有 view 授予给 `meta_ciphertext`，有 use 授予再给 `secret_ciphertext`；`vault_wrapped_*` 只给 owner）。四个 `*_digest` 字段始终在场，按落库的行计算（v2 E）。错误：`not_found`、`forbidden`（CLI 无 view 授予）。
+响应行 = §8.3 的 item `data` 对象，按调用者身份过滤（owner 全量；CLI 有 view 授予即给 `meta_ciphertext` 与 `secret_ciphertext`——审批条目只有 view 授予，也要能拿到密文在批准后解开；`vault_wrapped_*` 只给 owner）。四个 `*_digest` 字段始终在场，按落库的行计算（v2 E）。错误：`not_found`、`forbidden`（CLI 无 view 授予）。
 
 ### 6.10 `PUT /v1/items/:item_id` — 上传新 revision（owner）
 
@@ -685,7 +689,7 @@ CLI 先验 `pairing_signature`，再用自己的 `c` 重算并常数时间比对
 
 **可选字段 `decision_signature`**：与 `decision_device_id` 同时出现，是那次决定对 §3.12 誊本的签名。CLI 在 `approved` 时**先验签再解包**：在本地保存的签名目录里查 `decision_device_id`（须 `status=active`，且 `kind=ios`；message subject 时可以是 `kind=decider`），重建 §3.12 誊本并验签。查不到该设备时同步一次、重查一次。验不过 → 退出码 13，不解包。
 
-轮询间隔 < 2 秒 → `429 rate_limited`；轮询**不计**每日请求配额（design §8.3）。
+轮询间隔 < 2 秒 → `429 rate_limited`；轮询**不计**每日请求配额（design §8.3）。这个端点做自己的鉴权（不走 `authorize`，否则会计入配额）：非 active 设备（含 revoked）→ `401 unauthorized`，**不是** `403 device_revoked`——发起轮询的 CLI 在等待自己的审批时被撤销，得到的就是 401。
 
 ### 6.23 `POST /v1/audit`（已登录设备）
 
@@ -816,7 +820,7 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 - directory：`{ "directory_revision":8,"directory_signed":"<b64>","directory_signature":"<b64>" }`。
 - approval：`{ "approval_id":"…","status":"consumed" }`。
 
-可见性（design §10.6）：active CLI 见自己的 grants、指向的 items、目录、相关审批；active owner 见全部 items/grants/目录/审批；**revoked 设备**只目录、tombstone 与指向自己的 grant 删除——其余端点一律 `403 device_revoked`。客户端在解密前验签（v2 F 的 owner 密钥链：item 按 `writer_device_id` 选 key，grant 逐个试 active owner key，新目录按已保存目录里的 active owner key；没有已保存目录时只认 pin 住的 key）。CLI 验不过的行跳过并在 stderr 打一行警告，验不过的目录中止本次同步；iOS 抛 `SyncError.tampered`（本地不存在的条目的 tombstone 直接忽略），并保留旧数据。
+可见性（design §10.6）：active CLI 见自己的 grants、指向的 items、目录、相关审批；active owner 见全部 items/grants/目录/审批；**revoked 设备**只目录、tombstone 与指向自己的 grant 删除——其余端点一律 `403 device_revoked`，唯一例外是 §6.22 的审批轮询（自己的鉴权，非 active → `401 unauthorized`）。客户端在解密前验签（v2 F 的 owner 密钥链：item 按 `writer_device_id` 选 key，grant 逐个试 active owner key，新目录按已保存目录里的 active owner key；没有已保存目录时只认 pin 住的 key）。CLI 验不过的行跳过并在 stderr 打一行警告，验不过的目录中止本次同步；iOS 抛 `SyncError.tampered`（本地不存在的条目的 tombstone 直接忽略），并保留旧数据。
 
 ---
 
@@ -852,20 +856,17 @@ CLI：`keyref pair` 生成密钥（私钥入密钥环）与 32 字节配对秘�
 
 ```json
 {
-  "status": "ok",                       // ok | degraded（db 不可写 / tls 异常 / 预算≥70% / 磁盘≥50% 任一）
+  "status": "ok",                       // ok | degraded（db 不可写 / 磁盘≥50% / 预算≥70% 任一）
   "version": "1.0.0", "commit": "…", "started_at": 1790000000000,
   "db_writable": true,
-  "tls": { "mode": "acme",              // acme | plain（无域名调试）| disabled
-           "status": "ok",              // ok | expiring | renewal_failing
-           "not_after": 1799999999999 },
-  "quotas": { "enforced": true, "degraded": false,
-              "free_storage":     { "used_bytes": 0,     "cap_bytes": 2147483648 },
-              "free_daily_requests": { "used": 0,        "cap": 1000000 } },
-  "reasons": []                          // degraded 时列字符串码，如 "disk_usage"、"budget_usage"
+  "tls": { "mode": "acme",              // acme | plain（无域名调试）
+           "status": "ok" },            // 恒 ok：证书状态不在 healthz 上报，ACME 续期看日志
+  "quotas": { "enforced": true, "degraded": false },
+  "reasons": []                          // degraded 时列字符串码："db_not_writable"、"disk_usage"、"budget_usage"
 }
 ```
 
-未登录可访问；不含任何 vault 维度数据。
+未登录可访问；不含任何 vault 维度数据。降级只汇总全局水位（数据库可写、磁盘、托管预算），配额档位的用量数值不在健康检查里展开。
 
 ### 10.3 `keyref-server` 子命令与配置
 
