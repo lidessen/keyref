@@ -75,6 +75,14 @@ type approvalRequestMessage struct {
 	EphemeralKEM       string   `json:"ephemeral_kem"`
 	EphemeralPublicKey []byte   `json:"ephemeral_public_key"`
 	CreatedAt          int64    `json:"created_at"`
+	CWD                string   `json:"cwd"`
+	Executable         string   `json:"executable"`
+	ExecutableReal     string   `json:"executable_real"`
+	ExecutableLayers   []string `json:"executable_layers"`
+	PassNames          []string `json:"pass_names"`
+	EnvNames           []string `json:"env_names"`
+	FDTargets          []int    `json:"fd_targets"`
+	FDTemplate         string   `json:"fd_template"`
 }
 
 // sourceDevice is a paired kind=source device: upload-only, no grants.
@@ -339,6 +347,10 @@ func (o *owner) answerMessageApproval(t *testing.T, row *wire.ApprovalRow, body 
 	}
 	if rq.EphemeralKEM != wire.KEMX25519 || len(rq.EphemeralPublicKey) != 32 {
 		t.Fatalf("message approval transcript ephemeral key: %s %d", rq.EphemeralKEM, len(rq.EphemeralPublicKey))
+	}
+	// The execution context rides on message approvals too (review 2026-11).
+	if rq.CWD == "" || rq.Executable != helperBin || len(rq.ExecutableLayers) == 0 {
+		t.Fatalf("message approval transcript lacks the execution context: %+v", rq)
 	}
 
 	// The decision: the §3.9 message plaintext JSON, sealed under the

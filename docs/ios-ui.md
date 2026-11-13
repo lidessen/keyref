@@ -6,7 +6,7 @@
 
 **v0.1 的 Phase 1 三条边界，逐条交付状态（对照 ios/README.md 与 KeyrefUI 代码）：**
 
-1. **审批界面：已交付。** 审批收件箱（命令原文含 `--allow-argv` / `--reply` 模式、条目名称、发起设备、倒计时，批准需 Face ID，§8.3）在 KeyrefUI（ApprovalsStore.swift、ApprovalViews.swift）；审计详情已显示「审批结果：已批准 / 已拒绝」（AuditViews.swift）。到达方式当前是前台轮询——APNs 推送仍待 Apple 开发者凭据（见第 5 节）。
+1. **审批界面：已交付。** 审批收件箱（命令原文含 `--allow-argv` / `--reply` 模式、条目名称、发起设备、倒计时，批准需 Face ID，§8.3）在 KeyrefUI（ApprovalsStore.swift、ApprovalViews.swift）；审计详情已显示「审批结果：已批准 / 已拒绝」（AuditViews.swift）。审批详情同时展示执行上下文（可执行文件、实际执行文件、解释器链、工作目录，协议 §6.19）。到达方式当前是前台轮询——APNs 推送仍待 Apple 开发者凭据（见第 5 节）。
 2. **「旧手机扫新手机」配对：已交付。** 第二台 iPhone 在线配对落地（SecondDeviceFlowModel.swift、KeyrefCore/SecondDevice/OwnerPairing.swift），不再只有恢复码接管一条路；恢复码接管（§8.5、§9.4）仍是兜底。
 3. **Plus 内购入口：仍然没有。** 内购需要 Apple 开发者凭据，另行接入（ios/README.md）。内购上线前托管只有免费档（§10.5），超额页只给出路（删除、自托管），不给升级按钮。
 
@@ -435,6 +435,7 @@ Tab 4 设置
 ## 5. Phase 2 清单的交付状态（v0.2 核对）
 
 - **审批收件箱：已交付**（条目 Tab 顶部横幅 + 徽标进入，前台轮询 + Face ID 批准）。文案照 v0.1 定义实现：空态「没有待审批的请求」/「当 agent 发起需要批准的执行时，请求会出现在这里，2 分钟内有效。」非空态展示命令原文（含 `--allow-argv` / `--reply` 模式）、条目名称、发起设备、倒计时（ApprovalViews.swift，§8.3）。
+- **审批详情的执行上下文：已交付**（协议 §6.19，2026-11）。命令原文之下是 "Execution context" 一节："Executable"、"Runs"（与前者不同才出现）、"Interpreter chain"（多于一层才出现）、"Working directory"，值为等宽字体。脚注文案（英文）：「“Runs” is the program the kernel executes after symlink and shebang resolution; the interpreter chain runs from argv0 to the interpreter. Paths and names only — no secret values.」「请求内容」一节在「注入方式」之后按需追加 "Secret variable"、"Injection fd"、"fd template"、"Forwarded variables" 四行，同样等宽字体；没有对应注入方式时不出现。新增文案当前为英文（先英文，本地化另排）。
 - 旧手机扫新手机的第二台 iPhone 配对页：**已交付**（SecondDeviceFlowModel.swift、KeyrefCore/SecondDevice/OwnerPairing.swift，§9.4）。
 - Plus 内购与档位切换页：**未交付**（需要 Apple 开发者凭据；内购上线前托管只有免费档，§10.5）。
 - `allowCommands` / `allowedHosts` 的精细编辑（命令搜索、覆盖默认拒绝的逐条风险提示）：**已交付**（ItemViews.swift 策略区）；敏感级别的 approval 档位仍未开放。

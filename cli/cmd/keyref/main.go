@@ -794,10 +794,12 @@ func runExecCore(opts execOptions) int {
 	// with no secret_ciphertext receives the secret value itself, any
 	// other item a one-time item key.
 	deviceID, _, _ := st.GetKV(session.KVDeviceID)
+	cwd, _ := os.Getwd()
+	var resolvedCmd *exec.ResolvedCommand
 	resolveValue := func(ref string) (*secret.Plaintext, int, string) {
 		if rr, ok := refs[ref]; ok && rr.Message {
 			return resolveMessageViaApproval(vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
-				opts, rr, messageIDs[ref], appr)
+				opts, cwd, resolvedCmd, rr, messageIDs[ref], appr)
 		}
 		m := refs[ref].Meta
 		granted, err := hasUsableUseGrant(st, itemIDs[ref])
@@ -807,7 +809,7 @@ func runExecCore(opts execOptions) int {
 		}
 		if m.Policy.Sensitivity == "approval" || !granted {
 			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
-				opts, refs[ref], itemIDs[ref], appr)
+				opts, cwd, resolvedCmd, refs[ref], itemIDs[ref], appr)
 		}
 		return resolveValueFor(st, id, vaultID, ownerPub, refs[ref], itemIDs[ref], ref == opts.LoginRef)
 	}
@@ -827,9 +829,12 @@ func runExecCore(opts execOptions) int {
 		Argv:         opts.Argv,
 		Refs:         refs,
 		ResolveValue: resolveValue,
-		ParentEnv:    os.Environ(),
-		Stdout:       opts.Stdout,
-		Stderr:       opts.Stderr,
+		OnPolicyPassed: func(rc *exec.ResolvedCommand) {
+			resolvedCmd = rc
+		},
+		ParentEnv: os.Environ(),
+		Stdout:    opts.Stdout,
+		Stderr:    opts.Stderr,
 		OnOutcome: func(o *exec.Outcome) {
 			if !paired || len(auditRecips) == 0 {
 				return
@@ -868,6 +873,47 @@ func approvalResultOf(policyState string, approvalUsed bool) string {
 	}
 }
 
+// approvalBaseOptions assembles the fields every approval round shares —
+// identity, transport and the execution context the approver judges
+// (review 2026-11): the working directory, the resolved executable and
+// its program chain, the ambient variables forwarded with --pass, the
+// --env names and the fd targets. The caller adds the subject-specific
+// ItemID / MessageID / Hosts. Names and paths only, never a secret.
+func approvalBaseOptions(vaultID, deviceID string, id *device.Identity, cl *client.Client,
+	auditRecips []audit.OwnerRecipient, dirDevices []audit.DeviceRecord,
+	refreshDevices func() ([]audit.DeviceRecord, error),
+	opts execOptions, cwd string, resolved *exec.ResolvedCommand,
+	ref string, replySpecs []string) *approval.Options {
+	o := &approval.Options{
+		VaultID: vaultID, DeviceID: deviceID, Identity: id, Owners: auditRecips,
+		Ref: ref, Argv: opts.Argv, Refs: refsOf(opts),
+		Injection: injectionModes(opts), Reply: replySpecs,
+		Timeout: opts.Timeout, Client: cl, Stderr: opts.Stderr,
+		Devices: dirDevices, RefreshDevices: refreshDevices,
+		CWD:        cwd,
+		PassNames:  append([]string(nil), opts.PassNames...),
+		FDTemplate: opts.FdTemplate,
+	}
+	if resolved != nil {
+		o.Executable = resolved.First
+		o.ExecutableReal = resolved.Path
+		o.ExecutableLayers = append([]string(nil), resolved.Layers...)
+	}
+	for _, spec := range opts.EnvRefs {
+		if name, _, err := splitSpec(spec); err == nil {
+			o.EnvNames = append(o.EnvNames, name)
+		}
+	}
+	for _, spec := range opts.FdRefs {
+		if name, _, err := splitSpec(spec); err == nil {
+			if n, convErr := strconv.Atoi(name); convErr == nil {
+				o.FDTargets = append(o.FDTargets, n)
+			}
+		}
+	}
+	return o
+}
+
 // resolveViaApproval runs the §8.3 approval round for one ref and
 // produces the guarded secret value. It runs when the item's meta says
 // sensitivity = approval, or when this device holds no usable use grant
@@ -881,7 +927,8 @@ func approvalResultOf(policyState string, approvalUsed bool) string {
 func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
 	auditRecips []audit.OwnerRecipient, dirDevices []audit.DeviceRecord,
 	refreshDevices func() ([]audit.DeviceRecord, error),
-	opts execOptions, rr *exec.ResolvedRef, itemID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
+	opts execOptions, cwd string, resolved *exec.ResolvedCommand,
+	rr *exec.ResolvedRef, itemID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
 	appr.used = true
 	it, ok, err := st.GetItem(itemID)
 	if err != nil || !ok {
@@ -899,24 +946,11 @@ func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Id
 			fmt.Fprintln(opts.Stderr, "keyref: --stdin-login requires a synchronized item")
 			return nil, exitcode.InjectionInvalid, "login-not-synced"
 		}
-		value, code, state := approval.RequestSecret(&approval.Options{
-			VaultID:        vaultID,
-			DeviceID:       deviceID,
-			Identity:       id,
-			Owners:         auditRecips,
-			ItemID:         itemID,
-			Ref:            rr.Ref,
-			Argv:           opts.Argv,
-			Refs:           refsOf(opts),
-			Injection:      injectionModes(opts),
-			Hosts:          rr.Meta.Policy.AllowedHosts,
-			Reply:          replySpecs,
-			Timeout:        opts.Timeout,
-			Client:         cl,
-			Stderr:         opts.Stderr,
-			Devices:        dirDevices,
-			RefreshDevices: refreshDevices,
-		}, &appr.decisionDeviceID)
+		base := approvalBaseOptions(vaultID, deviceID, id, cl, auditRecips, dirDevices, refreshDevices,
+			opts, cwd, resolved, rr.Ref, replySpecs)
+		base.ItemID = itemID
+		base.Hosts = rr.Meta.Policy.AllowedHosts
+		value, code, state := approval.RequestSecret(base, &appr.decisionDeviceID)
 		if value == nil {
 			return nil, code, state
 		}
@@ -926,24 +960,11 @@ func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Id
 	if rr.Ref == opts.LoginRef {
 		displayRef = "the login item"
 	}
-	key, code, state := approval.RequestItemKey(&approval.Options{
-		VaultID:        vaultID,
-		DeviceID:       deviceID,
-		Identity:       id,
-		Owners:         auditRecips,
-		ItemID:         itemID,
-		Ref:            displayRef,
-		Argv:           opts.Argv,
-		Refs:           refsOf(opts),
-		Injection:      injectionModes(opts),
-		Hosts:          rr.Meta.Policy.AllowedHosts,
-		Reply:          replySpecs,
-		Timeout:        opts.Timeout,
-		Client:         cl,
-		Stderr:         opts.Stderr,
-		Devices:        dirDevices,
-		RefreshDevices: refreshDevices,
-	}, &appr.decisionDeviceID)
+	base := approvalBaseOptions(vaultID, deviceID, id, cl, auditRecips, dirDevices, refreshDevices,
+		opts, cwd, resolved, displayRef, replySpecs)
+	base.ItemID = itemID
+	base.Hosts = rr.Meta.Policy.AllowedHosts
+	key, code, state := approval.RequestItemKey(base, &appr.decisionDeviceID)
 	if key == nil {
 		return nil, code, state
 	}
@@ -961,25 +982,13 @@ func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Id
 func resolveMessageViaApproval(vaultID, deviceID string, id *device.Identity, cl *client.Client,
 	auditRecips []audit.OwnerRecipient, dirDevices []audit.DeviceRecord,
 	refreshDevices func() ([]audit.DeviceRecord, error),
-	opts execOptions, rr *exec.ResolvedRef,
+	opts execOptions, cwd string, resolved *exec.ResolvedCommand, rr *exec.ResolvedRef,
 	messageID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
 	appr.used = true
-	value, code, state := approval.RequestMessage(&approval.Options{
-		VaultID:        vaultID,
-		DeviceID:       deviceID,
-		Identity:       id,
-		Owners:         auditRecips,
-		MessageID:      messageID,
-		Ref:            rr.Ref,
-		Argv:           opts.Argv,
-		Refs:           refsOf(opts),
-		Injection:      injectionModes(opts),
-		Timeout:        opts.Timeout,
-		Client:         cl,
-		Stderr:         opts.Stderr,
-		Devices:        dirDevices,
-		RefreshDevices: refreshDevices,
-	}, &appr.decisionDeviceID)
+	base := approvalBaseOptions(vaultID, deviceID, id, cl, auditRecips, dirDevices, refreshDevices,
+		opts, cwd, resolved, rr.Ref, nil)
+	base.MessageID = messageID
+	value, code, state := approval.RequestMessage(base, &appr.decisionDeviceID)
 	if value == nil {
 		return nil, code, state
 	}

@@ -32,6 +32,19 @@ public struct ApprovalInboxEntry: Identifiable, Equatable, Sendable {
     public var messageBody: String
     public var messageSourceLabel: String
     public var messageReceivedAt: Int64
+    /// Execution context (protocol §6.19, 2026-11 review): what argv alone
+    /// does not say — where the command runs, which file actually
+    /// executes, which ambient variables are forwarded, which names hold
+    /// the injected secret and where the fd payload goes. Names, paths
+    /// and templates only, never a secret value.
+    public var cwd: String
+    public var executable: String
+    public var executableReal: String
+    public var executableLayers: [String]
+    public var passNames: [String]
+    public var envNames: [String]
+    public var fdTargets: [Int]
+    public var fdTemplate: String
 
     public var isMessageSubject: Bool { !messageID.isEmpty }
 
@@ -41,7 +54,10 @@ public struct ApprovalInboxEntry: Identifiable, Equatable, Sendable {
                 createdAt: Int64, expiresAt: Int64, valid: Bool,
                 messageID: String = "", messageSender: String = "",
                 messageBody: String = "", messageSourceLabel: String = "",
-                messageReceivedAt: Int64 = 0) {
+                messageReceivedAt: Int64 = 0,
+                cwd: String = "", executable: String = "", executableReal: String = "",
+                executableLayers: [String] = [], passNames: [String] = [],
+                envNames: [String] = [], fdTargets: [Int] = [], fdTemplate: String = "") {
         self.approvalID = approvalID
         self.cliDeviceID = cliDeviceID
         self.cliDeviceLabel = cliDeviceLabel
@@ -60,6 +76,14 @@ public struct ApprovalInboxEntry: Identifiable, Equatable, Sendable {
         self.messageBody = messageBody
         self.messageSourceLabel = messageSourceLabel
         self.messageReceivedAt = messageReceivedAt
+        self.cwd = cwd
+        self.executable = executable
+        self.executableReal = executableReal
+        self.executableLayers = executableLayers
+        self.passNames = passNames
+        self.envNames = envNames
+        self.fdTargets = fdTargets
+        self.fdTemplate = fdTemplate
     }
 
     public var id: String { approvalID }

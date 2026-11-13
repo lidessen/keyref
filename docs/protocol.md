@@ -659,8 +659,14 @@ CLI 先验 `pairing_signature`，再用自己的 `c` 重算并常数时间比对
 { "v": 1, "cli_device_id": "…", "item_id": "…", "argv": ["curl", "https://…"],
   "refs": ["openai-prod"], "injection": "env",
   "hosts": ["api.openai.com"], "ephemeral_kem": "X25519",
-  "ephemeral_public_key": "<b64 32B>", "created_at": 1790000000000 }
+  "ephemeral_public_key": "<b64 32B>", "created_at": 1790000000000,
+  "cwd": "/Users/me/project", "executable": "/usr/bin/curl",
+  "executable_real": "/usr/bin/curl", "executable_layers": ["curl"],
+  "pass_names": [], "env_names": ["OPENAI_API_KEY"],
+  "fd_targets": [], "fd_template": "" }
 ```
+
+**执行上下文字段**（2026-11 评审）：argv 原文看不出来的部分随请求一起交给审批人——`cwd`（子进程的工作目录）、`executable`（keyref 实际 spawn 的绝对路径：argv0 经 PATH 解析后、符号链接解析前的那个文件）、`executable_real`（符号链接与 shebang 一路解析后内核真正运行的程序）、`executable_layers`（argv0 与每个 shebang 解释器的小写 basename 依次排列；命令策略逐层检查的就是这条链）、`pass_names`（`--pass` 从环境转发的变量名）、`env_names`（`--env` 注入秘密的变量名）、`fd_targets`（`--fd` 载荷写入的子进程 fd 编号）、`fd_template`（`--fd-template` 原文）。八个字段**总是出现**，未使用时为空字符串或空数组。它们只含名字、路径和模板，**绝不含秘密值**；又因为它们位于 HPKE 密文之内、§3.11 签名覆盖密文摘要，服务器无法篡改。iOS 审批页把它们与命令原文同屏展示（ios-ui.md）。
 
 ### 6.20 `GET /v1/approvals?status=pending`（owner；决策器仅见 message subject）
 

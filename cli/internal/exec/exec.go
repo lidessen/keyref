@@ -126,6 +126,13 @@ type Request struct {
 	ResolveValue ValueResolver
 	ParentEnv    []string
 
+	// OnPolicyPassed, when set, receives the command resolution once the
+	// policy checks have passed and before any value is resolved. The
+	// approval round uses it to tell the approver which file will run
+	// (review 2026-11: the approval screen showed only the un-resolved
+	// argv).
+	OnPolicyPassed func(*ResolvedCommand)
+
 	Stdout, Stderr io.Writer
 
 	// OnOutcome receives the audit summary of every attempt (allowed
@@ -411,6 +418,10 @@ func run(req *Request) (int, *Outcome) {
 	}
 
 	// ---- policy passed: from here on, secret bytes are touched ----
+
+	if req.OnPolicyPassed != nil {
+		req.OnPolicyPassed(resolved)
+	}
 
 	// Resolve values lazily (rejected attempts above never decrypt).
 	for _, ref := range outcome.Refs {

@@ -1931,7 +1931,15 @@ public final class LiveBackend: AppBackend {
                         messageSender: sms.sender,
                         messageBody: sms.body,
                         messageSourceLabel: sourceLabel,
-                        messageReceivedAt: sms.receivedAt))
+                        messageReceivedAt: sms.receivedAt,
+                        cwd: plaintext.cwd,
+                        executable: plaintext.executable,
+                        executableReal: plaintext.executableReal,
+                        executableLayers: plaintext.executableLayers,
+                        passNames: plaintext.passNames,
+                        envNames: plaintext.envNames,
+                        fdTargets: plaintext.fdTargets,
+                        fdTemplate: plaintext.fdTemplate))
                     continue
                 }
 
@@ -1952,7 +1960,15 @@ public final class LiveBackend: AppBackend {
                     hosts: plaintext.hosts,
                     createdAt: row.createdAt,
                     expiresAt: row.expiresAt,
-                    valid: true))
+                    valid: true,
+                    cwd: plaintext.cwd,
+                    executable: plaintext.executable,
+                    executableReal: plaintext.executableReal,
+                    executableLayers: plaintext.executableLayers,
+                    passNames: plaintext.passNames,
+                    envNames: plaintext.envNames,
+                    fdTargets: plaintext.fdTargets,
+                    fdTemplate: plaintext.fdTemplate))
             } catch {
                 out.append(.invalid(row, cliDeviceLabel: label))
             }

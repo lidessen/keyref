@@ -28,6 +28,19 @@ public struct ApprovalRequestPlaintext: Codable, Equatable, Sendable {
     /// Set for an SMS consumption (design v0.8 §14.5); `itemID` is then
     /// empty. Exactly one subject is present (protocol D16).
     public var messageID: String
+    /// Execution context (protocol §6.19, review 2026-11): where the
+    /// command runs, which file actually executes, which ambient variables
+    /// are forwarded, which names hold the injected secret and where the
+    /// fd payload goes. Names, paths and templates only — never a value.
+    /// Always present; empty when unused.
+    public var cwd: String
+    public var executable: String
+    public var executableReal: String
+    public var executableLayers: [String]
+    public var passNames: [String]
+    public var envNames: [String]
+    public var fdTargets: [Int]
+    public var fdTemplate: String
 
     enum CodingKeys: String, CodingKey {
         case v
@@ -41,6 +54,14 @@ public struct ApprovalRequestPlaintext: Codable, Equatable, Sendable {
         case ephemeralKEM = "ephemeral_kem"
         case ephemeralPublicKey = "ephemeral_public_key"
         case createdAt = "created_at"
+        case cwd
+        case executable
+        case executableReal = "executable_real"
+        case executableLayers = "executable_layers"
+        case passNames = "pass_names"
+        case envNames = "env_names"
+        case fdTargets = "fd_targets"
+        case fdTemplate = "fd_template"
     }
 
     public init(from decoder: Decoder) throws {
@@ -57,13 +78,24 @@ public struct ApprovalRequestPlaintext: Codable, Equatable, Sendable {
         ephemeralKEM = try c.decode(String.self, forKey: .ephemeralKEM)
         ephemeralPublicKey = try c.decode(Data.self, forKey: .ephemeralPublicKey)
         createdAt = try c.decode(Int64.self, forKey: .createdAt)
+        cwd = try c.decode(String.self, forKey: .cwd)
+        executable = try c.decode(String.self, forKey: .executable)
+        executableReal = try c.decode(String.self, forKey: .executableReal)
+        executableLayers = try c.decode([String].self, forKey: .executableLayers)
+        passNames = try c.decode([String].self, forKey: .passNames)
+        envNames = try c.decode([String].self, forKey: .envNames)
+        fdTargets = try c.decode([Int].self, forKey: .fdTargets)
+        fdTemplate = try c.decode(String.self, forKey: .fdTemplate)
     }
 
     /// Internal memberwise for the CLI simulation in tests.
     init(v: Int, cliDeviceID: String, itemID: String, messageID: String = "",
          argv: [String], refs: [String],
          injection: String, hosts: [String], ephemeralKEM: String,
-         ephemeralPublicKey: Data, createdAt: Int64) {
+         ephemeralPublicKey: Data, createdAt: Int64,
+         cwd: String = "", executable: String = "", executableReal: String = "",
+         executableLayers: [String] = [], passNames: [String] = [],
+         envNames: [String] = [], fdTargets: [Int] = [], fdTemplate: String = "") {
         self.v = v
         self.cliDeviceID = cliDeviceID
         self.itemID = itemID
@@ -75,6 +107,14 @@ public struct ApprovalRequestPlaintext: Codable, Equatable, Sendable {
         self.ephemeralKEM = ephemeralKEM
         self.ephemeralPublicKey = ephemeralPublicKey
         self.createdAt = createdAt
+        self.cwd = cwd
+        self.executable = executable
+        self.executableReal = executableReal
+        self.executableLayers = executableLayers
+        self.passNames = passNames
+        self.envNames = envNames
+        self.fdTargets = fdTargets
+        self.fdTemplate = fdTemplate
     }
 
     /// Decodes from JSON bytes (the HPKE plaintext).

@@ -175,6 +175,7 @@ struct ApprovalDetailView: View {
     var body: some View {
         List {
             commandSection
+            executionSection
             contextSection
             decisionSection
         }
@@ -211,6 +212,39 @@ struct ApprovalDetailView: View {
         }
     }
 
+    /// Execution context (protocol §6.19): what argv alone does not say —
+    /// which file argv0 resolves to, which program actually runs, and
+    /// where the working directory is.
+    @ViewBuilder
+    var executionSection: some View {
+        if hasExecutionContext {
+            Section {
+                if !entry.executable.isEmpty {
+                    InfoRow(label: "Executable", value: entry.executable, mono: true)
+                }
+                if !entry.executableReal.isEmpty && entry.executableReal != entry.executable {
+                    InfoRow(label: "Runs", value: entry.executableReal, mono: true)
+                }
+                if entry.executableLayers.count > 1 {
+                    InfoRow(label: "Interpreter chain",
+                            value: entry.executableLayers.joined(separator: " → "), mono: true)
+                }
+                if !entry.cwd.isEmpty {
+                    InfoRow(label: "Working directory", value: entry.cwd, mono: true)
+                }
+            } header: {
+                Text("Execution context")
+            } footer: {
+                Text("“Runs” is the program the kernel executes after symlink and shebang resolution; the interpreter chain runs from argv0 to the interpreter. Paths and names only — no secret values.")
+            }
+        }
+    }
+
+    var hasExecutionContext: Bool {
+        !entry.executable.isEmpty || !entry.executableReal.isEmpty
+            || entry.executableLayers.count > 1 || !entry.cwd.isEmpty
+    }
+
     var contextSection: some View {
         Section("请求内容") {
             if entry.isMessageSubject {
@@ -227,6 +261,19 @@ struct ApprovalDetailView: View {
                 }
             }
             InfoRow(label: "注入方式", value: entry.injectionLabel)
+            if !entry.envNames.isEmpty {
+                InfoRow(label: "Secret variable", value: entry.envNames.joined(separator: ", "), mono: true)
+            }
+            if !entry.fdTargets.isEmpty {
+                InfoRow(label: "Injection fd",
+                        value: entry.fdTargets.map(String.init).joined(separator: ", "), mono: true)
+            }
+            if !entry.fdTemplate.isEmpty {
+                InfoRow(label: "fd template", value: entry.fdTemplate, mono: true)
+            }
+            if !entry.passNames.isEmpty {
+                InfoRow(label: "Forwarded variables", value: entry.passNames.joined(separator: ", "), mono: true)
+            }
             InfoRow(label: "refs", value: entry.refs.joined(separator: ", "), mono: true)
             if !entry.hosts.isEmpty {
                 InfoRow(label: "主机（参数检查）", value: entry.hosts.joined(separator: ", "), mono: true)

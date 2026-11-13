@@ -46,6 +46,14 @@ type approvalRequest struct {
 	EphemeralKEM       string   `json:"ephemeral_kem"`
 	EphemeralPublicKey []byte   `json:"ephemeral_public_key"`
 	CreatedAt          int64    `json:"created_at"`
+	CWD                string   `json:"cwd"`
+	Executable         string   `json:"executable"`
+	ExecutableReal     string   `json:"executable_real"`
+	ExecutableLayers   []string `json:"executable_layers"`
+	PassNames          []string `json:"pass_names"`
+	EnvNames           []string `json:"env_names"`
+	FDTargets          []int    `json:"fd_targets"`
+	FDTemplate         string   `json:"fd_template"`
 }
 
 // setupPairedVault creates a fresh vault whose CLI holds view+use for
@@ -176,6 +184,14 @@ func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, wantRef stri
 	if len(rq.Argv) == 0 || rq.Argv[0] != helperBin {
 		t.Fatalf("approval transcript argv must carry the original argv: %v", rq.Argv)
 	}
+	// The execution context (review 2026-11): the approver must see
+	// where the command runs and which file will actually execute.
+	if rq.CWD == "" || rq.Executable != helperBin || rq.ExecutableReal == "" {
+		t.Fatalf("approval transcript lacks the execution context: %+v", rq)
+	}
+	if len(rq.ExecutableLayers) == 0 {
+		t.Fatal("approval transcript lacks the program chain")
+	}
 	foundRef := false
 	for _, r := range rq.Refs {
 		if r == wantRef {
@@ -191,6 +207,9 @@ func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, wantRef stri
 	}
 	if !containsString(strings.Split(rq.Injection, ","), wantInjection) {
 		t.Fatal("approval transcript has the wrong injection mode")
+	}
+	if wantInjection == "env" && !containsString(rq.EnvNames, "K") {
+		t.Fatalf("approval transcript env names missing K: %v", rq.EnvNames)
 	}
 	if len(rq.Hosts) != 1 || rq.Hosts[0] != "api.example.com" {
 		t.Fatalf("approval transcript hosts: %v", rq.Hosts)

@@ -73,6 +73,21 @@ type request struct {
 	EphemeralKEM       string    `json:"ephemeral_kem"`
 	EphemeralPublicKey wire.Blob `json:"ephemeral_public_key"`
 	CreatedAt          int64     `json:"created_at"`
+
+	// Execution context (review 2026-11): the approver must see what the
+	// argv alone does not say — where the command runs, which file
+	// actually executes, which ambient variables are forwarded, which
+	// names hold the injected secret and where the fd payload goes.
+	// Names, paths and templates only: no secret value ever appears here.
+	// All eight fields are always present; unused ones are empty.
+	CWD              string   `json:"cwd"`
+	Executable       string   `json:"executable"`
+	ExecutableReal   string   `json:"executable_real"`
+	ExecutableLayers []string `json:"executable_layers"`
+	PassNames        []string `json:"pass_names"`
+	EnvNames         []string `json:"env_names"`
+	FDTargets        []int    `json:"fd_targets"`
+	FDTemplate       string   `json:"fd_template"`
 }
 
 // Options describes one approval request for one item of one exec.
@@ -92,6 +107,19 @@ type Options struct {
 	Timeout   time.Duration
 	Client    *client.Client
 	Stderr    io.Writer // progress notices, never secrets
+
+	// Execution context shown on the approval screen. CWD and the
+	// resolved executable come from the exec layer (OnPolicyPassed); the
+	// names, fd targets and template come straight from the flags.
+	// Values only: never a secret.
+	CWD              string
+	Executable       string   // absolute file the exec layer spawns
+	ExecutableReal   string   // symlink- and shebang-resolved executable
+	ExecutableLayers []string // argv0 plus every shebang interpreter
+	PassNames        []string // ambient variables forwarded with --pass
+	EnvNames         []string // names given the secret with --env
+	FDTargets        []int    // fds that receive a payload
+	FDTemplate       string   // --fd-template, verbatim
 
 	// Devices is the owner-signed device directory as last synced: the
 	// only trusted source for the deciding device's key (protocol v2 B).
@@ -233,7 +261,19 @@ func run(opts *Options, unwrap unwrapFunc, decisionDevice *string) (*Result, int
 		EphemeralKEM:       wire.KEMX25519,
 		EphemeralPublicKey: wire.Blob(ephPublic),
 		CreatedAt:          nowMs,
+		CWD:                opts.CWD,
+		Executable:         opts.Executable,
+		ExecutableReal:     opts.ExecutableReal,
+		ExecutableLayers:   opts.ExecutableLayers,
+		PassNames:          opts.PassNames,
+		EnvNames:           opts.EnvNames,
+		FDTargets:          opts.FDTargets,
+		FDTemplate:         opts.FDTemplate,
 	}
+	req.ExecutableLayers = emptyIfNil(req.ExecutableLayers)
+	req.PassNames = emptyIfNil(req.PassNames)
+	req.EnvNames = emptyIfNil(req.EnvNames)
+	req.FDTargets = emptyIfNil(req.FDTargets)
 	plaintext, err := json.Marshal(req)
 	if err != nil {
 		fmt.Fprintln(opts.Stderr, "keyref: approval request encoding failed")
@@ -416,6 +456,15 @@ func sortedCopy(in []string) []string {
 	out := append([]string(nil), in...)
 	sort.Strings(out)
 	return out
+}
+
+// emptyIfNil keeps an always-present JSON array an array ([]) rather
+// than null, which a strict decoder would reject.
+func emptyIfNil[T any](in []T) []T {
+	if in == nil {
+		return []T{}
+	}
+	return in
 }
 
 // verifyDecision checks the decision device's signature over the
