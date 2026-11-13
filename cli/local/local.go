@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -26,11 +27,23 @@ var (
 	ErrNotFound     = errors.New("local secret not found")
 	ErrInvalidKey   = errors.New("invalid local vault key")
 	ErrInvalidStore = errors.New("invalid local vault")
+	ErrInvalidRef   = errors.New("invalid ref")
 	ErrClosed       = errors.New("local vault closed")
 )
 
 const maxValue = 1 << 20
 const checkText = "keyref-local-v1"
+
+// refPattern is the ref grammar of design.md §6.1: one lowercase letter,
+// or a lowercase-letter head, up to 62 lowercase letters/digits/hyphens
+// and a lowercase letter or digit tail. No whitespace, ":", "=" or
+// braces can appear.
+var refPattern = regexp.MustCompile(`^(?:[a-z]|[a-z][a-z0-9-]{0,62}[a-z0-9])$`)
+
+// ValidRef reports whether ref is a legal local ref. Reads and deletes
+// still hash whatever they are given, so an invalid ref simply misses;
+// only creation is refused, which keeps malformed refs out of a vault.
+func ValidRef(ref string) bool { return refPattern.MatchString(ref) }
 
 // Store holds derived keys until Close. Memory wiping is best effort: Go and
 // its crypto implementation may retain copies.
@@ -194,49 +207,57 @@ func (s *Store) entryID(ref string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)[:16]), nil
 }
 
-// Put atomically replaces a secret at ref. The caller retains ownership of value.
-func (s *Store) Put(ctx context.Context, ref string, value []byte) error {
+// Put atomically creates or replaces a secret at ref and reports whether
+// the row is new. The caller retains ownership of value.
+func (s *Store) Put(ctx context.Context, ref string, value []byte) (created bool, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.db == nil {
-		return ErrClosed
+		return false, ErrClosed
+	}
+	if !ValidRef(ref) {
+		return false, ErrInvalidRef
 	}
 	if len(value) == 0 || len(value) > maxValue {
-		return ErrInvalidStore
+		return false, ErrInvalidStore
 	}
 	id, err := s.entryID(ref)
 	if err != nil {
-		return err
+		return false, err
 	}
 	aad, err := keycrypto.SecretAAD(s.id, id)
 	if err != nil {
-		return ErrInvalidStore
+		return false, ErrInvalidStore
 	}
 	blob, err := keycrypto.SealBlob(s.key, aad, value)
 	if err != nil {
-		return ErrInvalidStore
+		return false, ErrInvalidStore
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ErrInvalidStore
+		return false, ErrInvalidStore
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, "UPDATE metadata SET writes=writes+1 WHERE writes < 4294967295")
 	if err != nil {
-		return ErrInvalidStore
+		return false, ErrInvalidStore
 	}
 	count, err := res.RowsAffected()
 	if err != nil || count != 1 {
-		return ErrInvalidStore
+		return false, ErrInvalidStore
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?)", id).Scan(&exists); err != nil {
+		return false, ErrInvalidStore
 	}
 	_, err = tx.ExecContext(ctx, "INSERT INTO entries(id,blob) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET blob=excluded.blob", id, blob)
 	if err == nil {
 		err = tx.Commit()
 	}
 	if err != nil {
-		return ErrInvalidStore
+		return false, ErrInvalidStore
 	}
-	return nil
+	return exists == 0, nil
 }
 
 // Use decrypts only for the callback and wipes its buffer afterwards. A callback

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/config"
@@ -21,6 +23,7 @@ import (
 	"github.com/lidessen/keyref/cli/internal/session"
 	"github.com/lidessen/keyref/cli/internal/source"
 	"github.com/lidessen/keyref/cli/local"
+	"golang.org/x/term"
 )
 
 const maxLocalSecretBytes = 1 << 20
@@ -257,13 +260,18 @@ func cmdInit(args []string) int {
 func cmdSet(args []string) int {
 	fs := flag.NewFlagSet("set", flag.ContinueOnError)
 	sourceName := fs.String("source", "", "source to operate on")
+	raw := fs.Bool("raw", false, "store piped stdin byte for byte (default: strip one trailing newline)")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseExit(err)
 	}
 	if len(rest) != 1 {
-		return fatalf(2, "usage: keyref set <ref> [--source NAME]  (the secret is read from stdin)")
+		return fatalf(2, "usage: keyref set <ref> [--raw] [--source NAME]  (the secret is read from stdin)")
+	}
+	ref := rest[0]
+	if !local.ValidRef(ref) {
+		return fatalf(2, "invalid ref %q: a ref is one lowercase letter, or 2-64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit", ref)
 	}
 	p := mustPaths()
 	spec, err := resolveSource(p, *sourceName)
@@ -278,15 +286,23 @@ func cmdSet(args []string) int {
 		return localOpenError(err)
 	}
 	defer vault.Close()
-	value, err := readLocalSecret(os.Stdin)
+	value, err := readLocalSecret(os.Stdin, *raw)
 	if err != nil {
 		return fatalf(1, "%v", err)
 	}
 	defer secret.Wipe(value)
-	if err := vault.Put(context.Background(), rest[0], value); err != nil {
-		return fatalf(1, "could not store %q: %v", rest[0], err)
+	created, err := vault.Put(context.Background(), ref, value)
+	if err != nil {
+		return fatalf(1, "could not store %q: %v", ref, err)
 	}
-	fmt.Printf("stored %q in source %q\n", rest[0], spec.Name)
+	if len(value) < 8 {
+		fmt.Fprintf(os.Stderr, "keyref: warning: the secret is %d bytes long; values shorter than 8 bytes are redacted less reliably\n", len(value))
+	}
+	verb := "replaced"
+	if created {
+		verb = "created"
+	}
+	fmt.Printf("%s %q\n", verb, ref)
 	return 0
 }
 
@@ -395,13 +411,81 @@ func maskSecret(value []byte) string {
 	return string(value[:3]) + "****" + string(value[len(value)-4:])
 }
 
-// readLocalSecret reads 1 byte to 1 MiB, byte-exact: a trailing newline
-// is part of the secret, and the value never appears in argv or output.
-func readLocalSecret(input io.Reader) ([]byte, error) {
-	value, err := io.ReadAll(io.LimitReader(input, maxLocalSecretBytes+1))
+// readLocalSecret reads one secret from stdin. On a terminal it reads one
+// line without echo instead of waiting for EOF and never includes the line
+// terminator. Piped input is read byte for byte up to 1 MiB, and unless raw
+// is set exactly one trailing newline (\n or \r\n) is stripped: `echo
+// "$TOKEN" | keyref set` then stores the token itself, so a consumer that
+// trims its input still matches the redactor (design.md §7.4, §17.4).
+func readLocalSecret(input *os.File, raw bool) ([]byte, error) {
+	fd := int(input.Fd())
+	if term.IsTerminal(fd) {
+		value, err := readTerminalSecret(fd)
+		_, _ = fmt.Fprintln(os.Stderr) // end the hidden line before any output
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("could not read the secret: %w", err)
+		}
+		return checkSecretSize(value)
+	}
+	return readPipedSecret(input, raw)
+}
+
+// readTerminalSecret reads one line without echo. term.ReadPassword
+// restores the terminal with defer, which does not run when a signal
+// kills the process, so a signal handler restores the saved state and
+// re-raises the signal: Ctrl-C must not leave the user's terminal with
+// echo disabled.
+func readTerminalSecret(fd int) ([]byte, error) {
+	state, err := term.GetState(fd)
 	if err != nil {
 		return nil, err
 	}
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			_ = term.Restore(fd, state)
+			signal.Reset(sig)
+			if s, ok := sig.(syscall.Signal); ok {
+				_ = syscall.Kill(os.Getpid(), s)
+			}
+		case <-done:
+		}
+	}()
+	value, err := term.ReadPassword(fd)
+	signal.Stop(sigCh)
+	close(done)
+	return value, err
+}
+
+func readPipedSecret(input io.Reader, raw bool) ([]byte, error) {
+	// Three extra bytes leave room for a trailing CRLF that will be
+	// trimmed, plus one more to prove that nothing follows a legal 1 MiB
+	// value ending in CRLF. Reading only two extra would silently cut a
+	// larger stream at a CRLF boundary and store its first 1 MiB.
+	value, err := io.ReadAll(io.LimitReader(input, maxLocalSecretBytes+3))
+	if err != nil {
+		return nil, err
+	}
+	if !raw {
+		value = trimOneLineEnding(value)
+	}
+	return checkSecretSize(value)
+}
+
+func trimOneLineEnding(value []byte) []byte {
+	if len(value) >= 2 && value[len(value)-2] == '\r' && value[len(value)-1] == '\n' {
+		return value[:len(value)-2]
+	}
+	if len(value) >= 1 && value[len(value)-1] == '\n' {
+		return value[:len(value)-1]
+	}
+	return value
+}
+
+func checkSecretSize(value []byte) ([]byte, error) {
 	if len(value) == 0 || len(value) > maxLocalSecretBytes {
 		return nil, errors.New("the secret on stdin must be 1 to 1048576 bytes")
 	}

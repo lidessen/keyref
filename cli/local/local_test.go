@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func TestLocalLifecycle(t *testing.T) {
 		t.Fatalf("overwrite accepted: %v", err)
 	}
 	value := []byte("synthetic-plaintext-value-not-a-real-key")
-	if err := s.Put(ctx, "synthetic-ref", value); err != nil {
+	if _, err := s.Put(ctx, "synthetic-ref", value); err != nil {
 		t.Fatal(err)
 	}
 	var observed []byte
@@ -68,7 +69,7 @@ func TestLocalLifecycle(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put(ctx, "synthetic-ref", value); !errors.Is(err, ErrClosed) {
+	if _, err := s.Put(ctx, "synthetic-ref", value); !errors.Is(err, ErrClosed) {
 		t.Fatalf("closed put: %v", err)
 	}
 	raw, err := os.ReadFile(path)
@@ -156,10 +157,10 @@ func TestLocalAADDetectsSubstitution(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err = s.Put(ctx, "first", []byte("value-one")); err != nil {
+	if _, err = s.Put(ctx, "first", []byte("value-one")); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Put(ctx, "second", []byte("value-two")); err != nil {
+	if _, err = s.Put(ctx, "second", []byte("value-two")); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := s.entryID("first")
@@ -200,7 +201,8 @@ func TestLocalConcurrentInstances(t *testing.T) {
 			if i%2 != 0 {
 				s = b
 			}
-			errs <- s.Put(ctx, fmt.Sprintf("ref-%d", i), []byte(fmt.Sprintf("value-%d", i)))
+			_, err := s.Put(ctx, fmt.Sprintf("ref-%d", i), []byte(fmt.Sprintf("value-%d", i)))
+			errs <- err
 		}(i)
 	}
 	wg.Wait()
@@ -231,21 +233,21 @@ func TestLocalInputAndCancellation(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 	for _, ref := range []string{"", string([]byte{'x', 0, 'y'}), string(bytes.Repeat([]byte{'x'}, 513))} {
-		if err = s.Put(ctx, ref, []byte("x")); err == nil {
+		if _, err = s.Put(ctx, ref, []byte("x")); err == nil {
 			t.Error("accepted invalid ref")
 		}
 	}
 	for _, v := range [][]byte{nil, bytes.Repeat([]byte{'x'}, maxValue+1)} {
-		if err = s.Put(ctx, "valid", v); err == nil {
+		if _, err = s.Put(ctx, "valid", v); err == nil {
 			t.Error("accepted invalid value")
 		}
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if err = s.Put(cancelled, "cancelled", []byte("x")); err == nil {
+	if _, err = s.Put(cancelled, "cancelled", []byte("x")); err == nil {
 		t.Error("cancelled write succeeded")
 	}
-	if err = s.Put(ctx, "existing", []byte("synthetic")); err != nil {
+	if _, err = s.Put(ctx, "existing", []byte("synthetic")); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Use(cancelled, "existing", func([]byte) error { t.Error("cancelled read delivered plaintext"); return nil }); err == nil {
@@ -266,7 +268,7 @@ func TestLocalCallbackFailureAndPanicWipe(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.Put(ctx, "ref", []byte("synthetic-value")); err != nil {
+	if _, err := s.Put(ctx, "ref", []byte("synthetic-value")); err != nil {
 		t.Fatal(err)
 	}
 	sentinel := errors.New("callback failure")
@@ -314,7 +316,8 @@ func TestLocalConcurrentSameRefRemainsWhole(t *testing.T) {
 			if i%2 != 0 {
 				s = b
 			}
-			errs <- s.Put(ctx, "same-ref", []byte(fmt.Sprintf("value-%02d", i)))
+			_, err := s.Put(ctx, "same-ref", []byte(fmt.Sprintf("value-%02d", i)))
+			errs <- err
 		}(i)
 	}
 	wg.Wait()
@@ -346,7 +349,7 @@ func TestLocalCallbackMayCloseStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put(ctx, "ref", []byte("synthetic")); err != nil {
+	if _, err := s.Put(ctx, "ref", []byte("synthetic")); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -378,7 +381,7 @@ func TestLocalOversizedBlobRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.Put(ctx, "ref", []byte("synthetic")); err != nil {
+	if _, err := s.Put(ctx, "ref", []byte("synthetic")); err != nil {
 		t.Fatal(err)
 	}
 	id, err := s.entryID("ref")
@@ -400,13 +403,13 @@ func TestLocalWriteLimitPreservesExistingValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.Put(ctx, "ref", []byte("original")); err != nil {
+	if _, err := s.Put(ctx, "ref", []byte("original")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec("UPDATE metadata SET writes=4294967295"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put(ctx, "ref", []byte("replacement")); !errors.Is(err, ErrInvalidStore) {
+	if _, err := s.Put(ctx, "ref", []byte("replacement")); !errors.Is(err, ErrInvalidStore) {
 		t.Fatalf("write at limit: %v", err)
 	}
 	if err := s.Use(ctx, "ref", func(value []byte) error {
@@ -445,5 +448,46 @@ func TestReadStoreID(t *testing.T) {
 	}
 	if id != s.StoreID() || len(id) != 32 {
 		t.Fatalf("store id %q vs %q", id, s.StoreID())
+	}
+}
+
+func TestValidRefGrammar(t *testing.T) {
+	for _, ref := range []string{"a", "ab", "tok", "openai-prod", "a1", "a-1", strings.Repeat("a", 64)} {
+		if !ValidRef(ref) {
+			t.Errorf("rejected valid ref %q", ref)
+		}
+	}
+	for _, ref := range []string{"", "A", "1a", "a-", "-a", "a_b", "sms:abc", "a b", "a=b", "{a}", "a--", strings.Repeat("a", 65)} {
+		if ValidRef(ref) {
+			t.Errorf("accepted invalid ref %q", ref)
+		}
+	}
+}
+
+func TestPutReportsCreationAndRejectsInvalidRefs(t *testing.T) {
+	s, err := Create(pathForTest(t), keyForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	created, err := s.Put(ctx, "tok", []byte("first-value"))
+	if err != nil || !created {
+		t.Fatalf("first put: created=%v err=%v", created, err)
+	}
+	created, err = s.Put(ctx, "tok", []byte("second-value"))
+	if err != nil || created {
+		t.Fatalf("replacement put: created=%v err=%v", created, err)
+	}
+	if created, err := s.Put(ctx, "Not-A-Ref", []byte("value")); !errors.Is(err, ErrInvalidRef) || created {
+		t.Fatalf("malformed ref: created=%v err=%v", created, err)
+	}
+	if err := s.Use(ctx, "tok", func(value []byte) error {
+		if string(value) != "second-value" {
+			t.Errorf("stored value %q", value)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

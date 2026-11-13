@@ -13,7 +13,7 @@ Commands (design §12.2 and §17, implemented):
 | Command | Purpose |
 | --- | --- |
 | `keyref init` | Create the local vault; the master key goes to the OS keyring |
-| `keyref set <ref>` | Store a secret read from stdin (local sources) |
+| `keyref set <ref>` | Store a secret read from stdin (`--raw` keeps every byte); local sources |
 | `keyref get <ref>` | One entry: names, descriptions, `ref`, masks. `--reveal` prints the raw bytes (local sources only) |
 | `keyref delete <ref>` | Delete an entry (local sources) |
 | `keyref list` | Names, descriptions, `ref`, masks (paired vault) |
@@ -56,7 +56,7 @@ keyref exec --env TOKEN=my-ref -- /absolute/path/to/consumer
 
 The master key is 32 random bytes. `keyref init` generates one and stores it in the OS keyring (macOS Keychain, Linux Secret Service); `KEYREF_LOCAL_MASTER` overrides it for headless use, carrying the same key as the standard base64 encoding of 32 bytes. An environment-provided key is used as-is and never copied into the keyring. Losing the key means losing the vault — keyref cannot recover or regenerate it.
 
-`set` reads 1 byte to 1 MiB from stdin and saves it byte for byte, including a trailing newline; the value never appears in the command arguments or in any output. `get` prints a mask computed from the value (the head and the last four characters, and nothing at all for short, binary or whitespace-containing values). `--reveal` is the one deliberate plaintext path: it writes the raw secret bytes to stdout and nothing else, it exists for local sources only, and the paired vault rejects it.
+`set` reads 1 byte to 1 MiB from stdin. By default exactly one trailing newline (`\n` or `\r\n`) is stripped, so `echo "$TOKEN" | keyref set tok` stores the token itself; `--raw` keeps every byte. When stdin is a terminal the value is read as one line without echo. The value never appears in the command arguments or in any output, and the result says `created "tok"` or `replaced "tok"`. A value shorter than 8 bytes gets a warning on stderr because redaction is less reliable for short values. A ref follows design §6.1 — one lowercase letter, or 2–64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit — and `set` refuses anything else. `get` prints a mask computed from the value (the head and the last four characters, and nothing at all for short, binary or whitespace-containing values). `--reveal` is the one deliberate plaintext path: it writes the raw secret bytes to stdout and nothing else, it exists for local sources only, and the paired vault rejects it.
 
 A local vault stores its refs one-way — the row id is an HMAC of the ref — so `keyref list` cannot enumerate them and a ref cannot be recovered from the file. You need the ref to get the entry.
 

@@ -12,11 +12,12 @@ require an absolute path inside an existing private directory. The store file
 is created with mode 0600. A missing key does not initialize a store. Recovery
 of a lost key is not provided.
 
-`Put`, `Use` and `Delete` accept a reference. `Use` supplies decrypted bytes to
-a trusted callback only and wipes that buffer after it returns. The caller is
-responsible for determining who may use each reference, choosing the trusted
-destination, and ensuring that callback code does not retain or disclose the
-secret. The library keeps derived keys and wipes them on `Close`. A `Use`
+`Put`, `Use` and `Delete` accept a reference. `Put` refuses a ref outside the
+design §6.1 grammar (`ValidRef`) and reports whether it created a new entry.
+`Use` supplies decrypted bytes to a trusted callback only and wipes that buffer
+after it returns. The caller is responsible for determining who may use each
+reference, choosing the trusted destination, and ensuring that callback code
+does not retain or disclose the secret. The library keeps derived keys and wipes them on `Close`. A `Use`
 already decrypted may continue its callback after `Close` returns; closing or
 revoking access cannot undo an operation already in flight.
 Wiping is best effort: Go, the cryptographic implementation and same-user

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lidessen/keyref/cli/internal/config"
@@ -51,6 +53,63 @@ func TestLocalMetaPolicy(t *testing.T) {
 	}
 	if exec.ItemAllowsCommand("sh", meta.Policy, false) {
 		t.Fatal("sh must stay denied for local entries")
+	}
+}
+
+func TestReadPipedSecretStripsOneTrailingNewline(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		raw     bool
+		want    string
+		wantErr bool
+	}{
+		{"lf", "tok\n", false, "tok", false},
+		{"crlf", "tok\r\n", false, "tok", false},
+		{"only one ending is stripped", "tok\r\n\r\n", false, "tok\r\n", false},
+		{"no trailing newline", "tok", false, "tok", false},
+		{"raw keeps lf", "tok\n", true, "tok\n", false},
+		{"raw keeps crlf", "tok\r\n", true, "tok\r\n", false},
+		{"a lone lf becomes empty", "\n", false, "", true},
+		{"a lone crlf becomes empty", "\r\n", false, "", true},
+		{"empty input", "", false, "", true},
+		{"raw lone lf is a value", "\n", true, "\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readPipedSecret(strings.NewReader(tc.in), tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("got %q, want an error", got)
+				}
+				return
+			}
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestReadPipedSecretSizeLimits(t *testing.T) {
+	max := bytes.Repeat([]byte{'x'}, maxLocalSecretBytes)
+	withCRLF := append(append([]byte{}, max...), '\r', '\n')
+	got, err := readPipedSecret(bytes.NewReader(withCRLF), false)
+	if err != nil || len(got) != maxLocalSecretBytes {
+		t.Fatalf("a 1 MiB value plus CRLF was rejected: len=%d err=%v", len(got), err)
+	}
+	oversize := append(append([]byte{}, max...), 'x')
+	if _, err := readPipedSecret(bytes.NewReader(oversize), false); err == nil {
+		t.Fatal("accepted a value over 1 MiB")
+	}
+	// A legal 1 MiB value plus CRLF followed by more data must be
+	// rejected, not silently truncated at the CRLF boundary.
+	withExtra := append(append(append([]byte{}, max...), '\r', '\n'), 'x')
+	if _, err := readPipedSecret(bytes.NewReader(withExtra), false); err == nil {
+		t.Fatal("accepted data after a 1 MiB value and CRLF")
+	}
+	if _, err := readPipedSecret(bytes.NewReader(max), true); err != nil {
+		t.Fatalf("raw 1 MiB value: %v", err)
 	}
 }
 

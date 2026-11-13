@@ -26,10 +26,10 @@ type needle struct {
 // lower hex digits) — with the fixed ASCII text <redacted:REF>
 // (design.md §7.4).
 //
-// Streams are chunked; a secret split across read boundaries is caught
-// by retaining a tail of len(secret)*3+16 bytes (the longest encoded
-// form is percent-encoding at ≤3× expansion, plus margin) and only
-// emitting bytes whose possible matches are fully decided.
+// Streams are chunked. A secret split across read boundaries is caught by
+// holding back only the trailing bytes that are still a prefix of some
+// needle; every other byte is forwarded immediately (design.md §7.4). The
+// window computed here is the upper bound this holding can reach.
 type Redactor struct {
 	needles  []needle
 	window   int
@@ -74,27 +74,37 @@ func newRedactor(secrets map[string][]byte, fixedReplacement []byte) *Redactor {
 		if replacement == nil {
 			replacement = []byte("<redacted:" + ref + ">")
 		}
-		for _, variant := range guardedVariants(secret) {
-			dup := false
-			for _, n := range r.needles {
-				if bytes.Equal(n.pattern, variant.pattern) {
-					dup = true
-					break
+		addVariants := func(value []byte) {
+			for _, variant := range guardedVariants(value) {
+				dup := false
+				for _, n := range r.needles {
+					if bytes.Equal(n.pattern, variant.pattern) {
+						dup = true
+						break
+					}
 				}
-			}
-			if dup {
-				if variant.guarded != nil {
-					variant.guarded.Destroy()
+				if dup {
+					if variant.guarded != nil {
+						variant.guarded.Destroy()
+					}
+					continue
 				}
-				continue
+				variant.replace = replacement
+				r.needles = append(r.needles, variant)
 			}
-			variant.replace = replacement
-			r.needles = append(r.needles, variant)
-			// Window basis: percent-encoding expands 3× at most
-			// (design.md §7.4).
-			if w := 3*len(secret) + 16; w > r.window {
-				r.window = w
-			}
+		}
+		addVariants(secret)
+		// A value with leading or trailing ASCII whitespace (typically the
+		// newline `echo $TOKEN | keyref set` used to leave behind) is also
+		// matched after trimming: consumers trim before echoing, and raw
+		// matching alone would let the trimmed plaintext through
+		// (design.md §7.4).
+		if trimmed := trimASCIISpace(secret); len(trimmed) > 0 && !bytes.Equal(trimmed, secret) {
+			addVariants(trimmed)
+		}
+		// Window basis: percent-encoding expands 3× at most (design.md §7.4).
+		if w := 3*len(secret) + 16; w > r.window {
+			r.window = w
 		}
 	}
 	// Longest-first so the most specific encoding wins deterministically.
@@ -153,6 +163,12 @@ func guardedVariants(secret []byte) []needle {
 	build(3*len(secret), func(dst []byte) []byte { return percentEncodeInto(dst, secret, true) })
 	build(3*len(secret), func(dst []byte) []byte { return percentEncodeInto(dst, secret, false) })
 	return out
+}
+
+// trimASCIISpace strips only ASCII whitespace, not the Unicode set
+// bytes.TrimSpace would also remove (design.md §7.4 says ASCII).
+func trimASCIISpace(b []byte) []byte {
+	return bytes.Trim(b, " \t\n\v\f\r")
 }
 
 // percentEncodeInto percent-encodes every byte that is not RFC 3986
@@ -241,48 +257,54 @@ func (r *Redactor) fireOnFail() {
 	}
 }
 
-// maxNeedleLen returns the longest pattern length.
-func (r *Redactor) maxNeedleLen() int {
-	if len(r.needles) == 0 {
-		return 1
-	}
-	return len(r.needles[0].pattern)
-}
-
 // emit scans the buffer, translating decided positions. With final it
 // also decides positions near the end of the buffer.
 func (r *Redactor) emit(final bool) error {
 	if len(r.needles) == 0 {
 		return nil
 	}
-	maxLen := r.maxNeedleLen()
 	i := 0
 	var out []byte
 	for i < len(r.buf) {
-		decided := final || i+maxLen <= len(r.buf)
-		if decided {
-			matched := false
-			for _, n := range r.needles {
-				// len(n.pattern) > 0: a zero-length needle can never match
-				// (and would not advance i). Defensive; NewRedactor skips
-				// empty secrets outright.
-				if len(n.pattern) > 0 && len(n.pattern) <= len(r.buf)-i && bytes.Equal(r.buf[i:i+len(n.pattern)], n.pattern) {
+		remaining := r.buf[i:]
+		matched := false
+		held := false
+		// Longest-first: a longer needle that could still complete in a
+		// later chunk keeps this position undecided even when a shorter
+		// needle matches here, so the longest match always wins.
+		for _, n := range r.needles {
+			p := n.pattern
+			if len(p) == 0 {
+				// Defensive; NewRedactor skips empty secrets and empty
+				// trimmed variants.
+				continue
+			}
+			if len(p) <= len(remaining) {
+				if bytes.Equal(remaining[:len(p)], p) {
 					out = append(out, n.replace...)
 					r.replaced++
-					i += len(n.pattern)
+					i += len(p)
 					matched = true
 					break
 				}
-			}
-			if matched {
 				continue
 			}
+			// The tail is shorter than this needle. Hold it only when it
+			// is a prefix of the needle; otherwise no match can start
+			// here and the byte is forwarded immediately (design.md §7.4:
+			// the window is an upper bound, not a fixed hold).
+			if !final && bytes.HasPrefix(p, remaining) {
+				held = true
+				break
+			}
 		}
-		// Undecided tail (non-final): stop and retain from here.
-		if !final && i+maxLen > len(r.buf) {
+		if matched {
+			continue
+		}
+		if held {
 			break
 		}
-		out = append(out, r.buf[i])
+		out = append(out, remaining[0])
 		i++
 	}
 	r.buf = append(r.buf[:0], r.buf[i:]...)

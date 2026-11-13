@@ -141,7 +141,7 @@ func usage(w *os.File) {
 
 commands:
   init [--source NAME]    create the local vault (key goes to the OS keyring)
-  set <ref>               store a secret read from stdin
+  set <ref>               store a secret read from stdin (--raw keeps every byte)
   get <ref> [--format json] [--reveal]
                           one entry; masked by default, --reveal prints the
                           raw secret bytes (local sources only)
