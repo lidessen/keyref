@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 )
 
 // PolicyError is a policy rejection → exit code 10 (design.md §7.6).
@@ -70,21 +72,58 @@ func (rc *ResolvedCommand) Base() string {
 	return rc.Layers[len(rc.Layers)-1]
 }
 
+// CommandPolicyAllowAll is the meta value that turns the owner's shell
+// refusal off (design.md §7.3, protocol v2 §H). The default and any
+// unknown value keep shell refusal on.
+const CommandPolicyAllowAll = "allow-all"
+
 // ItemAllowsCommand evaluates ONE item's command policy against one
-// layer name (design.md §7.3): a non-empty allowCommands list is a
-// whitelist that may override the default denial; an empty list means
-// the default deny-shells policy applies.
-func ItemAllowsCommand(base string, allowCommands []string) bool {
-	if len(allowCommands) > 0 {
-		for _, w := range allowCommands {
+// layer name (design.md §7.3, protocol v2 §H):
+//
+//   - A non-empty allowCommands list is an exact-name whitelist. It
+//     always wins, whatever commandPolicy says: listing commands can
+//     only tighten a policy.
+//   - On the paired vault an empty list allows nothing unless the owner
+//     turned shell refusal off (commandPolicy = allow-all). The built-in
+//     deny list only catches slips — timeout sh -c, awk, find -exec and
+//     aliased interpreters pass it — so it is not offered as protection
+//     for items that came from the phone.
+//   - On a local source an empty list keeps the built-in deny list; a
+//     local vault has no per-item policy record to consent with.
+func ItemAllowsCommand(base string, policy itemcrypt.MetaPolicy, paired bool) bool {
+	if len(policy.AllowCommands) > 0 {
+		for _, w := range policy.AllowCommands {
 			if strings.EqualFold(w, base) {
 				return true
 			}
 		}
 		return false
 	}
+	if paired {
+		return policy.CommandPolicy == CommandPolicyAllowAll
+	}
 	name := strings.ToLower(base)
 	return !denyList[name] && !denyList[stripVersionSuffix(name)]
+}
+
+// commandDenial explains why one layer may not run for one item. ref is
+// empty when the caller names no item (CheckCommand).
+func commandDenial(ref, layer string, policy itemcrypt.MetaPolicy, paired bool) error {
+	item := "the item"
+	if ref != "" {
+		item = "item " + ref
+	}
+	switch {
+	case len(policy.AllowCommands) > 0:
+		return &PolicyError{Reason: fmt.Sprintf(
+			"command %q is not in %s's allowCommands whitelist", layer, item)}
+	case paired:
+		return &PolicyError{Reason: fmt.Sprintf(
+			"%s allows no commands: an empty allowCommands list allows nothing on the paired vault; set the commands it may run on iOS", item)}
+	default:
+		return &PolicyError{Reason: fmt.Sprintf(
+			"command %q is denied by the built-in deny list; local sources have no per-item allowCommands", layer)}
+	}
 }
 
 // stripVersionSuffix drops a trailing version from an interpreter's
@@ -97,23 +136,18 @@ func stripVersionSuffix(name string) string {
 }
 
 // CheckCommand resolves argv0 and judges every layer against ONE
-// item's allowCommands policy. Run applies it per referenced item —
-// the effective policy across multiple simultaneously injected items
-// is the intersection, never the union: a permissive item never
-// unlocks another item's secret.
-func CheckCommand(argv []string, searchPath string, allowCommands []string) (*ResolvedCommand, error) {
+// item's command policy. Run applies it per referenced item — the
+// effective policy across multiple simultaneously injected items is the
+// intersection, never the union: a permissive item never unlocks
+// another item's secret.
+func CheckCommand(argv []string, searchPath string, policy itemcrypt.MetaPolicy, paired bool) (*ResolvedCommand, error) {
 	rc, err := ResolveCommand(argv, searchPath)
 	if err != nil {
 		return nil, err
 	}
 	for _, layer := range rc.Layers {
-		if !ItemAllowsCommand(layer, allowCommands) {
-			if len(allowCommands) > 0 {
-				return nil, &PolicyError{Reason: fmt.Sprintf(
-					"command %q is not in the item's allowCommands whitelist", layer)}
-			}
-			return nil, &PolicyError{Reason: fmt.Sprintf(
-				"command %q is denied by the default deny-shells policy; allow it in the item's allowCommands on iOS", layer)}
+		if !ItemAllowsCommand(layer, policy, paired) {
+			return nil, commandDenial("", layer, policy, paired)
 		}
 	}
 	return rc, nil

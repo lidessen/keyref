@@ -108,7 +108,13 @@ func (o *Owner) SealItem(itemID, writerDev, ref, name, masked, secretValue strin
 		Type:       "api_key",
 		Masked:     masked,
 		Injectable: true,
-		Policy:     itemcrypt.MetaPolicy{Sensitivity: "standard", CommandPolicy: "deny-shells"},
+		// v2 H: a paired-vault item names the commands it may run; the
+		// built-in deny list is no longer a fallback there.
+		Policy: itemcrypt.MetaPolicy{
+			Sensitivity:   "standard",
+			CommandPolicy: "deny-shells",
+			AllowCommands: []string{"helper"},
+		},
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {

@@ -339,7 +339,9 @@ func (o *owner) putItem(t *testing.T, itemID, ref, masked, secretValue string) {
 		"type": "api_key", "masked": masked, "injectable": true,
 		"policy": map[string]any{
 			"sensitivity": "standard", "commandPolicy": "deny-shells",
-			"allowCommands": []string{}, "allowedHosts": []string{}, "allowArgv": false,
+			// v2 H: a paired-vault item names its commands; the
+			// helper binary is the one the exec fixtures run.
+			"allowCommands": []string{"helper"}, "allowedHosts": []string{}, "allowArgv": false,
 		},
 	}
 	metaJSON, _ := json.Marshal(meta)

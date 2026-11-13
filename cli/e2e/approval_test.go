@@ -106,12 +106,13 @@ const (
 // decision and a correctly bound one-time wrap. It runs until the test
 // ends.
 func (o *owner) serveOneApproval(t *testing.T, decision approvalDecision, wantReply []string) *sync.WaitGroup {
-	return o.serveOneApprovalFor(t, itemApproval, decision, wantReply)
+	return o.serveOneApprovalFor(t, itemApproval, refApproval, decision, wantReply)
 }
 
-// serveOneApprovalFor is serveOneApproval restricted to one item id (the
-// local-item flow answers a different item than the default fixture).
-func (o *owner) serveOneApprovalFor(t *testing.T, itemID string, decision approvalDecision, wantReply []string) *sync.WaitGroup {
+// serveOneApprovalFor is serveOneApproval restricted to one item id and
+// ref (the local-item and no-grant flows answer different items than the
+// default fixture).
+func (o *owner) serveOneApprovalFor(t *testing.T, itemID, ref string, decision approvalDecision, wantReply []string) *sync.WaitGroup {
 	t.Helper()
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -129,7 +130,7 @@ func (o *owner) serveOneApprovalFor(t *testing.T, itemID string, decision approv
 				if row.ItemID != itemID {
 					continue
 				}
-				o.answerApproval(t, &row, decision, wantReply)
+				o.answerApproval(t, &row, ref, decision, wantReply)
 				return
 			}
 			time.Sleep(300 * time.Millisecond)
@@ -147,7 +148,7 @@ func (o *owner) serveOneApprovalFor(t *testing.T, itemID string, decision approv
 // value taken from the owner's own local copy, HPKE-sealed to the
 // request's ephemeral key under the same D4 binding — the server is a
 // blind relay for either.
-func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision approvalDecision, wantReply []string) {
+func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, wantRef string, decision approvalDecision, wantReply []string) {
 	t.Helper()
 	// Signature over the approval-request transcript, before any
 	// decryption (protocol §3.11, v2 A).
@@ -174,10 +175,6 @@ func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision app
 	}
 	if len(rq.Argv) == 0 || rq.Argv[0] != helperBin {
 		t.Fatalf("approval transcript argv must carry the original argv: %v", rq.Argv)
-	}
-	wantRef := refApproval
-	if row.ItemID == itemLocal {
-		wantRef = refLocal
 	}
 	foundRef := false
 	for _, r := range rq.Refs {

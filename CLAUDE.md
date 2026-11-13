@@ -111,7 +111,7 @@ Server environment: `KEYREF_DATA`, `KEYREF_LISTEN`, `KEYREF_ENFORCE_QUOTAS=1` (h
 
 The CLI has one command surface over two backends, called **sources** (`cli/internal/source`): `local`, an offline SQLite vault that is the default, and `sync`, the paired iOS vault, which the CLI may read but never write. Selection is `--source` → `KEYREF_SOURCE` → the configured default in `<data dir>/sources.json` → `local`. A data directory that already held a paired vault before sources existed migrates to `sync`, so upgrading does not move existing commands onto an empty vault; `keyref pair` also sets `sync` as the default.
 
-A local source's master key lives in the OS keyring (`cli/internal/localvault`), with `KEYREF_LOCAL_MASTER` (32 random bytes, standard base64) overriding it for headless use — an environment-provided key is never copied into the keyring. Local refs are stored one-way (the row id is an HMAC of the ref), so `list` is the paired vault's command only. `keyref exec` on a local source reuses `exec.Run` unchanged: same deny-shells policy, same injection shapes, same redactor, with synthetic per-item metas and no grants, approvals or audit.
+A local source's master key lives in the OS keyring (`cli/internal/localvault`), with `KEYREF_LOCAL_MASTER` (32 random bytes, standard base64) overriding it for headless use — an environment-provided key is never copied into the keyring. Local refs are stored one-way (the row id is an HMAC of the ref), so `list` is the paired vault's command only. `keyref exec` on a local source reuses `exec.Run` unchanged: same injection shapes, same redactor, with synthetic per-item metas and no grants, approvals or audit. Command policy differs by source: a local source keeps the built-in deny list (a slip guard, not a security boundary); a paired item must name its commands in `allowCommands` and gets nothing otherwise, unless its owner set `commandPolicy = allow-all` (protocol v2 H).
 
 ### Shared protocol module
 
@@ -127,7 +127,7 @@ Android `kind = source` devices read the phone's SMS, encrypt each captured code
 
 ### Execution path
 
-`keyref exec` resolves argv0 through PATH, symlinks and shebang interpreters (bounded hops), rejects the deny-shell list (`sh`, `env`, `echo`, `cat`, `base64`, `python`, …), checks the item's own `allowCommands`/`allowedHosts`/`allowArgv` policy, and only then spawns. All validation happens *before* the spawn — a rejected command never starts a child. Output is redacted in multiple encodings; the exit-code table is pinned in `cli/internal/exitcode` (10 policy, 11 unknown ref, 12 locked, 13 approval denied, 14 redaction failed, 15 injection invalid, 16 unwrap failed, 17 revoked, 18 cannot start).
+`keyref exec` resolves argv0 through PATH, symlinks and shebang interpreters (bounded hops), checks the item's own `allowCommands`/`allowedHosts`/`allowArgv` policy, and only then spawns. On the paired vault an item with an empty `allowCommands` allows no command at all (exit 10) unless the owner set `commandPolicy = allow-all`; the built-in deny-shell list (`sh`, `env`, `echo`, `cat`, `base64`, `python`, …) applies to local sources only and is a slip guard, never a boundary. All validation happens *before* the spawn — a rejected command never starts a child. The approval round runs when the meta says `sensitivity = approval` **or** this device holds no usable `use` grant (protocol v2 I); what the decision delivers follows the row (secret value for a row without `secret_ciphertext`, one-time item key otherwise). Output is redacted in multiple encodings; the exit-code table is pinned in `cli/internal/exitcode` (10 policy, 11 unknown ref, 12 locked, 13 approval denied, 14 redaction failed, 15 injection invalid, 16 unwrap failed, 17 revoked, 18 cannot start).
 
 ### iOS app structure
 
@@ -145,6 +145,8 @@ These come from `docs/design.md` §16 — read that section before changing secu
 - Revoking a possibly-leaked CLI rotates the item keys it could reach.
 - Approval requests carry the CLI's device signature; the one-time wrap binds `approval_id`, `item_id` and the request transcript digest.
 - Every item and grant row a client applies is verified first: items by their per-field digests plus the writer signature (v2 E/F), grants against the owner key chain. A failed row is skipped, never stored; a directory that does not verify aborts the sync.
+- A paired item names the commands it may run: `allowCommands` empty means no command at all (exit 10) unless `commandPolicy = allow-all` (v2 H). The built-in deny list is a local-source slip guard, never a security boundary.
+- Approval is required when the meta says `sensitivity = approval` **or** the device holds no valid `use` grant (v2 I); the meta can only tighten that, and the row — not the meta — decides whether the decision carries the secret value or a one-time item key.
 - No `system()` / `sh -c`; the child is spawned directly.
 - Local-only items (storage class from design v0.7) never upload their secret ciphertext.
 - `sms:<message_id>` is not resolvable by `list`/`get` — it appears only in an approval-gated `exec`.

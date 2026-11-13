@@ -1,6 +1,6 @@
 # keyref 协议变更规格（v2）
 
-状态：**A、B、C、D、E、F、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
+状态：**A、B、C、D、E、F、G、H、I 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
 
 兼容性：**破坏性变更，不兼容旧客户端**（已确认没有需要兼容的存量部署）。直接原地修改格式，不加版本协商和回退分支。
 
@@ -144,6 +144,10 @@ H(vault_wrapped_item_key) NUL writer_device_id
 
 ## H. exec：已配对的库默认白名单
 
+**已实现**（CLI `internal/exec` 的 `ItemAllowsCommand`/`commandDenial` 与 `ResolvedRef.Paired`、`cmd/keyref` 的合成 `localMeta`、usage 文案；design.md §7.3/§16；e2e `TestPairedVaultRequiresAllowCommands`、`TestAllowAllCommandPolicyOptsOut`）。
+
+`commandPolicy` 采用「让它成为本条规则的开关」：已配对库上 `allow-all` 是 owner 的显式放行（iOS 的「拒绝 shell 与解释器」开关本来就写着这个语义），其余值（含空白与未知值）保持严格；`allowCommands` 非空时永远按白名单收紧，不受该字段影响。本地 source 不读这个字段，继续用内置拒绝名单。
+
 - 已配对（sync）source：`allowCommands` 为空的条目不能被 `keyref exec` 使用——退出码 10，提示去 iOS 里设置该条目允许的命令。非空时与现状一样是白名单。
 - 本地 source：不变（默认拒绝名单），因为本地 source 本来就有 `get --reveal`。
 - 任何文档里都不再把拒绝名单描述成安全边界。它挡的是「手滑」，不是对抗性的 agent：`timeout 5 sh -c …`、`awk`、`find -exec`、`git -c alias.x='!…'` 都能把 env 里的秘密变形输出，脱敏器只认整段秘密值。
@@ -151,6 +155,8 @@ H(vault_wrapped_item_key) NUL writer_device_id
 - `commandPolicy` 字段目前 `exec` 从不读取。要么删除，要么让它成为本条规则的开关；不要保留一个不起作用的旋钮。
 
 ## I. 审批是两个正交的轴
+
+**已实现**（`cli/cmd/keyref/main.go` 的 `hasUsableUseGrant` 与 `resolveValue` 路由、`resolveViaApproval` 按行投递；design.md §6.6/§16；e2e `TestStandardItemWithoutUseGrantRequiresApproval`）。`--stdin-login` 需要的登录条目同样服从这条规则：没有 `use` 授予时走审批，本地条目仍被拒绝。
 
 - 「存在哪」（同步 / 仅本机）和「是否每次审批」互相独立。仅本机必然审批；同步条目可以是 standard 也可以是 approval。四种组合里三种合法。
 - design.md §6.1 的「弱端点」用法（同步 + 审批）继续成立；§6.6 的「`sensitivity` 是派生属性」作废。

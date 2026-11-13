@@ -181,6 +181,11 @@ exec flags:
                             inject a verification code's SMS body once, after
                             Face ID approval. Always approved (no standard
                             tier), never a {{keyref:...}} argv placeholder.
+
+  On the paired vault an item must name the commands it may run
+  (allowCommands on iOS; an empty list allows nothing, and commandPolicy
+  allow-all is the owner's explicit opt-out). A local source keeps the
+  built-in deny list instead.
 `)
 }
 
@@ -772,13 +777,17 @@ func runExecCore(opts execOptions) int {
 			}
 			return auditAttempt(unwrapOrGeneric(err), "unwrap-meta", []string{ref})
 		}
-		refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: m}
+		refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: m, Paired: true}
 		itemIDs[ref] = itemID
 	}
 
 	// Stage 2 — lazy value resolution used by exec.Run after policy.
-	// Approval items (sensitivity = approval, CLI holds only the meta
-	// key) resolve through the per-exec approval flow of design §8.3.
+	// The CLI needs the approval round when the item's meta says
+	// sensitivity = approval OR this device holds no usable use grant
+	// (protocol v2 §I): the meta can only tighten that rule, never
+	// loosen it. What the approval delivers follows the row — an item
+	// with no secret_ciphertext receives the secret value itself, any
+	// other item a one-time item key.
 	deviceID, _, _ := st.GetKV(session.KVDeviceID)
 	resolveValue := func(ref string) (*secret.Plaintext, int, string) {
 		if rr, ok := refs[ref]; ok && rr.Message {
@@ -786,7 +795,12 @@ func runExecCore(opts execOptions) int {
 				opts, rr, messageIDs[ref], appr)
 		}
 		m := refs[ref].Meta
-		if m.Policy.Sensitivity == "approval" {
+		granted, err := hasUsableUseGrant(st, itemIDs[ref])
+		if err != nil {
+			fmt.Fprintln(opts.Stderr, "keyref:", err)
+			return nil, 1, "internal"
+		}
+		if m.Policy.Sensitivity == "approval" || !granted {
 			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
 				opts, refs[ref], itemIDs[ref], appr)
 		}
@@ -850,13 +864,15 @@ func approvalResultOf(policyState string, approvalUsed bool) string {
 }
 
 // resolveViaApproval runs the §8.3 approval round for one ref and
-// produces the guarded secret value. The wrap payload follows the
-// storage class (design §6.6, v0.7): a synced item's decision carries
-// the one-time item key, which decrypts the cached secret ciphertext; a
-// LOCAL item (cache row with an empty secret_ciphertext) receives the
-// secret value itself, which goes straight to the injection path. Key
-// and value are destroyed by exec.Run after the single exec — neither
-// reaches the keyring or the cache (design.md §15).
+// produces the guarded secret value. It runs when the item's meta says
+// sensitivity = approval, or when this device holds no usable use grant
+// (protocol v2 §I). The decision payload follows the row, not the meta:
+// an item with no cached secret_ciphertext (local-only) receives the
+// secret VALUE itself, which goes straight to the injection path; any
+// other item receives a one-time item key that decrypts its cached
+// secret ciphertext (protocol §6.21). Key and value are destroyed after
+// the single exec — neither reaches the keyring or the cache
+// (design.md §15).
 func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
 	auditRecips []audit.OwnerRecipient, dirDevices []audit.DeviceRecord,
 	refreshDevices func() ([]audit.DeviceRecord, error),
@@ -1072,8 +1088,33 @@ func decryptExecValue(stderr io.Writer, key *secret.Key, blob []byte, vaultID, i
 	return value, 0, ""
 }
 
+// hasUsableUseGrant reports whether a long-lived use grant can serve the
+// item right now (protocol v2 §I): without one the CLI takes the
+// approval round even for a sensitivity = standard item. Presence and
+// expiry decide the route; a grant that fails to unwrap stays an unwrap
+// error (exit 16), never a silent fallback.
+func hasUsableUseGrant(st *store.Store, itemID string) (bool, error) {
+	grants, err := st.Grants()
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UnixMilli()
+	for _, g := range grants {
+		if g.ItemID != itemID || g.Kind != "use" || len(g.WrappedKey) == 0 {
+			continue
+		}
+		if g.ExpiresAt > 0 && now > g.ExpiresAt {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // resolveValueFor decrypts the guarded secret value of one ref using
-// its live use grant. Exit codes follow §7.6: 16 unwrap failure.
+// its live use grant. It runs only when the item is not an approval item
+// and a usable grant exists (v2 I). Exit codes follow §7.6: 16 unwrap
+// failure.
 func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, rr *exec.ResolvedRef, itemID string, login bool) (*secret.Plaintext, int, string) {
 	ref := rr.Ref
 	grants, err := st.Grants()
@@ -1106,7 +1147,7 @@ func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, owner
 		defer key.Destroy()
 		return decryptExecValue(os.Stderr, key, it.SecretCiphertext, vaultID, itemID, rr, login)
 	}
-	fmt.Fprintf(os.Stderr, "keyref: no usable item key for %s (approval items need the approval flow)\n", ref)
+	fmt.Fprintf(os.Stderr, "keyref: no usable item key for %s (the use grant expired or was revoked)\n", ref)
 	return nil, exitcode.UnwrapFailed, "no-item-key"
 }
 

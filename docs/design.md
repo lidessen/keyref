@@ -8,7 +8,7 @@ v0.9：新增 §17「统一命令面与 source」——CLI 只有一套命令，
 
 v0.8：新增 §14「短信验证码采集」——多台 Android 以 `source` 设备上传端到端加密的验证码消息，owner 在 iOS 收件箱查看，agent 经审批一次性消费 `sms:<message_id>`；消息 24 小时过期即焚，通知复用 §8.3 的 APNs 管道。可选地，owner 可把消息消费的 decision 签署权委托给 `decider` 设备（例如本地部署的 JEV 决策服务），委托策略由 owner 签名、只能缩小不能扩大（§14.8）。原「开放问题」「实现时保持不变的约束」顺延为 §15、§16。
 
-v0.7：新增存储类别（§6.6：同步 / 仅本机，创建时二选一，仅本机条目的 secret 密文不上服务器、每次审批投递密文本身）；仅本机条目的 iCloud 整文件加密副本（§6.7，恢复码 + iCloud = 全部找回）；可选的定期密钥轮换仪式（§8.4，原子完成、无失效窗口）。
+v0.7：新增存储类别（§6.6：同步 / 仅本机，创建时二选一，仅本机条目的 secret 密文不上服务器、每次审批投递秘密值本身）；仅本机条目的 iCloud 整文件加密副本（§6.7，恢复码 + iCloud = 全部找回）；可选的定期密钥轮换仪式（§8.4，原子完成、无失效窗口）。
 
 v0.6：新增 §7.8「注入的三种形态」（exec / embed / proxy）与 `keyref mcp` 的语义同构说明；§6.1 写明弱端点（移动端等）以 approval-only 模式配对的立场。
 
@@ -32,7 +32,7 @@ v0.2：自托管是一等部署，和官方托管共用一份服务器。费用�
 | 编辑权 | MVP 里只有 iOS owner 能创建、修改、删除、轮换。CLI 只读 |
 | 引用 | 每个条目有稳定的 `ref`（例如 `openai-prod`）。占位符是 `{{keyref:REF}}`（v0.6 起不再有 URI 等价写法） |
 | 注入 | 优先 `--env`、stdin、额外 fd / 打开后即删除的临时文件。进程参数注入必须显式 `--allow-argv`，且条目策略 `allowArgv = true` |
-| 执行 | CLI 直接 `posix_spawn` / `execve`，不经过 shell。`echo`、`env`、`sh` 等默认拒绝，shebang 间接换入的解释器同样检查（§7.3） |
+| 执行 | CLI 直接 `posix_spawn` / `execve`，不经过 shell。已配对条目必须显式列出允许的命令（`allowCommands`，v2 H）；`echo`、`env`、`sh` 等的内置拒绝名单只用于本地源。shebang 间接换入的解释器同样检查（§7.3） |
 | 敏感条目 | `sensitivity = approval` 的条目不给 CLI 长期条目密钥。每次 `exec` 由手机批准后下发一次性包裹 |
 | 元数据 | 名称、描述、`ref`、策略、秘密值全部加密。服务器只看见 id、版本、密文、设备授权图。托管部署另外看见配额档位 |
 | 密码学 | AES-256-GCM 做数据加密；HPKE（RFC 9180）做密钥包裹；Secure Enclave 用 P-256；CLI 用 X25519 + Ed25519；恢复口令用 Argon2id |
@@ -222,7 +222,7 @@ Meta（由 meta key 加密）：
   "policy": {
     "sensitivity": "standard",
     "commandPolicy": "deny-shells",
-    "allowCommands": [],
+    "allowCommands": ["curl"],
     "allowedHosts": ["api.openai.com"],
     "allowArgv": false
   }
@@ -257,14 +257,14 @@ Secret（由 item key 加密）：
 
 | 值 | CLI 平时拿到的密钥 | `exec` 时 |
 | --- | --- | --- |
-| `standard` | meta key 和 item key 的长期包裹 | 配对完成且策略通过即可运行，不必每次按手机 |
-| `approval` | 只有 meta key | 每次执行向手机要一次性 item key |
+| `standard` | meta key 和 item key 的长期包裹 | 有有效 `use` 授予且策略通过即可运行，不必每次按手机；没有授予时落到审批（v2 I） |
+| `approval` | 只有 meta key | 每次执行向手机要一次性投递，不管本机有没有授予 |
 
-无人值守的 agent 用 `standard`。生产密钥、邮箱密码、云账号根密钥建议用 `approval`。默认值见开放问题；设计里的推荐默认是 `standard` 加上 `deny-shells`，避免产品第一天就无法无人使用。
+无人值守的 agent 用 `standard`。生产密钥、邮箱密码、云账号根密钥建议用 `approval`。默认值见开放问题；设计里的推荐默认是 `standard` 加上显式 `allowCommands` 白名单（v2 H），避免产品第一天就无法无人使用，同时不把内置拒绝名单当成保护。
 
 短信采集设备（§14）是这条立场更进一步的形态：它连审批都不参与——只上传，永不读取。
 
-`approval` 档位有第二个用途：**弱端点**。移动端、共享设备、或任何无法像工作机一样安全持有长期密钥的平台，配对成 cli 设备时把长期授予保持空集、要用的条目全部设为 `approval`——设备每次使用都向手机要 60 秒一次性包裹（§8.3），它本身在任何时刻都不持有可用的长期密钥。设备丢了，攻击者得到的是「每次用都要手机点头」的通道，而不是一把钥匙。这是协议内建的能力，不需要为弱端点新造机制。
+`approval` 档位有第二个用途：**弱端点**。移动端、共享设备、或任何无法像工作机一样安全持有长期密钥的平台，配对成 cli 设备时把长期授予保持空集——这样无论条目的 `sensitivity` 写什么，每次使用都要向手机要 60 秒一次性包裹（§8.3；v2 I：没有 `use` 授予就走审批）。设备本身在任何时刻都不持有可用的长期密钥。设备丢了，攻击者得到的是「每次用都要手机点头」的通道，而不是一把钥匙。这是协议内建的能力，不需要为弱端点新造机制。
 
 ### 6.2 标识
 
@@ -458,7 +458,7 @@ CLI 目录权限 `0700`：
 
 离线：缓存里已有的 `use` 授权可以离线 `exec`。过期时间由诚实的 CLI 执行。需要新的一次性密钥时必须在线。
 
-### 6.6 存储类别：同步 / 仅本机（v0.7）
+### 6.6 存储类别：同步 / 仅本机（v0.7；v2 I 修订两轴关系）
 
 创建条目时人做一个选择。它替代旧 `sensitivity` 的对外表述——「要不要审批」对用户是安全术语，「存在哪」不是：
 
@@ -466,12 +466,14 @@ CLI 目录权限 `0700`：
 | --- | --- | --- |
 | secret 密文 | 上传服务器 | 只在手机（本地加密存储），服务器行 `secret_ciphertext = NULL` |
 | CLI 密钥 | 长期 `use` 授予，无人值守可用 | 永远没有 `use` 授予；每次 exec 审批（§8.3） |
-| 审批投递 | 一次性 item key 包裹（约 32 字节） | 审批 decision 直接投递 secret 密文（HPKE 包给 CLI 临时公钥，≤64 KiB；服务器仍是瞎中继，decision 体积上限相应放宽） |
+| 审批投递 | 一次性 item key 包裹（约 32 字节） | 审批 decision 直接投递 secret 的**明文值本身**——owner 解开本地包裹后的 UTF-8 `value` 字符串（HPKE 包给 CLI 临时公钥，≤64 KiB；不是 secret JSON 包装，也不是密文；服务器仍是瞎中继，decision 体积上限相应放宽） |
 | 恢复 | 恢复码 + 服务器（§8.5） | 恢复码 + iCloud 副本（§6.7）；二者皆无则条目随手机丢失 |
 | 双 owner | 正常同步 | 转移即分叉：第二台 iPhone 接管时随目录转移一份，此后两台各自编辑、不合并（单设备工件） |
 | 典型用途 | agent 日常用的 API key | TOTP seed、恢复口令、不希望上任何同步层的密钥 |
 
-`sensitivity` 成为派生属性：同步 ⟹ `standard`，仅本机 ⟹ `approval`。服务器校验增加两条：仅本机条目不得拥有 `use` 授权；`secret_ciphertext` 与 `use` 授权互斥（schema 里该列本就可空）。CLI 对 `secret_ciphertext = NULL` 的行为：`list` / `get` 只见 meta；审批通过后取到的是密文本身，解开即用、即清。
+「存在哪」和「是否每次审批」是两个正交的轴（protocol v2 §I）。仅本机必然审批；同步条目可以是 `standard`，也可以是 `approval`。四种组合里三种合法——「仅本机 + standard」不存在。服务器只按行状态判定，不按 meta 判定：仅本机条目不得拥有 `use` 授权；`secret_ciphertext` 与 `use` 授权互斥（schema 里该列本就可空）。
+
+CLI 需要走审批，当且仅当条目 meta 写着 `sensitivity = approval`，**或者**本设备对它没有有效的 `use` 授予。meta 里的字符串只会收紧，永远不会放松：写了 `approval` 就必审批，即使本机还留着授予。审批投递什么由行决定：`secret_ciphertext` 为空则决定里带的是秘密值本身，否则是一次性 item key（protocol §6.21）。CLI 对 `secret_ciphertext = NULL` 的行为：`list` / `get` 只见 meta；审批通过后拿到明文值，解开即用、即清。
 
 ### 6.7 iCloud 整文件副本（仅本机条目，可选）
 
@@ -556,9 +558,13 @@ keyref 掌握 pty 主端。子进程的输出先过脱敏器，再交给 agent�
 
 同时设置 `RLIMIT_CORE = 0`。在 Linux 上于子进程里尝试 `PR_SET_DUMPABLE = 0`，并在实现时验证 `execve` 之后标志是否还在。不要在文档里把它写成已经封死 `/proc/<pid>/environ`。同一用户的 `procfs` 可读性是 B2，靠集成约束和以后的沙箱处理。
 
-### 7.3 默认拒绝的命令
+### 7.3 命令策略：已配对库要求显式白名单，本地源保留内置拒绝名单
 
-`commandPolicy = deny-shells` 时，argv0 的 basename（大小写不敏感）落在下面的集合里就拒绝执行：
+**已配对（sync）source 要求显式白名单**（protocol v2 §H）。argv0 的 basename（大小写不敏感）必须命中条目 `allowCommands` 里的一项，否则退出码 `10`，并提示去 iOS 里设置该条目允许的命令。`allowCommands` 为空时条目**什么都跑不了**——已配对的库不退回下面的内置拒绝名单。唯一的例外是人在 iOS 上明确关闭了「拒绝 shell 与解释器」（`commandPolicy = allow-all`）：那是 owner 的显式放行，等价于「任何命令都能拿到它」。`allowCommands` 非空时仍按白名单收紧，列表只会越写越严；空白或未知的 `commandPolicy` 按默认处理（继续严格）。
+
+**本地 source 保留内置拒绝名单。** 本地库没有逐条目的策略记录，`allowCommands` 无从谈起，所以 `deny-shells` 的内置名单继续生效：argv0 的 basename（大小写不敏感）落在下面的集合里就拒绝执行。
+
+**拒绝名单不是安全边界。** 它挡的是手滑，不是对抗性的 agent：`timeout 5 sh -c …`、`awk`、`find -exec`、`git -c alias.x='!…'` 都能把 env 里的秘密变形输出，脱敏器只认整段秘密值。任何文档都不要把它写成保护；要抗对抗性 agent，靠显式白名单加审批（以及 Phase 3 的沙箱）。
 
 ```text
 sh bash zsh dash fish ksh csh tcsh busybox
@@ -570,7 +576,7 @@ python python2 python3 node nodejs deno bun perl ruby php lua
 osascript socat
 ```
 
-argv0 的检查不能只看字面：`execve` 遇到以 `#!` 开头的可执行文件时，内核会把解释器换进来，字面 argv0 是脚本名，真正跑起来的是解释器。所以策略检查在 spawn 之前先做一遍解析：
+两个 source 的判定都不能只看字面：`execve` 遇到以 `#!` 开头的可执行文件时，内核会把解释器换进来，字面 argv0 是脚本名，真正跑起来的是解释器。所以策略检查在 spawn 之前先做一遍解析：
 
 1. 按子进程将使用的 `PATH` 把 argv0 解析到一个具体文件（这就是 `execvp` 将要执行的语义）。解析不到就以退出码 `18` 拒绝——fail closed。
 2. 读文件前两个字节。是 `#!` 就解析解释器行，对解释器路径重复第 1、2 步（`/usr/bin/env python3` 会同时检查 `env` 和 `python3`），最多跟 4 层。拒绝与白名单的判定都以**实际会执行的程序**为准。
@@ -578,9 +584,9 @@ argv0 的检查不能只看字面：`execve` 遇到以 `#!` 开头的可执行�
 
 残余面：`binfmt_misc` 这类内核注册的解释器不在静态检查可见范围内，与 B2 归为同一类残余，不假装已封死。
 
-拒绝时退出码 `10`，说明是策略拒绝，并提示要在 iOS 里修改该条目的 `allowCommands`。错误文本里不回显秘密。
+拒绝时退出码 `10`，说明是策略拒绝；错误文本里不回显秘密，并指出该改哪里（已配对库：在 iOS 上设置该条目的 `allowCommands`；本地源：内置名单没有旋钮）。
 
-`allowCommands` 非空时，它变成白名单：argv0 必须命中其中一项。白名单里的名字可以覆盖上面的默认拒绝。覆盖默认拒绝时，iOS 保存前提示风险。解释器一旦被允许，模型就可以用它把秘密切片打印，脱敏器会失明。所以对 `python`、`node`、`sh` 的显式允许应该和 `sensitivity = approval` 一起用。
+`allowCommands` 是精确的名字匹配，不展开通配或前缀；检查覆盖解析链上的每一层，shebang 解释器也算。白名单是 owner 的判断：解释器一旦被允许，模型就可以用它把秘密切片打印，脱敏器会失明。所以对 `python`、`node`、`sh` 的显式放行应该和 `sensitivity = approval` 一起用；iOS 保存这类名字时会先给出红色警示。
 
 `allowedHosts` 为空表示 MVP **不做**主机检查。不要把空列表解释成「禁止所有网络」。非空时，CLI 扫描 argv 里的 `http://` 和 `https://`，主机名必须与列表完全一致（不接受后缀匹配，`api.openai.com.evil.example` 不能通过 `api.openai.com`）。这是尽力而为：
 
@@ -629,8 +635,8 @@ argv0 的检查不能只看字面：`execve` 遇到以 `#!` 开头的可执行�
 | `ps` 的 argv | 默认不把秘密放进 argv。`--allow-argv` 明确接受这个泄露 |
 | `/proc/<pid>/environ`、macOS `ps e` | 与 argv 相比，环境变量不会被系统里所有用户在进程列表里看到，但同一用户可以读。这是 B2。文档把 env 排在 argv 前面，是因为暴露面更窄，不是因为 agent 读不到 |
 | 临时文件 | 0600、目录 0700、写入后 unlink |
-| 子进程把秘密写到磁盘，后续命令再读 | 默认拒绝 `cat` / shell。若 harness 另有 shell，则属于 B2 |
-| `exec -- echo {{keyref:x}}` 或 `exec -- env` | 默认拒绝 |
+| 子进程把秘密写到磁盘，后续命令再读 | 已配对库只放行白名单里的命令，默认没有 `cat` / shell；本地源靠内置拒绝名单。若 harness 另有 shell，则属于 B2 |
+| `exec -- echo {{keyref:x}}` 或 `exec -- env` | 已配对库：不在条目白名单里就拒绝；本地源：命中内置拒绝名单 |
 | CLI 日志、崩溃转储 | 不记录解开的值。关闭 core dump。密钥缓冲区尽力清零（§12.2） |
 | 交换分区 | 对密钥页 `mlock`，失败只记调试计数，不把秘密写进日志 |
 | 审批界面被模型骗 | 手机上展示的是 argv 原文、`ref`、条目名称、注入方式。人看到的是 `curl https://evil.example`，不是一个已经被替换成密钥的字符串 |
@@ -1227,7 +1233,7 @@ Go。一个模块，入口是 `keyref-server`。HTTP 用标准库，SQLite 用�
 - 同步 API：vault、device、item、grant、sync、session，含恢复端点（`GET /v1/vaults/:id/recovery`、`POST /v1/recovery/directory`、`PUT /v1/vault/recovery`）、`DELETE /v1/vaults`、`GET /v1/healthz`
 - 官方托管从第一天就打开免费档硬配额、按 IP 的注册限制和全局熔断。内购还没做时，不存在无限档
 - iOS 扫码配对，默认不选任何条目；设备列表支持撤销（默认动作含轮换）与按设备追加/收回授权
-- CLI：`pair`、`list`、`get`、`exec` 的 `--env`、`--stdin`、`--fd`，脱敏，默认拒绝 shell
+- CLI：`pair`、`list`、`get`、`exec` 的 `--env`、`--stdin`、`--fd`，脱敏，已配对库执行显式命令白名单（v2 H）
 - 审计加密上传，iOS 能查看。过期审计按档位删除
 - 跨语言 HPKE 测试向量
 - `keyref-server backup` 子命令、`GET /v1/healthz`、ACME 自动续期；官方托管配置免费拨测对 healthz 报警
@@ -1315,7 +1321,7 @@ MCP 放在 Phase 2 而不是 Phase 1，是因为 CLI 已经能被现有 agent �
 
 - 语法：`sms:<message_id>` 的引用只存在于 `exec` 的注入位置（`--env` / `--stdin` / `--fd`）的**值里**，`list` 和 `get` 不认识它；`{{keyref:sms:…}}` 这样的 argv 占位符写法不存在。注入的值是该消息的 `body` 全文（验证码嵌在正文里，agent 自行读取）；注入后进入本次 `exec` 的脱敏集合，子进程输出里再出现时替换为 `<redacted:sms-ab12…>`。
 - **每次消费必经审批对象，没有 standard 档**；decision 默认由人签署，也可以按 §14.8 委托给决策器自动签署。`exec` 解析出消息引用后走 §8.3 的审批：请求誊本带 `message_id` 与注入方式；人工审批界面把命令原文与短信全文、来源设备、sender、剩余秒数并列——人独立确认的是「这次登录该用哪条短信」。sender 与设备 label 是参考信号，不是凭据（sender 可伪造，B9）。
-- 批准后，decision 的载荷是把**这条消息的明文 JSON** HPKE 包给 CLI 的临时公钥直接投递——正是 §6.6 为仅本机条目定义的「decision 直接投递密文」路径。消息密钥本身不出 owner 与决策器域：CLI 不需要、也没有端点去取 `messages.envelope`。`approvals` 的 `item_id` 相应扩展为 `subject`（`item:<id>` / `message:<id>`）。
+- 批准后，decision 的载荷是把**这条消息的明文 JSON** HPKE 包给 CLI 的临时公钥直接投递——正是 §6.6 为仅本机条目定义的「decision 直接投递秘密值」路径。消息密钥本身不出 owner 与决策器域：CLI 不需要、也没有端点去取 `messages.envelope`。`approvals` 的 `item_id` 相应扩展为 `subject`（`item:<id>` / `message:<id>`）。
 - 注入后，验证码值进入本次 `exec` 的脱敏集合，子进程输出里再出现时替换为 `<redacted:sms-ab12…>`（§7.4 的单冒号风格）。
 - 未知、已过期、已消费的消息一律退出码 `11`；审批被拒或超时 `13`。消费结束的内存清零同 §6.5。消费审计的明文含 `message_id`、decision 来源设备与命中的策略条目（§7.7 的消息版）。
 - `sms:` 引用与解出的验证码永不进入 CLI 的密钥环与 cache.sqlite（§16）。
@@ -1350,7 +1356,7 @@ A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设�
 
 下面每一项都给了推荐，方便直接开工。推翻推荐会改变 Phase 1 的范围。
 
-1. **无人值守的默认值。** 推荐：新的 `api_key` 是 `standard`，靠 `deny-shells` 约束；人可以改成 `approval`。另一端是全部默认 `approval`，更安全，agent 在人离开后就不能跑。你更想要哪一个？
+1. **无人值守的默认值。** 推荐：新的 `api_key` 是 `standard`，条目显式列出允许的命令（v2 H）；人可以改成 `approval`。另一端是全部默认 `approval`，更安全，agent 在人离开后就不能跑。你更想要哪一个？
 2. **沙箱要不要进 MVP。** 推荐：不进。Phase 1 用集成要求（工具面只有 keyref）加上拒绝 shell。若你的 agent 必须同时拥有通用 shell，沙箱就应该提前，否则「看不见明文」只对 keyref 自己的输出成立。
 3. **账号。** 推荐：没有邮箱，恢复码就是恢复手段（§8.5）。若你希望换手机时用 Apple 登录而不是抄写恢复码，需要单独立项，而且仍然不能让 Apple 或服务器解开 VMK。
 4. **团队共享。** 推荐：MVP 只有一个 owner 保险库。若一年内要给同事授权某几条密钥，grant 模型可以延伸，但目录签名和「谁有权轮换」要重新设计。
@@ -1387,6 +1393,8 @@ A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设�
 - 配对完成时授予集合为空，直到人勾选。
 - 撤销一台可能已经泄密的 CLI 时，轮换它能用的 item key。
 - 审批请求必须带 CLI 设备签名；一次性包裹绑定 approval_id、item_id 与请求誊本摘要。
+- 已配对库的 `exec` 要求条目显式列出允许的命令（v2 H）：`allowCommands` 为空则拒绝，除非 owner 明确关闭了 shell 拒绝（`commandPolicy = allow-all`）。内置拒绝名单只在本地源生效，且任何文档都不把它写成安全边界。
+- 审批是两个正交的轴（v2 I）：条目 meta 写了 `sensitivity = approval`，或本设备没有有效的 `use` 授予，`exec` 就必须走审批。meta 只会收紧规则，永远不会放松；审批投递明文值还是一次性 item key 由条目行决定，不由 meta 决定。
 - 客户端消费的每一条 item 与 grant 行都先验签再入库：item 按四个字段摘要加 `writer_device_id` 的签名（v2 E），grant 按 owner 密钥链逐个试 key（v2 F）；多 owner 时新目录必须由已保存目录里的 active owner 设备签名。验不过的行跳过，验不过的目录中止同步。
 - 恢复码只显示一次，内含 `vault_id`；恢复签名权威只用于重新锚定目录。
 - 服务器不因闲置删除保险库数据；删除只有 owner 的显式两步确认。
@@ -1431,7 +1439,7 @@ CLI 原本只有一套命令，全部对着已配对的 iOS 库（`pair` / `sess
 - **目录**：库文件所在目录必须是私有目录（0700），否则拒绝创建或打开。
 - **ref 单向存**：行 id 是 ref 的 HMAC，文件里没有可读的 ref。因此 `list` 只属于 `sync` source；本机库只能凭 ref 取。`set` 存的是原始字节（1 字节到 1 MiB，含末尾换行），取回来还是同样的字节。
 - **`get`**：默认只给掩码——头三个字符加末四个字符，短值、二进制值和含空白字符的值什么都不给。`--reveal` 写原始字节到 stdout，别的什么都不写。这是 §16 那条不变量的唯一例外，且只有 local source 接受。
-- **`exec`**：与 `sync` 同一套代码路径——同样的 deny-shells 策略、同样的注入形态、同样的脱敏器；没有授予、没有审批、没有远程审计，条目的策略是合成的 deny-shells。argv 注入在本地库上不可用：本地条目没有策略记录可以同意把秘密放进进程参数。
+- **`exec`**：与 `sync` 同一套代码路径——同样的注入形态、同样的脱敏器、同样的 spawn 前检查；没有授予、没有审批、没有远程审计，条目的策略是合成的 `deny-shells`（§7.3：已配对库要求显式 `allowCommands`，本地源保留内置拒绝名单，v2 H）。argv 注入在本地库上不可用：本地条目没有策略记录可以同意把秘密放进进程参数。
 
 ### 17.5 MCP
 

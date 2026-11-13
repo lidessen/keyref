@@ -35,6 +35,11 @@ type ResolvedRef struct {
 	Meta     *itemcrypt.Meta
 	Value    *secret.Plaintext // guarded; destroyed by Run
 	Username *secret.Plaintext // guarded; only resolved for --stdin-login
+	// Paired marks a ref that came from the paired vault (protocol v2
+	// §H): an item with an empty allowCommands list then allows no
+	// command at all, because the built-in deny list is only a slip
+	// guard and is not offered as protection on the paired vault.
+	Paired bool
 	// Message marks an sms:<message_id> ref (design v0.8 §14.5). Such a
 	// ref has no item meta and no item policy: its only gate is the
 	// per-consumption approval round, so every item-level check below
@@ -354,11 +359,11 @@ func run(req *Request) (int, *Outcome) {
 		}
 	}
 
-	// Command policy: PATH resolution, shebang chasing, deny list
-	// (design.md §7.3). The child's PATH is the sanitized one. Every
-	// simultaneously injected item's policy must be satisfied — an
-	// intersection, not a union: a permissive item never unlocks
-	// another item's secret.
+	// Command policy: PATH resolution, shebang chasing, then each
+	// item's command policy (design.md §7.3, protocol v2 §H). The
+	// child's PATH is the sanitized one. Every simultaneously injected
+	// item's policy must be satisfied — an intersection, not a union: a
+	// permissive item never unlocks another item's secret.
 	childPath := "PATH=/usr/bin:/bin"
 	for _, kv := range baseEnv {
 		if strings.HasPrefix(kv, "PATH=") {
@@ -376,14 +381,16 @@ func run(req *Request) (int, *Outcome) {
 		return deny(18, "cannot-start")
 	}
 	for _, ref := range outcome.Refs {
-		if req.Refs[ref].Message {
+		rr := req.Refs[ref]
+		if rr.Message {
 			continue // no item policy to intersect (design §14.5)
 		}
 		for _, layer := range resolved.Layers {
-			if !ItemAllowsCommand(layer, req.Refs[ref].Meta.Policy.AllowCommands) {
-				fmt.Fprintf(req.Stderr, "keyref: command %q is not allowed by item %s (allowCommands)\n", layer, ref)
-				return deny(10, "policy-command")
+			if ItemAllowsCommand(layer, rr.Meta.Policy, rr.Paired) {
+				continue
 			}
+			fmt.Fprintln(req.Stderr, "keyref:", commandDenial(ref, layer, rr.Meta.Policy, rr.Paired))
+			return deny(10, "policy-command")
 		}
 	}
 	for _, ref := range outcome.Refs {

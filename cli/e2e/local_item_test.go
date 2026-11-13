@@ -163,7 +163,7 @@ func TestLocalItemExecFlow(t *testing.T) {
 
 	// First exec: the owner approves by delivering the secret value
 	// itself; the CLI injects it and redacts the output.
-	done := owner.serveOneApprovalFor(t, itemLocal, decideApprove, nil)
+	done := owner.serveOneApprovalFor(t, itemLocal, refLocal, decideApprove, nil)
 	ex := runCLI(t, "exec", "--env", "K="+refLocal, "--", helperBin, "print-env")
 	done.Wait()
 	if ex.code != 0 {
@@ -182,7 +182,7 @@ func TestLocalItemExecFlow(t *testing.T) {
 	// (Run before the no-responder case so no stale pending approval is
 	// left for a later responder to trip over.)
 	start := time.Now()
-	doneDeny := owner.serveOneApprovalFor(t, itemLocal, decideDeny, nil)
+	doneDeny := owner.serveOneApprovalFor(t, itemLocal, refLocal, decideDeny, nil)
 	ex3 := runCLI(t, "exec", "--env", "K="+refLocal, "--", helperBin, "print-env")
 	doneDeny.Wait()
 	if ex3.code != 13 {
@@ -282,7 +282,7 @@ func TestLocalItemMCPExec(t *testing.T) {
 		t.Fatalf("mcp initialize: %+v", init)
 	}
 
-	done := owner.serveOneApprovalFor(t, itemLocal, decideApprove, nil)
+	done := owner.serveOneApprovalFor(t, itemLocal, refLocal, decideApprove, nil)
 	ex := send("tools/call", map[string]any{
 		"name": "exec",
 		"arguments": map[string]any{

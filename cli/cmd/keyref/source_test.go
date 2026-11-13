@@ -41,10 +41,10 @@ func TestLocalMetaPolicy(t *testing.T) {
 	if meta.Policy.Sensitivity != "standard" {
 		t.Fatalf("sensitivity = %q", meta.Policy.Sensitivity)
 	}
-	if !exec.ItemAllowsCommand("curl", meta.Policy.AllowCommands) {
+	if !exec.ItemAllowsCommand("curl", meta.Policy, false) {
 		t.Fatal("an ordinary command should be allowed under deny-shells")
 	}
-	if exec.ItemAllowsCommand("sh", meta.Policy.AllowCommands) {
+	if exec.ItemAllowsCommand("sh", meta.Policy, false) {
 		t.Fatal("sh must stay denied for local entries")
 	}
 }
