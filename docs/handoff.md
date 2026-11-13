@@ -8,7 +8,7 @@
 
 第 5 节的前八步、第 9 步的 lib + cli 部分与第 10 步已完成（第 9 步的 iOS / server 部分待办）：
 
-- **第 1 步（验证）通过。** `TestStageFdFileUnlinksImmediately` 与 e2e 的 `TestPtyReplyFlow` 在本机通过。**更正（2026-11-13）：** 前者此前被当成沙箱所致，实际是 Linux 上 memfd 让断言不成立，已在 issue #4 修复（见第 2 节）；只有 pty 那条是环境所致。`d7c3d6b` 的 iOS 改动在 macOS 上编译通过，`KeyrefCoreTests` 119 个用例全绿，含三条新回归；整个 `Keyref` scheme 也全绿。
+- **第 1 步（验证）通过。** `TestStageFdFileUnlinksImmediately` 与 e2e 的 `TestPtyReplyFlow` 在本机通过。**更正（2026-11-13）：** 前者此前被当成沙箱所致，实际是 Linux 上 memfd 让断言不成立，已在 issue #4 修复（见第 2 节）；pty 那条也不是环境——Linux 的 `TIOCGPTN` 读取用错了 ioctl（`IoctlRetInt` 传 NULL），且中断 e2e 的 `pgrep` 会匹配到 keyref 自己的 argv，两处都在 `cf78d82` 修复，CI 的 e2e 步骤首次在 `main` 上转绿。`d7c3d6b` 的 iOS 改动在 macOS 上编译通过，`KeyrefCoreTests` 119 个用例全绿，含三条新回归；整个 `Keyref` scheme 也全绿。
 - **第 2 步（v2 G）已实现。** 见 protocol v2 §G 与 protocol.md §6.3/§6.15：目录是设备行的唯一真相来源，省略即撤销，`revoked` 终态，设备上限按目录记录投影。测试：`server/internal/store/directory_test.go`（新增）、`server/internal/api/regress_test.go`。
 - **第 3 步（v2 A + B）已实现。** 见 protocol v2 §A/§B 与 protocol.md §3.11/§3.12/§6.19–§6.22：审批请求改签结构化誊本（覆盖 subject、过期时间、一次性公钥、密文摘要），审批决定新增 `decision_signature`（服务器 approvals 表 schema v7，CLI 解包前先验签，失败退出码 13）。改动：`proto/wire`、`server/internal/api/approvals.go`、`server/internal/store/approvals.go`、`cli/internal/approval`、`cli/internal/decider`、`cli/e2e`、iOS `ApprovalFlows.swift` / `LiveBackend.decideApproval` / `ApprovalTranscripts.swift`（新增）、跨语言向量（新增三条 approval 誊本向量）。负例测试：CLI 拒绝没有签名或签名不对的决定；decider 拒绝它无法归属到目录里 active CLI 的请求；iOS 拒绝临时公钥被换掉的请求。
 
@@ -184,7 +184,7 @@ iOS 在第 1 步已全量编译与测试通过；Android 在第 10 步已编译�
 | #7 | 只用本地 source 的安装也会生成 `cache.sqlite`；`<command> --help` 退出码是 2 |
 | #8 | Ctrl-C 对子进程组发的是 SIGKILL，不是转发信号 |
 
-**2026-11-13：以上 #2–#8 已全部修复**，每条一个提交（`e0aa65a` #5、`a1d02e8` #4、`eb5093c` #2、`b38f62d` #6、`53e6346` #8、`7f5759c` #7、`cf71be4` #3；`e361158` 补上 #5 的 `GOWORK=off` 构建所需 go.sum 条目）。验证：四个 module 的 `go vet`/`go test`、`GOWORK=off` 构建、全量 e2e 全绿。
+**2026-11-13：以上 #2–#8 已全部修复**，每条一个提交（`e0aa65a` #5、`a1d02e8` #4、`eb5093c` #2、`b38f62d` #6、`53e6346` #8、`7f5759c` #7、`cf71be4` #3；`e361158` 补上 #5 的 `GOWORK=off` 构建所需 go.sum 条目，`cf78d82` 修掉 CI e2e 暴露的 Linux pty ioctl 与中断测试竞态）。验证：四个 module 的 `go vet`/`go test`、`GOWORK=off` 构建、全量 e2e 在 macOS 与 Linux 容器内全绿，CI 转绿。
 
 **整理项**（不是设计，也不是 bug；做 §17.7 的引擎导出时一并处理）：
 
