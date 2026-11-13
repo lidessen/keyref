@@ -52,6 +52,14 @@ type ResolvedCommand struct {
 	// chain: the resolved argv0 and each shebang interpreter
 	// (including /usr/bin/env arguments).
 	Layers []string
+	// First is the absolute PATH-resolved candidate for argv0 (the
+	// file named by PATH/argv0 before symlinks are followed), and
+	// FirstReal is its symlink-resolved path as checked. Run spawns
+	// First, not Path: for a shebang script Path is the interpreter,
+	// and for a multi-call binary the symlink name is what selects the
+	// applet, so executing FirstReal would change behaviour.
+	First     string
+	FirstReal string
 }
 
 // Base returns the basename of the program that will actually run.
@@ -75,7 +83,17 @@ func ItemAllowsCommand(base string, allowCommands []string) bool {
 		}
 		return false
 	}
-	return !denyList[strings.ToLower(base)]
+	name := strings.ToLower(base)
+	return !denyList[name] && !denyList[stripVersionSuffix(name)]
+}
+
+// stripVersionSuffix drops a trailing version from an interpreter's
+// real file name, so python3.13, perl5.36.0, lua5.4 and node18 are
+// judged as python, perl, lua and node. Distributions install
+// interpreters under versioned names and symlink the plain name to
+// them; the deny list is matched against the symlink-resolved name.
+func stripVersionSuffix(name string) string {
+	return strings.TrimRight(name, "0123456789.-")
 }
 
 // CheckCommand resolves argv0 and judges every layer against ONE
@@ -112,9 +130,12 @@ func ResolveCommand(argv []string, searchPath string) (*ResolvedCommand, error) 
 	rc := &ResolvedCommand{}
 	exe := argv[0]
 	for hop := 0; hop < maxShebangHops; hop++ {
-		path, err := resolveExecutable(exe, searchPath)
+		cand, path, err := resolveExecutableBoth(exe, searchPath)
 		if err != nil {
 			return nil, err
+		}
+		if hop == 0 {
+			rc.First, rc.FirstReal = cand, path
 		}
 		rc.Path = path
 		rc.Layers = append(rc.Layers, strings.ToLower(filepath.Base(path)))
@@ -147,6 +168,13 @@ func ResolveCommand(argv []string, searchPath string) (*ResolvedCommand, error) 
 // searchPath. It then canonicalises symlinks and enforces the
 // safe-to-start conditions of design.md §7.3 step 3.
 func resolveExecutable(exe, searchPath string) (string, error) {
+	_, real, err := resolveExecutableBoth(exe, searchPath)
+	return real, err
+}
+
+// resolveExecutableBoth also returns the absolute PATH-resolved
+// candidate (before symlink resolution).
+func resolveExecutableBoth(exe, searchPath string) (cand, real string, err error) {
 	var candidates []string
 	if strings.ContainsRune(exe, '/') {
 		candidates = []string{exe}
@@ -158,40 +186,45 @@ func resolveExecutable(exe, searchPath string) (string, error) {
 			candidates = append(candidates, filepath.Join(dir, exe))
 		}
 	}
-	for _, cand := range candidates {
+	for _, c := range candidates {
+		cand := c
 		fi, err := os.Stat(cand)
 		if err != nil || fi.IsDir() {
 			continue
 		}
 		if !fi.Mode().IsRegular() {
-			return "", &StartError{Reason: fmt.Sprintf("%s is not a regular file", cand)}
+			return "", "", &StartError{Reason: fmt.Sprintf("%s is not a regular file", cand)}
 		}
 		if fi.Mode().Perm()&0o111 == 0 {
-			return "", &StartError{Reason: fmt.Sprintf("%s is not executable", cand)}
+			return "", "", &StartError{Reason: fmt.Sprintf("%s is not executable", cand)}
 		}
 		if fi.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
-			return "", &StartError{Reason: fmt.Sprintf("%s is setuid/setgid", cand)}
+			return "", "", &StartError{Reason: fmt.Sprintf("%s is setuid/setgid", cand)}
 		}
 		// Resolve symlinks before judging the basename so multi-call
 		// binaries (busybox) and disguised names are caught
 		// (design.md §7.3 step 3).
 		if _, err := os.ReadFile(cand); err != nil {
-			return "", &StartError{Reason: fmt.Sprintf("%s is not readable", cand)}
+			return "", "", &StartError{Reason: fmt.Sprintf("%s is not readable", cand)}
 		}
 		real, err := filepath.EvalSymlinks(cand)
 		if err != nil {
-			return "", &StartError{Reason: fmt.Sprintf("%s cannot be resolved", cand)}
+			return "", "", &StartError{Reason: fmt.Sprintf("%s cannot be resolved", cand)}
 		}
 		rfi, err := os.Stat(real)
 		if err != nil || !rfi.Mode().IsRegular() {
-			return "", &StartError{Reason: fmt.Sprintf("%s does not resolve to a regular file", cand)}
+			return "", "", &StartError{Reason: fmt.Sprintf("%s does not resolve to a regular file", cand)}
 		}
 		if rfi.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
-			return "", &StartError{Reason: fmt.Sprintf("%s is setuid/setgid", real)}
+			return "", "", &StartError{Reason: fmt.Sprintf("%s is setuid/setgid", real)}
 		}
-		return real, nil
+		abs, aerr := filepath.Abs(cand)
+		if aerr != nil {
+			return "", "", &StartError{Reason: fmt.Sprintf("%s cannot be resolved", cand)}
+		}
+		return abs, real, nil
 	}
-	return "", &StartError{Reason: fmt.Sprintf(
+	return "", "", &StartError{Reason: fmt.Sprintf(
 		"argv0 %q not found in PATH (fail closed)", exe)}
 }
 
