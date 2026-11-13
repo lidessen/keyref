@@ -14,6 +14,7 @@ Commands (design §12.2 and §17, implemented):
 | --- | --- |
 | `keyref init` | Create the local vault; the master key goes to the OS keyring |
 | `keyref set <ref>` | Store a secret read from stdin (`--raw` keeps every byte); local sources |
+| `keyref import-env --file PATH --map NAME=REF` | Import explicitly selected assignments into a local vault |
 | `keyref get <ref>` | One entry from encrypted meta: names, descriptions, `ref`, masks. `--reveal` prints the raw bytes (local sources only) |
 | `keyref delete <ref>` | Delete an entry (local sources) |
 | `keyref list` | Names, descriptions, `ref`, masks from encrypted meta (local and paired vaults) |
@@ -63,6 +64,21 @@ A local vault stores each row id as an HMAC of the ref, but the ref itself, mask
 
 `exec` on a local source is the same code path as on the paired one: the injection shapes, the redactor and the pre-spawn checks are identical (design §7.3, §7.4). Command policy differs: a local row with an empty `allowCommands` keeps the built-in deny list (a slip guard, not a boundary); a non-empty list written by `keyref set --allow-command` is an exact whitelist; `allowedHosts` parses HTTP(S) URLs in argv and matches the actual hostname, including URLs with userinfo, ports or IPv6 addresses; malformed URLs fail closed without echoing their contents. This is an argument check, not network isolation: it cannot constrain redirects or endpoints loaded from a child's configuration. A paired-vault item must name its commands in `allowCommands` — an empty list allows nothing unless the owner set `commandPolicy = allow-all` on iOS (protocol v2 H). There is no grant, no approval round and no remote audit on a local source.
 
+### Importing selected environment variables
+
+```sh
+keyref import-env --source local --file /path/to/input.env \
+  --map PROVIDER_KEY=provider-key --map OTHER_KEY=other-key
+```
+
+Each repeatable `--map` explicitly selects a case-sensitive variable name and a distinct ref. Put values only in the input file; `--map` takes names and refs, which can appear in output. Names use ASCII letters, digits and underscores, starting with a letter or underscore. Duplicate names or refs, missing selected variables, and selected empty values are rejected. A selected value must fit the same 1-byte to 1-MiB range as `set`. A file is limited to 16 MiB and 10,000 assignments, a name to 256 bytes and a batch to 256 mappings.
+
+The input must be a regular file. It accepts blank lines, comments, `NAME=value` and `export NAME=value`, with optional leading spaces or tabs. Values may be one unquoted token, one single-quoted token, or one double-quoted token. A comment can follow a value after whitespace. Single quotes preserve their contents literally; double quotes allow a backslash before a backslash, double quote, dollar sign or backtick. An unquoted token cannot contain whitespace, `$`, backticks, backslashes, either quote, `;`, `&`, `|`, `<`, `>`, `(` or `)`. Characters such as `*`, `?`, `[`, `]`, `~`, `{` and `}` are accepted literally. Unescaped `$` or backticks in double quotes, multiple quote fragments, multiline values, and other escapes are rejected. The parser never executes a shell or expands variables, commands or process substitutions. Syntax on unselected lines is validated too; duplicate variable assignments are rejected.
+
+The entire input and all mappings are validated before the vault is opened. Entries are committed together: new entries use the local default command policy; replacements preserve their existing description, command whitelist and host restrictions; equal values return `unchanged` without rewriting ciphertext or incrementing the write counter. Existing legacy rows with no meta remain unchanged on an equal-value import and may stay absent from `list` until normal backfill. A corrupt existing row fails the batch. Opening an older vault may separately migrate its schema before the batch begins. The commit is atomic, but `exec` reads multiple refs separately and can observe values from different commits; coordinate imports with consumers that require a matching set.
+
+Output contains only the variable name, ref and `created`, `replaced` or `unchanged` status; error diagnostics contain fixed codes and, for line-specific errors, a line number. Before writing, the command rejects an input if a selected or unselected assignment value would appear in any possible success output; short values can therefore be rejected even when their size is valid. Such a collision reports `OUTPUT_CONFLICT` when it can do so without disclosing a value; a diagnostic that would itself contain a value is suppressed. Invalid value syntax, binary input or an input exceeding the assignment limit can also produce a nonzero exit without a diagnostic because its values cannot be fully checked. No value, mask, hash or value length is intentionally printed. The input file itself is left in place and can contain plaintext; protect or remove it separately as appropriate. Newly created entries use the local built-in deny list, not a per-consumer whitelist. Short values are less reliably redacted. A commit or output I/O failure can leave the outcome unknown. Before retrying, coordinate other writers and check the intended current state: reimporting an older value can overwrite a concurrent rotation.
+
 ### Synced login items
 
 ```sh
@@ -77,7 +93,7 @@ The CLI must be paired and unlocked, the item must be injectable, and the item's
 
 ### Go library: the local store
 
-`github.com/lidessen/keyref/cli/local` provides the standalone store (`Create`, `Open`, `Put`, `Use`, `Stat`, `List`, `Delete`, `Close`, plus `ValidRef` and `Mask`). `Put` takes `PutOptions` (description, allowCommands, allowedHosts) and reports whether it created the row; `Stat` and `List` decrypt only the encrypted meta. `Use` provides the plaintext only inside the callback; callers should avoid retaining or logging it, and in-memory clearing is not isolation from a same-user process:
+`github.com/lidessen/keyref/cli/local` provides the standalone store (`Create`, `Open`, `Put`, `Import`, `Use`, `Stat`, `List`, `Delete`, `Close`, plus `ValidRef` and `Mask`). `Put` takes `PutOptions` (description, allowCommands, allowedHosts) and reports whether it created the row; `Import` performs an atomic idempotent batch, and its caller owns and wipes the input values. `Stat` and `List` decrypt only the encrypted meta. `Use` provides the plaintext only inside the callback; callers should avoid retaining or logging it, and in-memory clearing is not isolation from a same-user process:
 
 ```go
 vault, err := local.Open(path, masterKey) // local.Create makes a new vault

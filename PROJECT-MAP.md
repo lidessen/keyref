@@ -1,7 +1,7 @@
 # keyref 项目地图
 
 - 状态：current
-- 最后核对：7979b0f（生产代码基线） / 2026-11-14
+- 最后核对：S1/S2 基线 `acb0aba` 与本次导入切片 / 2026-11-14
 - 维护者：keyref 项目窗
 - 战略健康：需关注 —— 注入与脱敏主线已可用，local 的 reveal 确认和项目授权仍不足以支撑 K1 整体承诺。
 - 用途：给技术型决策者判断项目有没有走歪；具体合同与验收证据见链接文档。
@@ -27,7 +27,7 @@
 ## 3. 主要工作内容
 
 - 核心能力：本机凭证管理、受控进程注入；手机管理的同步 vault；敏感条目审批；短信验证码经审批后消费。
-- 当前重点：lib/CLI 补完与 Neowind provider 的最小环境注入，完整导入、审计和项目授权属于 K1 的范围。
+- 当前重点：Neowind provider 的最小环境注入与本地审计、项目授权；显式变量映射的本地 `import-env` 已实现。
 - 明确不做：不为集成增加默认明文出口，不把同步或服务端扩展作为本地使用的前置条件。
 
 ## 4. 工作方法
@@ -48,6 +48,7 @@
 | 命令 / 接口 | 用途 | 状态 | 证据 |
 | --- | --- | --- | --- |
 | `keyref init` / `set <ref>` / `delete <ref>` | 本地创建与写入，set 从 stdin 收值并写条目策略 | 可用 | [CLI](cli/README.md) |
+| `keyref import-env --file PATH --map NAME=REF` | 显式选择本地变量，整批写入并保留已有策略 | 可用 | [CLI](cli/README.md#importing-selected-environment-variables) |
 | `keyref list` / `get <ref>` | local/sync 的加密 meta 与掩码；local reveal 另有确认债务 | 可用 | [设计 §17](docs/design.md) |
 | `keyref exec --env NAME=REF -- <argv>` | 环境注入；另支持 stdin、fd、pty；捕获输出脱敏 | 可用 | [CLI](cli/README.md)、[e2e](cli/e2e/) |
 | `keyref source list\|default\|add\|remove` | 配置凭据来源 | 可用 | [CLI](cli/README.md) |
@@ -58,7 +59,7 @@
 
 ## 6. 变化、风险与健康
 
-- 最近变化：`0047831` 落地 set 值语义和 trim 脱敏；`9eca165` 落地本地 meta 与策略；`acb0aba` 修复独立复核发现的 URL userinfo 绕过、旧库迁移/并发和失败输入清零问题。
+- 最近变化：`0047831` 落地 set 值语义和 trim 脱敏；`9eca165` 落地本地 meta 与策略；`acb0aba` 修复 URL userinfo 绕过、旧库迁移/并发和失败输入清零问题；本地导入支持显式映射、事务和幂等。
 - 走偏风险：把 ref 前缀、source 名、命令名字白名单误当项目隔离，或把终端脱敏误当所有文件/网络出口的保护；接入越多，这两种错误承诺的影响越大。
 - 组织 / 技术健康：三种角色与两个 source 边界明确，字节合同集中；公开嵌入接口仍受 CLI module 和 internal 执行引擎约束。
 - 债务信号：local reveal 缺控制终端确认；MCP 尚有 source 不对称；K1 的本地审计和项目授权不能由现有注入功能替代。

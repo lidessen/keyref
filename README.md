@@ -48,6 +48,7 @@ Point the CLI at the local server: `KEYREF_SERVER=http://127.0.0.1:8080 keyref p
 ```sh
 keyref init                              # create the local vault (key → OS keyring)
 keyref set my-ref < /path/to/secret      # store a secret, read from stdin
+keyref import-env --file /path/to/input.env --map OTHER_TOKEN=other-ref
 keyref get my-ref                        # ref, mask, size — never the value
 keyref exec --env TOKEN=my-ref -- curl https://api.example.com
 ```

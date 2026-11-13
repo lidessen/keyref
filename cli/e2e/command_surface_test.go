@@ -74,7 +74,7 @@ func TestHelpAndVersionAreSuccess(t *testing.T) {
 	_, _, env := localHome(t)
 	for _, args := range [][]string{
 		{"--help"}, {"help"},
-		{"get", "--help"}, {"set", "-h"}, {"delete", "--help"}, {"init", "--help"},
+		{"get", "--help"}, {"set", "-h"}, {"import-env", "--help"}, {"delete", "--help"}, {"init", "--help"},
 		{"list", "--help"}, {"exec", "--help"}, {"status", "--help"},
 		{"lock", "--help"}, {"unlock", "--help"}, {"mcp", "--help"},
 		{"source", "add", "--help"},

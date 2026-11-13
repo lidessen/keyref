@@ -142,7 +142,11 @@ func openLocal(p config.Paths, spec source.Spec) (*local.Store, error) {
 	if locked(p) {
 		return nil, errLocalLocked
 	}
-	key, err := localvault.Key(secretStore(), spec.Path, os.LookupEnv)
+	ks, err := secretStoreOrError()
+	if err != nil {
+		return nil, err
+	}
+	key, err := localvault.Key(ks, spec.Path, os.LookupEnv)
 	if err != nil {
 		return nil, err
 	}

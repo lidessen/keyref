@@ -107,6 +107,8 @@ func dispatch(cmd string, args []string) int {
 		return cmdInit(args)
 	case "set":
 		return cmdSet(args)
+	case "import-env":
+		return cmdImportEnv(args)
 	case "delete":
 		return cmdDelete(args)
 	case "list":
@@ -142,6 +144,7 @@ func usage(w *os.File) {
 commands:
   init [--source NAME]    create the local vault (key goes to the OS keyring)
   set <ref>               store a secret read from stdin (--raw keeps every byte)
+  import-env              import selected variables into a local vault
   get <ref> [--format json] [--reveal]
                           one entry; masked by default, --reveal prints the
                           raw secret bytes (local sources only)

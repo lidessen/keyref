@@ -74,7 +74,7 @@ func localRun(t *testing.T, env []string, stdin string, args ...string) cliRun {
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
-		t.Fatalf("run keyref %v: %v", args, err)
+		t.Fatal("could not start the local test CLI")
 	}
 	return cliRun{stdout: out.String(), stderr: errBuf.String(), code: code}
 }

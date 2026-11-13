@@ -1564,10 +1564,11 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | `sources.json` 原子替换 | 已实现（issue #6；`server.conf` 一并改为原子替换） |
 | 行的加密 meta；local 的 `list`；`get` 不解密 secret；本地 `allowCommands` / `allowedHosts` | 已实现（2026-11-14） |
 | `set` 默认去末尾换行、`--raw`、终端不回显、新建/替换、短值警告、ref 语法 | 已实现（2026-11-13） |
+| local `import-env` 显式映射、批量事务与同值幂等 | 已实现限定赋值语法；真实 shell 凭证文件的格式兼容性未验，见 [K1](k1.md) |
 | §7.4 对去掉首尾空白的值建立匹配；只扣留可能成为匹配前缀的尾部 | 已实现（2026-11-13） |
 | `get --reveal` 的控制终端确认 | 未实现（现状没有任何确认） |
 | `keyref mcp --source`；工具消息进结果 | 部分实现：工具调用的每条消息都进结果（issue #3）；`mcp --source` 未实现，仍固定 sync |
 | 库独立 module、导出执行引擎、引擎自有策略类型、错误分类 | 未实现（注册表已删除；`GOWORK=off` 构建已修复并进 CI，issue #5） |
 | `status` 按 source 报告、只读命令不建文件、帮助退出 `0`、`--version` | 已实现（issue #7） |
 
-建议顺序：先交付 Neowind 的最小凭证注入路径（现有 `exec --env`），再补完整 `import-env`、本地审计与项目级 allowlist；`get --reveal` 的控制终端确认作为 K1 安全债处理，`keyref mcp --source` 与库的 module 拆分、引擎导出继续按独立切片推进。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。
+当前顺序：Neowind 最小凭证注入的 Keyref 侧契约已验证，真实消费者验收因对方会话的执行授权受阻；限定语法的本地 `import-env` 已实现，本地审计与项目级 allowlist 仍待补完。`get --reveal` 的控制终端确认作为 K1 安全债处理，`keyref mcp --source` 与库的 module 拆分、引擎导出继续按独立切片推进。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。

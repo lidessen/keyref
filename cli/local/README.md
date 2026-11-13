@@ -26,6 +26,21 @@ closing or revoking access cannot undo an operation already in flight. Wiping
 is best effort: Go, the cryptographic implementation and same-user processes
 can retain or access data; this library is not an OS sandbox.
 
+`Import` accepts up to 256 distinct `ImportItem` references and their caller-owned
+value slices. It validates the batch and commits all changed rows in one
+transaction. It returns one `created`, `replaced` or `unchanged` status per
+item only after commit; an error never returns partial statuses. New rows use
+the local default policy, and replacements preserve valid existing description
+and policy. Equal values do not rewrite ciphertext or consume the write count.
+The caller must keep its slices stable during the call and wipe them afterward.
+A commit I/O error can leave the outcome unknown. Before retrying, coordinate
+other writers and check the intended current state: importing older values can
+overwrite a concurrent rotation. Each `Use` reads separately, so a consumer
+reading several refs can observe values from different commits even though each
+import commits atomically. An equal legacy row with no meta remains without meta
+until normal backfill. Opening an older vault may separately migrate its schema
+before an import begins.
+
 The SQLite file stores encrypted values, encrypted meta and keyed reference
 identifiers. Each row's meta (ref, mask, size, description, update time and
 execution policy) is AES-256-GCM encrypted with its own key and AAD; values use
