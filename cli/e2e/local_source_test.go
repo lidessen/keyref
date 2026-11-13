@@ -404,3 +404,41 @@ func processRunning(t *testing.T, name string) bool {
 	t.Helper()
 	return exec.Command("pgrep", "-f", name).Run() == nil
 }
+
+// TestLockCoversLocalSources pins the 2026-11 fix: `keyref lock` used to
+// be a sync-only flag the local source ignored. While locked no unwrap
+// path runs, and unlock (exit 0) restores normal operation.
+func TestLockCoversLocalSources(t *testing.T) {
+	_, _, env := localHome(t)
+	if r := localRun(t, env, "", "init"); r.code != 0 {
+		t.Fatalf("init exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env, localSecret, "set", "my-ref"); r.code != 0 {
+		t.Fatalf("set exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env, "", "get", "my-ref"); r.code != 0 {
+		t.Fatalf("get exit %d: %s", r.code, r.stderr)
+	}
+
+	if r := localRun(t, env, "", "lock"); r.code != 0 {
+		t.Fatalf("lock exit %d: %s", r.code, r.stderr)
+	}
+	get := localRun(t, env, "", "get", "my-ref")
+	if get.code != 12 {
+		t.Fatalf("locked get exit %d, want 12: %s", get.code, get.stderr)
+	}
+	if strings.Contains(get.stdout+get.stderr, localSecret) {
+		t.Fatal("locked get leaked the secret")
+	}
+	ex := localRun(t, env, "", "exec", "--env", "KEY=my-ref", "--", helperBin, "print-env")
+	if ex.code != 12 {
+		t.Fatalf("locked exec exit %d, want 12: %s", ex.code, ex.stderr)
+	}
+
+	if r := localRun(t, env, "", "unlock"); r.code != 0 {
+		t.Fatalf("unlock exit %d: %s", r.code, r.stderr)
+	}
+	if r := localRun(t, env, "", "get", "my-ref"); r.code != 0 {
+		t.Fatalf("get after unlock exit %d: %s", r.code, r.stderr)
+	}
+}

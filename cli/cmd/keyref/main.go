@@ -234,7 +234,12 @@ func newClient(st *store.Store, id *device.Identity) *client.Client {
 }
 
 func locked(st *store.Store) bool {
-	v, ok, _ := st.GetKV(session.KVLocked)
+	v, ok, err := st.GetKV(session.KVLocked)
+	if err != nil {
+		// Fail closed: an unreadable lock state must not open every
+		// unwrap path (review 2026-11).
+		return true
+	}
 	return ok && string(v) == "1"
 }
 
@@ -1151,49 +1156,76 @@ func resolveValueFor(st *store.Store, id *device.Identity, vaultID string, owner
 	return nil, exitcode.UnwrapFailed, "no-item-key"
 }
 
-// metaByRef finds the cached item whose decrypted meta carries ref.
+// metaByRef finds the cached item whose decrypted meta carries ref. One
+// undecryptable item must not hide every other ref (review 2026-11): its
+// error is remembered and only surfaces when no item matches.
 func metaByRef(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, ref string) (string, *itemcrypt.Meta, error) {
 	ids, err := st.ItemIDs()
 	if err != nil {
 		return "", nil, err
 	}
+	var firstErr error
 	for _, itemID := range ids {
 		m, err := decryptMetaFor(st, id, vaultID, ownerPub, itemID)
 		if err != nil {
 			if errors.Is(err, meta.ErrNoViewGrant) {
 				continue
 			}
-			return "", nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if m.Ref == ref {
 			return itemID, m, nil
 		}
 	}
+	if firstErr != nil {
+		return "", nil, firstErr
+	}
 	return "", nil, meta.ErrUnknownRef
 }
 
-// decryptMetaFor decrypts one item's meta (guarded key, wiped after).
+// decryptMetaFor decrypts one item's meta (guarded key, wiped after). A
+// failed grant is tried-no-more but does not stop the item: another view
+// grant may still unwrap.
 func decryptMetaFor(st *store.Store, id *device.Identity, vaultID string, ownerPub []byte, itemID string) (*itemcrypt.Meta, error) {
 	grants, err := st.Grants()
 	if err != nil {
 		return nil, err
 	}
+	var firstErr error
 	for _, g := range grants {
 		if g.ItemID != itemID || g.Kind != "view" || len(g.WrappedKey) == 0 {
 			continue
 		}
 		key, err := itemcrypt.UnwrapGrantKey(vaultID, &g, id.HPKEPrivate, ownerPub)
 		if err != nil {
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		it, ok, err := st.GetItem(itemID)
 		if err != nil || !ok {
 			key.Destroy()
-			return nil, err
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		m, err := itemcrypt.DecryptMeta(key, it.MetaCiphertext, vaultID, itemID)
 		key.Destroy()
-		return m, err
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return m, nil
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return nil, meta.ErrNoViewGrant
 }

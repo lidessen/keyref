@@ -1,9 +1,14 @@
 package main
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/lidessen/keyref/cli/internal/config"
 	"github.com/lidessen/keyref/cli/internal/exec"
+	"github.com/lidessen/keyref/cli/internal/source"
 )
 
 func TestMaskSecret(t *testing.T) {
@@ -46,5 +51,23 @@ func TestLocalMetaPolicy(t *testing.T) {
 	}
 	if exec.ItemAllowsCommand("sh", meta.Policy, false) {
 		t.Fatal("sh must stay denied for local entries")
+	}
+}
+
+// An existing sync cache that cannot be read must fail the command, not
+// silently count as "not paired" and write `local` as the permanent
+// default (review 2026-11).
+func TestResolveSourceFailsClosedOnUnreadableCache(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(config.EnvHome, dir)
+	// A directory where cache.sqlite belongs makes the sqlite open fail.
+	if err := os.Mkdir(filepath.Join(dir, "cache.sqlite"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveSource(""); err == nil {
+		t.Fatal("resolveSource accepted an unreadable sync cache")
+	}
+	if _, err := os.Stat(source.Path(mustPaths())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the default source was written despite the error: %v", err)
 	}
 }

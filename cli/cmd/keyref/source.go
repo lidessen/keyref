@@ -49,14 +49,26 @@ func resolveSource(override string) (source.Spec, error) {
 	if _, err := os.Stat(source.Path(p)); errors.Is(err, os.ErrNotExist) {
 		paired := false
 		// Only look for a paired vault when its cache exists: a
-		// local-only installation never grows a cache.sqlite.
-		if _, err := os.Stat(p.CacheFile); err == nil {
-			if st, err := cachestore.Open(p.Dir); err == nil {
-				if v, ok, _ := st.GetKV(session.KVVaultID); ok && len(v) > 0 {
-					paired = true
-				}
-				_ = st.Close()
+		// local-only installation never grows a cache.sqlite. An
+		// existing cache that cannot be read fails the command instead
+		// of counting as "not paired" — that would write `local` as the
+		// permanent default on a transient error (review 2026-11).
+		if _, statErr := os.Stat(p.CacheFile); statErr == nil {
+			st, err := cachestore.Open(p.Dir)
+			if err != nil {
+				return source.Spec{}, fmt.Errorf("could not open the sync cache %s: %w", p.CacheFile, err)
 			}
+			v, ok, getErr := st.GetKV(session.KVVaultID)
+			closeErr := st.Close()
+			if getErr != nil {
+				return source.Spec{}, fmt.Errorf("could not read the sync cache %s: %w", p.CacheFile, getErr)
+			}
+			if closeErr != nil {
+				return source.Spec{}, fmt.Errorf("could not close the sync cache %s: %w", p.CacheFile, closeErr)
+			}
+			paired = ok && len(v) > 0
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return source.Spec{}, fmt.Errorf("could not stat %s: %w", p.CacheFile, statErr)
 		}
 		if err := source.Ensure(p, paired); err != nil {
 			return source.Spec{}, err
@@ -83,6 +95,20 @@ func checkPrivateDir(path string) error {
 	return nil
 }
 
+// errLocalLocked is the local-source view of `keyref lock`. The master
+// key stays in the keyring, but nothing is unwrapped while locked (review
+// 2026-11: local sources used to ignore the flag).
+var errLocalLocked = errors.New("the session is locked; run `keyref unlock`")
+
+// localOpenError turns an openLocal failure into an exit code: a lock
+// is exit 12, everything else is a generic failure.
+func localOpenError(err error) int {
+	if errors.Is(err, errLocalLocked) {
+		return fatalf(exitcode.SessionLocked, "%v", err)
+	}
+	return fatalf(1, "%v", err)
+}
+
 // openLocal opens a local source's vault. The master key is wiped as
 // soon as the backend has derived its own keys from it.
 func openLocal(spec source.Spec) (store.Store, error) {
@@ -91,6 +117,9 @@ func openLocal(spec source.Spec) (store.Store, error) {
 	}
 	if err := checkPrivateDir(spec.Path); err != nil {
 		return nil, err
+	}
+	if locked(mustStore()) {
+		return nil, errLocalLocked
 	}
 	key, err := localvault.Key(secretStore(), spec.Name, os.LookupEnv)
 	if err != nil {
@@ -233,7 +262,7 @@ func cmdSet(args []string) int {
 	}
 	vault, err := openLocal(spec)
 	if err != nil {
-		return fatalf(1, "%v", err)
+		return localOpenError(err)
 	}
 	defer vault.Close()
 	value, err := readLocalSecret(os.Stdin)
@@ -264,7 +293,7 @@ func cmdDelete(args []string) int {
 	}
 	vault, err := openLocal(spec)
 	if err != nil {
-		return fatalf(1, "%v", err)
+		return localOpenError(err)
 	}
 	defer vault.Close()
 	if err := vault.Delete(context.Background(), rest[0]); err != nil {
@@ -286,7 +315,7 @@ func runLocalGet(spec source.Spec, ref, format string, reveal bool) int {
 	}
 	vault, err := openLocal(spec)
 	if err != nil {
-		return fatalf(1, "%v", err)
+		return localOpenError(err)
 	}
 	defer vault.Close()
 	if reveal {
@@ -387,7 +416,7 @@ func runLocalExec(opts execOptions, spec source.Spec) int {
 	}
 	vault, err := openLocal(spec)
 	if err != nil {
-		return fatalf(1, "%v", err)
+		return localOpenError(err)
 	}
 	defer vault.Close()
 
