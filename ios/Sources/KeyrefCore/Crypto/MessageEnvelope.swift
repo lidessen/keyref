@@ -105,6 +105,35 @@ public enum MessageEnvelope {
         return (records, body)
     }
 
+    // MARK: - upload signature (protocol v2 C)
+
+    /// Rebuilds the §3.9 message-upload transcript from the row and
+    /// verifies the source device's Ed25519 signature under its
+    /// signed-directory entry. Called BEFORE any wrap of the envelope is
+    /// opened: the server verifies this signature when the row is
+    /// stored, but the server is not a trust anchor — without this
+    /// check a row it fabricated would decrypt into a forged SMS body
+    /// and reach the CLI through an approval. The device must be
+    /// listed as `kind = source` and active; anything else fails closed.
+    public static func verifyUploadSignature(row: MessageRow, vaultID: String,
+                                             device: KeyrefDirectoryDevice) throws {
+        guard device.deviceID == row.sourceDeviceID,
+              device.kind == DeviceKind.source,
+              device.status == DeviceStatus.active else {
+            throw KeyrefWireError.badSignature
+        }
+        let (_, body) = try split(row.envelope)
+        let transcript = try buildMessageUploadTranscript(
+            vaultID: vaultID,
+            sourceDeviceID: row.sourceDeviceID,
+            receivedAt: UInt64(max(0, row.receivedAt)),
+            body: body)
+        try verifyDeviceSignature(transcript: transcript,
+                                  signature: row.requestSignature,
+                                  signAlg: device.signAlg,
+                                  publicKey: device.signPublicKey)
+    }
+
     // MARK: - opening (owner / decider side)
 
     /// Opens this device's wrap and returns the 32-byte message key.

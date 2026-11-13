@@ -117,3 +117,88 @@ final class MessageEnvelopeTests: XCTestCase {
         XCTAssertTrue(String(decoding: a, as: UTF8.self).contains("one-time-message-key"))
     }
 }
+
+// MARK: - upload signature (protocol §3.9, v2 C)
+
+extension MessageEnvelopeTests {
+    private func signedRow(owner: OwnerKeys, ownerDeviceID: String,
+                           sourceDeviceID: String = "aaaabbbbccccddddeeeeffff00001111",
+                           receivedAt: Int64 = 1_790_000_000_000,
+                           signer: Ed25519Signer) throws -> MessageRow {
+        let env = try envelope(owner: owner, ownerDeviceID: ownerDeviceID,
+                               sourceDeviceID: sourceDeviceID, plaintext: MessagePlaintext(
+                                   sender: "10086", body: "code 482913",
+                                   sim: nil, receivedAt: receivedAt))
+        let (_, body) = try MessageEnvelope.split(env)
+        let tb = try buildMessageUploadTranscript(vaultID: vaultID,
+                                                  sourceDeviceID: sourceDeviceID,
+                                                  receivedAt: UInt64(receivedAt), body: body)
+        return MessageRow(messageID: "abcdef01abcdef01abcdef01abcdef01",
+                          sourceDeviceID: sourceDeviceID, status: "active", envelope: env,
+                          requestSignature: try signer.sign(tb), receivedAt: receivedAt,
+                          createdAt: receivedAt, expiresAt: receivedAt + 24 * 3600 * 1000)
+    }
+
+    private func sourceEntry(signer seed: Ed25519Signer? = nil) throws -> KeyrefDirectoryDevice {
+        let signer: Ed25519Signer = try seed ?? Ed25519Signer()
+        return KeyrefDirectoryDevice(deviceID: sourceID, kind: DeviceKind.source,
+                                     status: DeviceStatus.active, hpkeKEM: KEMName.x25519,
+                                     hpkePublicKey: Data(repeating: 9, count: 32),
+                                     signAlg: SignAlg.ed25519,
+                                     signPublicKey: signer.signPublicKey,
+                                     renewalSignPublicKey: Data(), grantsDigest: Data())
+    }
+
+    func testUploadSignatureVerifiesUnderTheDirectoryKey() throws {
+        let owner = try OwnerKeys.generate(preferEnclave: false)
+        let signer = try Ed25519Signer()
+        let row = try signedRow(owner: owner, ownerDeviceID: "11112222333344445555666677778888",
+                                signer: signer)
+        try MessageEnvelope.verifyUploadSignature(row: row, vaultID: vaultID,
+                                                  device: sourceEntry(signer: signer))
+    }
+
+    func testUploadSignatureRejectsTampering() throws {
+        let owner = try OwnerKeys.generate(preferEnclave: false)
+        let ownerID = "11112222333344445555666677778888"
+        let signer = try Ed25519Signer()
+        let row = try signedRow(owner: owner, ownerDeviceID: ownerID, signer: signer)
+        let device = try sourceEntry(signer: signer)
+
+        // A flipped body byte (same structure) must not verify.
+        var tamperedEnv = row.envelope
+        tamperedEnv[tamperedEnv.endIndex - 1] ^= 0x01
+        var tampered = row
+        tampered.envelope = tamperedEnv
+        XCTAssertThrowsError(try MessageEnvelope.verifyUploadSignature(
+            row: tampered, vaultID: vaultID, device: device))
+
+        // A changed received_at must not verify.
+        var later = row
+        later.receivedAt += 1
+        XCTAssertThrowsError(try MessageEnvelope.verifyUploadSignature(
+            row: later, vaultID: vaultID, device: device))
+
+        // A swapped source device must not verify.
+        var swapped = row
+        swapped.sourceDeviceID = "b1b2b3b4b5b6b7b8b9babbbcbdbebfc0"
+        XCTAssertThrowsError(try MessageEnvelope.verifyUploadSignature(
+            row: swapped, vaultID: vaultID, device: device))
+
+        // A stripped signature must not verify.
+        var stripped = row
+        stripped.requestSignature = Data()
+        XCTAssertThrowsError(try MessageEnvelope.verifyUploadSignature(
+            row: stripped, vaultID: vaultID, device: device))
+
+        // A revoked or non-source directory entry must not verify.
+        var revoked = try sourceEntry(signer: signer)
+        revoked.status = DeviceStatus.revoked
+        XCTAssertThrowsError(try MessageEnvelope.verifyUploadSignature(
+            row: row, vaultID: vaultID, device: revoked))
+        var cli = try sourceEntry(signer: signer)
+        cli.kind = DeviceKind.cli
+        XCTAssertThrowsError(try MessageEnvelope.verifyUploadSignature(
+            row: row, vaultID: vaultID, device: cli))
+    }
+}

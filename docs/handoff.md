@@ -6,13 +6,14 @@
 
 ## 0. 进展（2026-11-13，macOS）
 
-第 5 节的前两步已完成：
+第 5 节的前四步已完成：
 
 - **第 1 步（验证）通过。** `TestStageFdFileUnlinksImmediately` 与 e2e 的 `TestPtyReplyFlow` 在本机通过（第 2 节的两个失败确认为沙箱环境所致）。`d7c3d6b` 的 iOS 改动在 macOS 上编译通过，`KeyrefCoreTests` 119 个用例全绿，含三条新回归；整个 `Keyref` scheme 也全绿。
 - **第 2 步（v2 G）已实现。** 见 [protocol-v2.md](protocol-v2.md) §G 与 protocol.md §6.3/§6.15：目录是设备行的唯一真相来源，省略即撤销，`revoked` 终态，设备上限按目录记录投影。测试：`server/internal/store/directory_test.go`（新增）、`server/internal/api/regress_test.go`。
 - **第 3 步（v2 A + B）已实现。** 见 [protocol-v2.md](protocol-v2.md) §A/§B 与 protocol.md §3.11/§3.12/§6.19–§6.22：审批请求改签结构化誊本（覆盖 subject、过期时间、一次性公钥、密文摘要），审批决定新增 `decision_signature`（服务器 approvals 表 schema v7，CLI 解包前先验签，失败退出码 13）。改动：`proto/wire`、`server/internal/api/approvals.go`、`server/internal/store/approvals.go`、`cli/internal/approval`、`cli/internal/decider`、`cli/e2e`、iOS `ApprovalFlows.swift` / `LiveBackend.decideApproval` / `ApprovalTranscripts.swift`（新增）、跨语言向量（新增三条 approval 誊本向量）。负例测试：CLI 拒绝没有签名或签名不对的决定；decider 拒绝它无法归属到目录里 active CLI 的请求；iOS 拒绝临时公钥被换掉的请求。
 
   注意这个新依赖：CLI 只在**本地保存的 owner 签名目录**里找决定设备，所以任何要给出决定的设备（owner、decider）必须已经出现在 owner 发布的目录里。iOS 的 `completePairing` 已经会在配对落地后重签并发布目录，因此这条链是通的；但 decider 目前仍被 iOS 当作 `kind = cli` 配对（v2 D 要修的 `t` 参数），而服务器只允许 `ios` / `decider` 做决定——decider 端到端要等 v2 D。e2e 里由测试自己发布一份含 owner / CLI / source / decider 的目录来覆盖这一段。
+- **第 4 步（v2 C）已实现。** 见 [protocol-v2.md](protocol-v2.md) §C 与 protocol.md §3.9/§6.28/§6.29：`message-upload` 誊本末字段由整个信封改为 `H(body)`（body 用新公共函数 `crypto.SplitMessageEnvelope` 从信封切出），服务器按 kind → 形状 → 签名 → 配额 的顺序校验，`GET /v1/messages` 的行回传 `request_signature`，owner（iOS 收件箱与审批页）和 decider 在解包之前按 owner 签名目录里 `kind = source` 且 active 的条目验签，验不过的行直接跳过。包裹记录有意不签名：owner 之后要补写 decider 包裹（§6.30），伪造包裹也解不出消息密钥。改动：`proto/wire`、`proto/crypto`、`server/internal/api/messages.go`、`cli/internal/decider`、`cli/e2e`、iOS `MessageEnvelope.swift` / `Transcript.swift` / `ServerTypes.swift` / `LiveBackend.swift`、跨语言向量（新增 `message_upload_transcript`）。负例测试：decider 拒绝签不上、正文被改、received_at 被改、source 被换、目录里被撤销的消息（`TestRefusesMessageItCannotAttribute`、`TestRefusesRevokedSource`）；iOS 拒绝同样的篡改（`MessageEnvelopeTests`）。Android `Transcripts.kt` / `Envelope.kt` 未动，等第 10 步。
 
 ## 1. 已经提交的修复
 

@@ -271,20 +271,15 @@ func TestDeciderAutoApproves(t *testing.T) {
 
 	// Wait for the pending approval, then let the decider answer it.
 	waitForMessageApproval(t, o, messageID)
-	// The decider trusts the owner-signed directory (protocol v2 A): the
+	// The decider trusts the owner-signed directory (protocol v2 A/C): the
 	// CLI device that asked to consume the SMS must be an active entry
-	// there, otherwise the server could have put its own key in the row.
+	// there, otherwise the server could have put its own key in the row —
+	// and the source device must be there too, or the message itself
+	// cannot be attributed.
 	dirTB, err := wire.BuildDirectoryTranscript(wire.DirectoryTranscript{
 		VaultID: o.vaultID, DirectoryRevision: 2,
 		Devices: []wire.DirectoryDevice{
-			{DeviceID: o.deviceID, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
-				HPKEKEM: wire.KEMP256, HPKEPublicKey: o.hpkePub,
-				SignAlg: wire.SignAlgECDSAP256, SignPublicKey: o.signPub,
-				GrantsDigest: wire.EmptyGrantsDigest()},
-			{DeviceID: o.cliDeviceID, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
-				HPKEKEM: wire.KEMX25519, HPKEPublicKey: o.cliHPKE,
-				SignAlg: wire.SignAlgEd25519, SignPublicKey: o.cliSign,
-				GrantsDigest: wire.EmptyGrantsDigest()},
+			o.ownerDirectoryDevice(), o.cliDirectoryDevice(), src.directoryDevice(),
 		},
 	})
 	if err != nil {

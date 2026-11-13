@@ -488,6 +488,35 @@ public func buildVaultDeleteTranscript(vaultID: String, challenge: Data) throws 
     return b
 }
 
+/// The subject kinds an approval request can be about (§3.11).
+public enum ApprovalSubjectKind {
+    public static let item = "item"
+    public static let message = "message"
+}
+
+/// "KEYREF1" NUL "message-upload" NUL vault_id(hex) NUL
+/// source_device_id(hex) NUL u64be(received_at) NUL H(body)
+///
+/// Signed by the source device (Ed25519). Only the trailing body blob
+/// of the envelope is signed — never the wrap records, which the owner
+/// later backfills for deciders (§6.30) and a forged one of which yields
+/// no message key anyway (§3.9, v2 C).
+public func buildMessageUploadTranscript(vaultID: String, sourceDeviceID: String,
+                                         receivedAt: UInt64, body: Data) throws -> Data {
+    try requireID("vault_id", vaultID)
+    try requireID("source_device_id", sourceDeviceID)
+    guard !body.isEmpty else {
+        throw KeyrefWireError.invalidField("body must not be empty")
+    }
+    let digest = Data(SHA256.hash(data: body))
+    var b = begin("message-upload")
+    b.append(contentsOf: vaultID.utf8); b.append(KeyrefEncoding.fieldSeparator)
+    b.append(contentsOf: sourceDeviceID.utf8); b.append(KeyrefEncoding.fieldSeparator)
+    KeyrefEncoding.appendU64BE(receivedAt, to: &b); b.append(KeyrefEncoding.fieldSeparator)
+    b.append(digest)
+    return b
+}
+
 /// "KEYREF1" NUL "vault-recovery" NUL vault_id(hex) NUL recovery_wrap NUL
 /// recovery_kdf_json(utf-8) NUL recovery_sign_pub
 public func buildVaultRecoveryTranscript(vaultID: String, recoveryWrap: Data,

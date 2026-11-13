@@ -213,6 +213,7 @@ private struct VectorFile: Decodable, Sendable {
     let approval_request_transcript: TranscriptVector
     let approval_decision_transcript: TranscriptVector
     let approval_denied_transcript: TranscriptVector
+    let message_upload_transcript: TranscriptVector
 
     let owner_session_signature_hex: String
     let cli_grants_digest_hex: String
@@ -635,6 +636,29 @@ final class VectorTests: XCTestCase {
         XCTAssertEqual(packed[packed.startIndex + 1], 32)
         XCTAssertEqual(packed.dropFirst(2).prefix(enc.count), enc)
         XCTAssertEqual(packed.dropFirst(2 + enc.count), wrapped)
+    }
+
+    // MARK: message transcript (§3.9 — v2 C)
+
+    func testMessageUploadTranscript() throws {
+        let t = v.message_upload_transcript
+        let f = t.fields
+        let bytes = try buildMessageUploadTranscript(
+            vaultID: f["vault_id"]?.stringValue ?? "",
+            sourceDeviceID: f["source_device_id"]?.stringValue ?? "",
+            receivedAt: f["received_at"]?.numberValue ?? 0,
+            body: hex(f["body_hex"]?.stringValue ?? ""))
+        XCTAssertEqual(bytes, hex(t.bytes_hex))
+        XCTAssertEqual(t.sign_alg, SignAlg.ed25519)
+        // The source device signs the upload with Ed25519.
+        try verifyCLISignature(transcript: bytes, signature: hex(t.signature_hex),
+                               cliSignPublicKey: hex(t.signer_public_hex))
+        XCTAssertThrowsError(try verifyCLISignature(transcript: hex(t.tampered_bytes_hex ?? ""),
+                                                    signature: hex(t.signature_hex),
+                                                    cliSignPublicKey: hex(t.signer_public_hex)))
+        // Fixed size — the body is signed through its digest, so the
+        // transcript never grows with the envelope.
+        XCTAssertEqual(bytes.count, 130)
     }
 
     // MARK: grants digest (§3.3, D6)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 	"github.com/lidessen/keyref/server/internal/quotas"
 	"github.com/lidessen/keyref/server/internal/store"
@@ -54,12 +55,39 @@ func (s *Server) handlePostMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field")
 		return
 	}
+	// Shape before signature before quota (protocol v2 C): the envelope
+	// goes through the strict splitter first, and only the trailing body
+	// is signed — the wrap records are deliberately not, because the
+	// owner later backfills decider wraps (§6.30) without re-signing,
+	// and a forged wrap still yields no message key.
+	_, body, err := crypto.SplitMessageEnvelope(req.Envelope)
+	if err != nil {
+		writeError(w, "invalid_field")
+		return
+	}
+	// Verify the source signature over the §3.9 transcript BEFORE the
+	// row is durable, and before any quota is charged.
+	tb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
+		VaultID:        ac.vault.ID,
+		SourceDeviceID: ac.device.ID,
+		ReceivedAt:     uint64(req.ReceivedAt),
+		Body:           body,
+	})
+	if err != nil {
+		writeError(w, "invalid_field")
+		return
+	}
+	if err := wire.VerifyCLISignature(tb, req.RequestSignature, ac.device.SignPublicKey); err != nil {
+		writeError(w, "bad_signature")
+		return
+	}
 	now := s.cfg.Now()
 	nowMs := now.UnixMilli()
 
 	// Hosted ceilings (design §14.7): the per-device pending cap keeps
 	// the inbox bounded, the daily counter keeps a runaway collector
-	// inside its own budget. Self-hosted deployments skip both.
+	// inside its own budget. Self-hosted deployments skip both. Charged
+	// only after the signature verified — a rejected upload is free.
 	if s.cfg.EnforceQuotas {
 		plan := quotas.EffectivePlan(ac.vault, nowMs)
 		if limits := s.quota.LimitsFor(plan); limits.MessagesPending != nil {
@@ -83,23 +111,6 @@ func (s *Server) handlePostMessages(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "quota_exceeded")
 			return
 		}
-	}
-
-	// Verify the source signature over the §3.9 transcript BEFORE the
-	// row is durable.
-	tb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
-		VaultID:        ac.vault.ID,
-		SourceDeviceID: ac.device.ID,
-		ReceivedAt:     uint64(req.ReceivedAt),
-		Envelope:       req.Envelope,
-	})
-	if err != nil {
-		writeError(w, "invalid_field")
-		return
-	}
-	if err := wire.VerifyCLISignature(tb, req.RequestSignature, ac.device.SignPublicKey); err != nil {
-		writeError(w, "bad_signature")
-		return
 	}
 
 	m := &store.Message{
@@ -183,13 +194,14 @@ func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	for i := range rows {
 		m := &rows[i]
 		out.Messages = append(out.Messages, wire.MessageRow{
-			MessageID:      m.MessageID,
-			SourceDeviceID: m.SourceDeviceID,
-			Status:         m.Status,
-			Envelope:       m.Envelope,
-			ReceivedAt:     m.ReceivedAt,
-			CreatedAt:      m.CreatedAt,
-			ExpiresAt:      m.ExpiresAt,
+			MessageID:        m.MessageID,
+			SourceDeviceID:   m.SourceDeviceID,
+			Status:           m.Status,
+			Envelope:         m.Envelope,
+			RequestSignature: m.RequestSignature,
+			ReceivedAt:       m.ReceivedAt,
+			CreatedAt:        m.CreatedAt,
+			ExpiresAt:        m.ExpiresAt,
 		})
 		if m.CreatedAt > out.Cursor {
 			out.Cursor = m.CreatedAt

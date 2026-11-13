@@ -423,15 +423,19 @@ type MessageCreateResponse struct {
 
 // MessageRow is one entry of GET /v1/messages (protocol §6.29). The
 // envelope is opaque; status is active until a decision delivers the
-// payload, then consumed (design §14.3).
+// payload, then consumed (design §14.3). RequestSignature is the
+// source device's signature over the §3.9 message-upload transcript —
+// readers re-verify it against the signed directory before decrypting
+// (protocol v2 C).
 type MessageRow struct {
-	MessageID      string `json:"message_id"`
-	SourceDeviceID string `json:"source_device_id"`
-	Status         string `json:"status"`
-	Envelope       Blob   `json:"envelope"`
-	ReceivedAt     int64  `json:"received_at"`
-	CreatedAt      int64  `json:"created_at"`
-	ExpiresAt      int64  `json:"expires_at"`
+	MessageID        string `json:"message_id"`
+	SourceDeviceID   string `json:"source_device_id"`
+	Status           string `json:"status"`
+	Envelope         Blob   `json:"envelope"`
+	RequestSignature Blob   `json:"request_signature"`
+	ReceivedAt       int64  `json:"received_at"`
+	CreatedAt        int64  `json:"created_at"`
+	ExpiresAt        int64  `json:"expires_at"`
 }
 
 // MessageListResponse is the body of GET /v1/messages (protocol

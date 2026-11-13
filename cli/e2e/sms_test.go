@@ -217,7 +217,7 @@ func (o *owner) openSessionFor(t *testing.T, deviceID string,
 
 // uploadSMS stores one message and returns its server-assigned id. The
 // envelope only has to satisfy the §3.9 structure — the server validates
-// the upload signature, never the包裹 contents (nothing on the server can
+// the upload signature, never the wrap records (nothing on the server can
 // open them).
 func (o *owner) uploadSMS(t *testing.T, src *sourceDevice) string {
 	t.Helper()
@@ -231,9 +231,16 @@ func (o *owner) uploadSMS(t *testing.T, src *sourceDevice) string {
 	}
 	envelope := sealEnvelope(t, o.vaultID, src.deviceID,
 		map[string][]byte{o.deviceID: o.hpkePub}, plaintext)
+	// The upload transcript covers H(body), not the whole envelope
+	// (protocol §3.9, v2 C): the wrap records stay unsigned because the
+	// owner backfills decider wraps later (§6.30).
+	_, body, err := crypto.SplitMessageEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
 		VaultID: o.vaultID, SourceDeviceID: src.deviceID,
-		ReceivedAt: uint64(receivedAt), Envelope: envelope,
+		ReceivedAt: uint64(receivedAt), Body: body,
 	})
 	if err != nil {
 		t.Fatal(err)

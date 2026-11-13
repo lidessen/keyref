@@ -1878,6 +1878,17 @@ public final class LiveBackend: AppBackend {
                     let sourceLabel = infos[messageRow.sourceDeviceID]?.label
                         ?? sourceDevice?.fingerprint
                         ?? messageRow.sourceDeviceID
+                    // The message row is verified under the source device's
+                    // signed-directory entry BEFORE anything is decrypted
+                    // (protocol v2 C): a row the server fabricated must
+                    // never reach the screen or an approval. A missing
+                    // directory entry fails closed through the same throw.
+                    if let sourceDevice {
+                        try MessageEnvelope.verifyUploadSignature(
+                            row: messageRow, vaultID: vaultID, device: sourceDevice)
+                    } else {
+                        throw KeyrefWireError.badSignature
+                    }
                     let raw = try MessageEnvelope.openRaw(
                         envelope: messageRow.envelope, vaultID: vaultID,
                         sourceDeviceID: messageRow.sourceDeviceID,
@@ -1963,6 +1974,16 @@ public final class LiveBackend: AppBackend {
                 ?? device?.fingerprint
                 ?? row.sourceDeviceID
             do {
+                // Verify the upload signature under the source device's
+                // signed-directory entry before anything is decrypted
+                // (protocol v2 C); an unverifiable row is skipped below
+                // with the rest of the unreadable ones.
+                if let device {
+                    try MessageEnvelope.verifyUploadSignature(
+                        row: row, vaultID: vaultID, device: device)
+                } else {
+                    throw KeyrefWireError.badSignature
+                }
                 let plaintext = try MessageEnvelope.open(
                     envelope: row.envelope, vaultID: vaultID,
                     sourceDeviceID: row.sourceDeviceID,

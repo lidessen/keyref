@@ -645,22 +645,30 @@ const (
 )
 
 // MessageUploadTranscript is the structured form of the upload
-// transcript signed by the source device (protocol §3.9).
+// transcript signed by the source device (protocol §3.9, v2 C).
 type MessageUploadTranscript struct {
 	VaultID        string
 	SourceDeviceID string
 	ReceivedAt     uint64 // device-reported SMS arrival time (advisory only)
-	Envelope       []byte
+	// Body is the trailing body blob of the envelope (nonce ‖ ct ‖ tag),
+	// as split by crypto.SplitMessageEnvelope. Only the body is signed,
+	// never the wrap records: the owner later backfills decider wraps
+	// (§6.30) without invalidating the signature, and a forged wrap
+	// still yields no message key.
+	Body []byte
 }
 
 // BuildMessageUploadTranscript assembles the signed transcript bytes:
 //
 //	"KEYREF1" NUL "message-upload" NUL vault_id(hex) NUL
-//	source_device_id(hex) NUL u64be(received_at) NUL envelope
+//	source_device_id(hex) NUL u64be(received_at) NUL H(body)
 //
-// There is no trailing NUL. The envelope is opaque to the server; the
-// signature binds it to the vault and the uploading device so a stolen
-// bearer token alone cannot forge uploads (design §14.3).
+// There is no trailing NUL. The signature binds the body to the vault
+// and the uploading device so a stolen bearer token alone cannot forge
+// uploads (design §14.3) — and so the owner and a decider, which never
+// see the source's session, can tell a real SMS from a row the server
+// made up (protocol v2 C): the server verifies the signature before the
+// row is stored, the readers verify it again before decryption.
 func BuildMessageUploadTranscript(t MessageUploadTranscript) ([]byte, error) {
 	if err := requireID("vault_id", t.VaultID); err != nil {
 		return nil, err
@@ -668,9 +676,10 @@ func BuildMessageUploadTranscript(t MessageUploadTranscript) ([]byte, error) {
 	if err := requireID("source_device_id", t.SourceDeviceID); err != nil {
 		return nil, err
 	}
-	if len(t.Envelope) == 0 {
-		return nil, fmt.Errorf("%w: envelope must not be empty", ErrInvalidField)
+	if len(t.Body) == 0 {
+		return nil, fmt.Errorf("%w: body must not be empty", ErrInvalidField)
 	}
+	sum := sha256.Sum256(t.Body)
 	b := beginTranscript("message-upload")
 	b = append(b, t.VaultID...)
 	b = appendSep(b)
@@ -678,7 +687,7 @@ func BuildMessageUploadTranscript(t MessageUploadTranscript) ([]byte, error) {
 	b = appendSep(b)
 	b = appendU64(b, t.ReceivedAt)
 	b = appendSep(b)
-	b = append(b, t.Envelope...)
+	b = append(b, sum[:]...)
 	return b, nil
 }
 

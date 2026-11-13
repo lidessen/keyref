@@ -92,12 +92,16 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 
 // fixture wires one decider + one pending message approval.
 type fixture struct {
-	api        *fakeAPI
-	dec        *Decider
-	owner      *ecdsa.PrivateKey
-	decider    *device.Identity
-	cliSignPub ed25519.PublicKey
-	now        time.Time
+	api           *fakeAPI
+	owner         *ecdsa.PrivateKey
+	decider       *device.Identity
+	cliSignPub    ed25519.PublicKey
+	sourceSignPub ed25519.PublicKey
+	now           time.Time
+	// devices overrides the signed directory the decider reads; nil
+	// means the default owner-signed listing (active CLI + active
+	// source).
+	devices func() ([]audit.DeviceRecord, error)
 }
 
 func newFixture(t *testing.T, policy wire.DelegationPolicy) *fixture {
@@ -142,7 +146,14 @@ func newFixtureWithAge(t *testing.T, policy wire.DelegationPolicy, ageSeconds in
 	api.delegation = wire.DelegationPutRequest{
 		DelegationRevision: 1, DelegationSigned: tb, Signature: sig}
 
-	// One message sealed to the decider.
+	// One message sealed to the decider, signed by the source device the
+	// directory lists (protocol v2 C): the decider refuses a row whose
+	// upload signature does not verify — without this it cannot tell a
+	// real SMS from a row the server made up.
+	sourcePub, sourcePriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	messageKey := make([]byte, 32)
 	if _, err := rand.Read(messageKey); err != nil {
 		t.Fatal(err)
@@ -161,9 +172,24 @@ func newFixtureWithAge(t *testing.T, policy wire.DelegationPolicy, ageSeconds in
 	}
 	envelope := append([]byte{1}, rec...)
 	envelope = append(envelope, blob...)
+	_, body, err := crypto.SplitMessageEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgTB, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
+		VaultID: testVault, SourceDeviceID: testSource,
+		ReceivedAt: uint64(createdAt), Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgSig, err := wire.SignEd25519(msgTB, sourcePriv)
+	if err != nil {
+		t.Fatal(err)
+	}
 	api.messages = []wire.MessageRow{{
 		MessageID: testMsg, SourceDeviceID: testSource, Status: wire.MessageStatusActive,
-		Envelope: envelope, ReceivedAt: createdAt,
+		Envelope: envelope, RequestSignature: msgSig, ReceivedAt: createdAt,
 		CreatedAt: createdAt,
 		ExpiresAt: now.UnixMilli() + 24*3600*1000,
 	}}
@@ -200,11 +226,23 @@ func newFixtureWithAge(t *testing.T, policy wire.DelegationPolicy, ageSeconds in
 		CreatedAt:             now.UnixMilli(), ExpiresAt: approvalExpires,
 	}}
 
-	return &fixture{api: api, owner: ownerKey, decider: deciderID, now: now, cliSignPub: cliPub}
+	return &fixture{api: api, owner: ownerKey, decider: deciderID, now: now,
+		cliSignPub: cliPub, sourceSignPub: sourcePub}
 }
 
 func (f *fixture) run(t *testing.T, policy wire.DelegationPolicy, reviewer Reviewer) (int, error) {
 	t.Helper()
+	devices := f.devices
+	if devices == nil {
+		devices = func() ([]audit.DeviceRecord, error) {
+			return []audit.DeviceRecord{
+				{DeviceID: testCLI, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
+					SignAlg: wire.SignAlgEd25519, SignPublicKey: f.cliSignPub},
+				{DeviceID: testSource, Kind: wire.DeviceKindSource, Status: wire.DeviceStatusActive,
+					SignAlg: wire.SignAlgEd25519, SignPublicKey: f.sourceSignPub},
+			}, nil
+		}
+	}
 	d, err := New(Config{
 		VaultID:            testVault,
 		DeviceID:           testDecider,
@@ -213,12 +251,7 @@ func (f *fixture) run(t *testing.T, policy wire.DelegationPolicy, reviewer Revie
 		OwnerSignPublicKey: elliptic.Marshal(elliptic.P256(), f.owner.PublicKey.X, f.owner.PublicKey.Y),
 		Reviewer:           reviewer,
 		Now:                func() time.Time { return f.now },
-		Devices: func() ([]audit.DeviceRecord, error) {
-			return []audit.DeviceRecord{{
-				DeviceID: testCLI, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
-				SignAlg: wire.SignAlgEd25519, SignPublicKey: f.cliSignPub,
-			}}, nil
-		},
+		Devices:            devices,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -397,6 +430,68 @@ func TestRefusesRequestItCannotAttribute(t *testing.T) {
 func TestRefusesUnknownCLI(t *testing.T) {
 	f := newFixture(t, allowAll)
 	f.api.approvals[0].CLIDeviceID = testSource
+	n, err := f.run(t, allowAll, ReviewerFunc(func(context.Context, ReviewInput) (Verdict, error) {
+		return Pass, nil
+	}))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if n != 0 || len(f.api.decisions) != 0 {
+		t.Fatalf("approved %d, decisions %d, want none", n, len(f.api.decisions))
+	}
+}
+
+// TestRefusesMessageItCannotAttribute pins v2 C at the decider: a
+// message row whose upload signature does not verify under the signed
+// directory is never opened, never reviewed, never delivered — the
+// decider would otherwise hand the CLI a body the server made up.
+func TestRefusesMessageItCannotAttribute(t *testing.T) {
+	cases := map[string]func(*fakeAPI){
+		"tampered body": func(a *fakeAPI) {
+			// Flip one body byte: same structure, different signed bytes.
+			a.messages[0].Envelope = append([]byte{}, a.messages[0].Envelope...)
+			a.messages[0].Envelope[len(a.messages[0].Envelope)-1] ^= 0x01
+		},
+		"swapped source": func(a *fakeAPI) {
+			a.messages[0].SourceDeviceID = testCLI
+		},
+		"tampered received_at": func(a *fakeAPI) {
+			a.messages[0].ReceivedAt++
+		},
+		"stripped signature": func(a *fakeAPI) {
+			a.messages[0].RequestSignature = nil
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, allowAll)
+			mutate(f.api)
+			n, err := f.run(t, allowAll, ReviewerFunc(func(context.Context, ReviewInput) (Verdict, error) {
+				return Pass, nil
+			}))
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if n != 0 || len(f.api.decisions) != 0 {
+				t.Fatalf("approved %d, decisions %d, want none", n, len(f.api.decisions))
+			}
+		})
+	}
+}
+
+// TestRefusesRevokedSource: a message from a source device the owner
+// revoked in the directory is not delivered either (v2 C) — the row's
+// signature still verifies, but a revoked device may no longer speak.
+func TestRefusesRevokedSource(t *testing.T) {
+	f := newFixture(t, allowAll)
+	f.devices = func() ([]audit.DeviceRecord, error) {
+		return []audit.DeviceRecord{
+			{DeviceID: testCLI, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
+				SignAlg: wire.SignAlgEd25519, SignPublicKey: f.cliSignPub},
+			{DeviceID: testSource, Kind: wire.DeviceKindSource, Status: wire.DeviceStatusRevoked,
+				SignAlg: wire.SignAlgEd25519, SignPublicKey: f.sourceSignPub},
+		}, nil
+	}
 	n, err := f.run(t, allowAll, ReviewerFunc(func(context.Context, ReviewInput) (Verdict, error) {
 		return Pass, nil
 	}))

@@ -1,6 +1,6 @@
 # keyref 协议变更规格（v2，草案，尚未实现）
 
-状态：**A、B、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
+状态：**A、B、C、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
 
 兼容性：**破坏性变更，不兼容旧客户端**（已确认没有需要兼容的存量部署）。直接原地修改格式，不加版本协商和回退分支。
 
@@ -59,6 +59,8 @@ NUL decision NUL H(request_ciphertext) NUL H(wrap)
 修掉的问题：HPKE base 模式没有发送方认证，服务器可以伪造审批决定（对 message subject 可以直接塞入伪造的短信正文）。
 
 ## C. SMS 消息签名覆盖消息体，读方验签
+
+**已实现**（proto/wire、`proto/crypto.SplitMessageEnvelope`、server `internal/api/messages.go`、CLI `internal/decider`、iOS `MessageEnvelope.verifyUploadSignature` + `LiveBackend`；protocol.md §3.9/§6.28/§6.29；向量见 `message_upload_transcript`）。
 
 信封布局不变：`wrap_count(1) ‖ wraps… ‖ body`，其中 body = `nonce(12) ‖ ct ‖ tag(16)`。
 

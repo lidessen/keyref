@@ -956,6 +956,10 @@ public struct MessageRow: Codable, Equatable, Sendable {
     public var sourceDeviceID: String
     public var status: String          // "active" | "consumed"
     public var envelope: Data
+    /// The source device's Ed25519 signature over the §3.9
+    /// message-upload transcript; readers re-verify it against the
+    /// signed directory before decrypting (protocol v2 C).
+    public var requestSignature: Data
     /// Sender-reported arrival time — display only (ordering and policy
     /// use `createdAt`, §6.29).
     public var receivedAt: Int64
@@ -969,9 +973,38 @@ public struct MessageRow: Codable, Equatable, Sendable {
         case sourceDeviceID = "source_device_id"
         case status
         case envelope
+        case requestSignature = "request_signature"
         case receivedAt = "received_at"
         case createdAt = "created_at"
         case expiresAt = "expires_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        messageID = try c.decode(String.self, forKey: .messageID)
+        sourceDeviceID = try c.decode(String.self, forKey: .sourceDeviceID)
+        status = try c.decode(String.self, forKey: .status)
+        envelope = try c.decode(Data.self, forKey: .envelope)
+        // Absent on a row that predates v2 C; verification treats empty
+        // as a failure, so an old row never decrypts either.
+        requestSignature = try c.decodeIfPresent(Data.self, forKey: .requestSignature) ?? Data()
+        receivedAt = try c.decode(Int64.self, forKey: .receivedAt)
+        createdAt = try c.decode(Int64.self, forKey: .createdAt)
+        expiresAt = try c.decode(Int64.self, forKey: .expiresAt)
+    }
+
+    /// Memberwise (declaring `init(from:)` suppresses the synthesized one).
+    public init(messageID: String, sourceDeviceID: String, status: String,
+                envelope: Data, requestSignature: Data = Data(),
+                receivedAt: Int64, createdAt: Int64, expiresAt: Int64) {
+        self.messageID = messageID
+        self.sourceDeviceID = sourceDeviceID
+        self.status = status
+        self.envelope = envelope
+        self.requestSignature = requestSignature
+        self.receivedAt = receivedAt
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
     }
 }
 

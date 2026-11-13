@@ -9,12 +9,6 @@
 import CryptoKit
 import Foundation
 
-/// The subject kinds an approval request can be about (§3.11).
-public enum ApprovalSubjectKind {
-    public static let item = "item"
-    public static let message = "message"
-}
-
 /// §3.11 `approval-request`.
 public struct ApprovalRequestTranscript: Sendable {
     public var vaultID: String

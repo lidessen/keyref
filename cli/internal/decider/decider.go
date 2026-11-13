@@ -211,10 +211,17 @@ func (d *Decider) tryApprove(ctx context.Context, policy wire.DelegationPolicy, 
 		return false
 	}
 
-	// Gate 3 — the message itself.
+	// Gate 3 — the message itself. The row must verify under the source
+	// device's directory key BEFORE anything is decrypted (protocol v2 C):
+	// without this the decider cannot tell a real SMS from a row the
+	// server made up, and would deliver the forged body to the CLI.
 	msg, err := d.findMessage(ctx, row.MessageID)
 	if err != nil {
 		logf("message lookup: %v", err)
+		return false
+	}
+	if !d.verifyMessage(msg) {
+		logf("message %s does not verify under the signed directory", msg.MessageID)
 		return false
 	}
 	plaintext, sender, err := d.openMessage(msg)
@@ -417,6 +424,48 @@ func (l *Limiter) Record(cli string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.history[cli] = append(l.history[cli], l.now())
+}
+
+// verifyMessage checks the source device's signature over the §3.9
+// message-upload transcript (protocol v2 C): vault, source device,
+// received_at and H(body), where the body is cut from the envelope with
+// the strict splitter — the wrap records are deliberately unsigned
+// (the owner backfills decider wraps, §6.30, and a forged wrap yields no
+// message key). The source device must be listed in the owner's signed
+// directory as kind=source and active. Any doubt — no directory, unknown
+// device, wrong kind, revoked, bad signature — is a veto.
+func (d *Decider) verifyMessage(msg wire.MessageRow) bool {
+	if d.cfg.Devices == nil {
+		return false
+	}
+	devices, err := d.cfg.Devices()
+	if err != nil {
+		return false
+	}
+	var dev *audit.DeviceRecord
+	for i := range devices {
+		if devices[i].DeviceID == msg.SourceDeviceID {
+			dev = &devices[i]
+			break
+		}
+	}
+	if dev == nil || dev.Status != wire.DeviceStatusActive || dev.Kind != wire.DeviceKindSource {
+		return false
+	}
+	_, body, err := crypto.SplitMessageEnvelope(msg.Envelope)
+	if err != nil {
+		return false
+	}
+	tb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
+		VaultID:        d.cfg.VaultID,
+		SourceDeviceID: msg.SourceDeviceID,
+		ReceivedAt:     uint64(msg.ReceivedAt),
+		Body:           body,
+	})
+	if err != nil {
+		return false
+	}
+	return wire.VerifyCLISignature(tb, msg.RequestSignature, dev.SignPublicKey) == nil
 }
 
 // verifyRequest checks the CLI's signature over the approval-request

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 )
 
@@ -170,10 +173,22 @@ func TestMessageFlow(t *testing.T) {
 		t.Fatalf("upload bad signature: status %d, want 403", status)
 	}
 
-	// A good upload is accepted and stamped with the server TTL.
+	// A malformed envelope is 400 before any signature or quota work
+	// (protocol v2 C: kind → shape → signature → quota).
+	if status, _ := env.do("POST", "/v1/messages", src.token, wire.MessageCreateRequest{
+		Envelope: []byte{0}, RequestSignature: randBytes(t, 64), ReceivedAt: 1790000000000,
+	}); status != http.StatusBadRequest {
+		t.Fatalf("malformed envelope: status %d, want 400", status)
+	}
+	// A good upload is accepted and stamped with the server TTL. The
+	// transcript covers H(body) — the wrap records are unsigned (v2 C).
+	_, body, err := crypto.SplitMessageEnvelope(good)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
 		VaultID: owner.vaultID, SourceDeviceID: src.deviceID,
-		ReceivedAt: 1790000000000, Envelope: good,
+		ReceivedAt: 1790000000000, Body: body,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -198,6 +213,11 @@ func TestMessageFlow(t *testing.T) {
 	msg := ownerList.Messages[0]
 	if msg.MessageID != created.MessageID || msg.Status != wire.MessageStatusActive {
 		t.Fatalf("row mismatch: %+v", msg)
+	}
+	// The row carries the upload signature back (§6.29, v2 C): the owner
+	// re-verifies it against the signed directory before decrypting.
+	if !bytes.Equal(msg.RequestSignature, sig) {
+		t.Fatalf("row upload signature mismatch: %x vs %x", msg.RequestSignature, sig)
 	}
 	if status := env.doOut("GET", "/v1/messages", dec.token, nil, &decList); status != 200 || len(decList.Messages) != 1 {
 		t.Fatalf("decider list: status %d len %d", status, len(decList.Messages))
@@ -276,6 +296,65 @@ func TestMessageFlow(t *testing.T) {
 	}
 }
 
+// TestSignatureCheckedBeforeQuota pins the v2 C ordering
+// kind → shape → signature → quota: with the source device's daily
+// budget already spent, a bad signature is still reported as such (403)
+// rather than as a quota error, and the rejected upload is not counted.
+func TestSignatureCheckedBeforeQuota(t *testing.T) {
+	env := newTestEnv(t, true)
+	owner := env.createVault(t)
+	src := env.registerPairKind(t, wire.DeviceKindSource)
+	owner.completePairKind(t, src, nil)
+	src.session(t)
+
+	envelope := buildEnvelope(t, owner.deviceID, randBytes(t, 32), randBytes(t, wire.SizeMessageWrappedKey))
+	_, body, err := crypto.SplitMessageEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
+		VaultID: owner.vaultID, SourceDeviceID: src.deviceID,
+		ReceivedAt: 1790000000000, Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := wire.SignEd25519(tb, src.signPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := wire.MessageCreateRequest{
+		Envelope: envelope, RequestSignature: sig, ReceivedAt: 1790000000000,
+	}
+
+	// Spend the whole daily upload budget for this source device.
+	day := time.Now().UTC().Format("2006-01-02")
+	if err := env.st.AddMessageUploads(context.Background(), src.deviceID, day,
+		MaxMessageUploadsPerDevicePerDay); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bad signature is refused as a signature error, before any quota
+	// check looks at the (exhausted) budget.
+	bad := req
+	bad.RequestSignature = randBytes(t, 64)
+	if status, raw := env.do("POST", "/v1/messages", src.token, bad); status != http.StatusForbidden ||
+		expectError(t, raw, "bad_signature") != 0 {
+		t.Fatalf("bad signature upload: status %d %s, want 403 bad_signature", status, raw)
+	}
+	// The rejected upload did not touch the counter.
+	if n, err := env.st.CountMessageUploads(context.Background(), src.deviceID, day); err != nil ||
+		n != MaxMessageUploadsPerDevicePerDay {
+		t.Fatalf("uploads after rejected upload: n=%d err=%v, want %d",
+			n, err, MaxMessageUploadsPerDevicePerDay)
+	}
+	// A well-signed upload is now the one that hits the quota.
+	if status, raw := env.do("POST", "/v1/messages", src.token, req); status != http.StatusTooManyRequests ||
+		expectError(t, raw, "quota_exceeded") != 0 {
+		t.Fatalf("good upload over quota: status %d %s, want 429 quota_exceeded", status, raw)
+	}
+}
+
 // TestDeciderDecisionPath pins the §14.8 boundary: the decider decides
 // message subjects and nothing else; the server enforces it.
 func TestDeciderDecisionPath(t *testing.T) {
@@ -338,9 +417,13 @@ func TestDeciderDecisionPath(t *testing.T) {
 	owner.completePairKind(t, src, nil)
 	src.session(t)
 	envelope := buildEnvelope(t, owner.deviceID, randBytes(t, 32), randBytes(t, wire.SizeMessageWrappedKey))
+	_, body, err := crypto.SplitMessageEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	utb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
 		VaultID: owner.vaultID, SourceDeviceID: src.deviceID,
-		ReceivedAt: 1790000000000, Envelope: envelope,
+		ReceivedAt: 1790000000000, Body: body,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -440,9 +523,13 @@ func TestMessageTTLSweep(t *testing.T) {
 	src.session(t)
 
 	envelope := buildEnvelope(t, owner.deviceID, randBytes(t, 32), randBytes(t, wire.SizeMessageWrappedKey))
+	_, body, err := crypto.SplitMessageEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tb, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
 		VaultID: owner.vaultID, SourceDeviceID: src.deviceID,
-		ReceivedAt: 1790000000000, Envelope: envelope,
+		ReceivedAt: 1790000000000, Body: body,
 	})
 	if err != nil {
 		t.Fatal(err)

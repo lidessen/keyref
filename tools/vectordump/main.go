@@ -51,6 +51,7 @@ const (
 	itemID       = "deadbeefdeadbeefdeadbeefdeadbeef"
 	otherItemID  = "feedfacefeedfacefeedfacefeedface"
 	approvalID   = "1029384756afbcde1029384756afbcde"
+	sourceDevID  = "b1b2b3b4b5b6b7b8b9babbbcbdbebfc0"
 	nonceHex     = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a" // 16 raw bytes
 	labelCLI     = "build-agent-1"
 	kdfJSON      = `{"v":1,"kdf":"hkdf-sha256","salt":"","kek_info":"recovery-kek","sign_info":"recovery-sign"}`
@@ -270,6 +271,13 @@ type grantFields struct {
 	Revision   uint64 `json:"revision"`
 }
 
+type messageUploadFields struct {
+	VaultID        string `json:"vault_id"`
+	SourceDeviceID string `json:"source_device_id"`
+	ReceivedAt     uint64 `json:"received_at"`
+	BodyHex        string `json:"body_hex"`
+}
+
 type approvalRequestFields struct {
 	VaultID               string `json:"vault_id"`
 	CLIDeviceID           string `json:"cli_device_id"`
@@ -337,6 +345,9 @@ type vectors struct {
 	ApprovalRequest  transcriptVector `json:"approval_request_transcript"`
 	ApprovalDecision transcriptVector `json:"approval_decision_transcript"`
 	ApprovalDenied   transcriptVector `json:"approval_denied_transcript"`
+
+	// message transcript (§3.9 — v2 C)
+	MessageUpload transcriptVector `json:"message_upload_transcript"`
 
 	// owner ECDSA signature over the session transcript (exercises the
 	// owner signer on a §3.6 transcript as the iOS session client does)
@@ -690,6 +701,20 @@ func main() {
 	}
 	approvalDeniedSig := signOwner(approvalDeniedTB)
 
+	// --- message upload transcript (§3.9; v2 C) -----------------------------
+	// The signed field is the trailing body blob of the envelope: nonce ‖
+	// ct ‖ tag. Deterministic bytes pin the layout; no envelope needed.
+	messageBody := mustHex("00112233445566778899aabbccddeeff")
+	messageTB, err := wire.BuildMessageUploadTranscript(wire.MessageUploadTranscript{
+		VaultID: vaultID, SourceDeviceID: sourceDevID,
+		ReceivedAt: 1790000000000, Body: messageBody,
+	})
+	if err != nil {
+		panic(err)
+	}
+	// A source device signs with Ed25519; the fixture CLI key plays it.
+	messageSig := ed25519.Sign(cliPriv, messageTB)
+
 	// --- recovery ------------------------------------------------------------
 	kek, recSignPriv, err := crypto.RecoveryKeysFromSeed(recoverySeed)
 	if err != nil {
@@ -830,6 +855,11 @@ func main() {
 		VaultID      string `json:"vault_id"`
 		ChallengeHex string `json:"challenge_hex"`
 	}{vaultID, challengeHex}, deleteTB, signOwner(deleteTB), wire.SignAlgECDSAP256, hx(ownerPub), false)
+
+	v.MessageUpload = tv(messageUploadFields{
+		VaultID: vaultID, SourceDeviceID: sourceDevID,
+		ReceivedAt: 1790000000000, BodyHex: hx(messageBody),
+	}, messageTB, messageSig, wire.SignAlgEd25519, hx(cliPub), true)
 
 	v.ApprovalRequest = tv(approvalRequestFields{
 		VaultID: vaultID, CLIDeviceID: cliDevID,

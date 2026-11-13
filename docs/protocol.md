@@ -285,12 +285,16 @@ purpose ∈ { vmk, meta-key, item-key, one-time-item-key, audit-event-key, appro
 
 ### 3.9 message-upload 誊本与消息信封（design v0.8 §14.3）
 
-**上传誊本**（source 设备 Ed25519 签，服务器在落库前验证）：
+**上传誊本**（source 设备 Ed25519 签，服务器在落库前验证；protocol v2 C）：
 
 ```text
 "KEYREF1" <NUL> "message-upload" <NUL> vault_id(hex) <NUL> source_device_id(hex) <NUL>
-u64be(received_at, 设备自报的短信到达时间) <NUL> envelope(原始字节)
+u64be(received_at, 设备自报的短信到达时间) <NUL> SHA-256(body)
 ```
+
+末字段是信封**正文 blob**（下文的 `nonce ‖ ct ‖ tag`）的摘要，不是整个信封：正文按下面的信封格式切分得到（严格切分器，`proto/crypto.SplitMessageEnvelope`）。**包裹记录有意不签名**——owner 之后要补写决策器包裹（§6.30），若签名覆盖包裹则补写会使签名失效；伪造包裹也解不出消息密钥（HPKE 只对记录里钉死的目标设备有效）。誊本因此是定长的，与信封大小无关。
+
+**验签方**：服务器在上传时验证；owner（iOS 收件箱 / 审批页）与决策器在**解密任何包裹之前**都要按 owner 签名目录中 `kind = source` 且 active 的条目重建誊本并验签——服务器不是信任锚，不验的行直接跳过，不展示、不审批、不投递。
 
 **消息信封**（复用 D12 审计信封的构造，增加显式目标标识——多接收方类别（owner + 决策器）必须钉死对应关系）：
 
@@ -705,7 +709,7 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
   "received_at": 1790000000000 }
 ```
 
-→ `201 {"message_id":"…","expires_at":…}`，`message_id` 由服务器生成，`expires_at = 服务器 now + 24h`（固定 TTL，design §14.3；客户端自报的过期时间不存在）。服务器校验顺序：`kind = source` → 誊本验证（vault、source_device_id、received_at、envelope 覆盖于该设备当前 Ed25519 公钥）→ 明文上限（envelope ≤ 16 KiB）→ 该设备 active 消息数 < 档位上限（托管）→ 该设备当日上传 < 100（托管）。错误：`forbidden`（非 source）、`bad_signature`、`body_too_large`、`quota_exceeded`。落库后向 owner 设备的已登记 token 尽力推送（§6.27 的消息推送面）。
+→ `201 {"message_id":"…","expires_at":…}`，`message_id` 由服务器生成，`expires_at = 服务器 now + 24h`（固定 TTL，design §14.3；客户端自报的过期时间不存在）。服务器校验顺序（protocol v2 C）：`kind = source` → 请求体上限（envelope ≤ 16 KiB，解码时）→ 信封形状（按 §3.9 严格切分出正文）→ 誊本验签（vault、source_device_id、received_at、`SHA-256(body)`，对该设备当前 Ed25519 公钥）→ 该设备 active 消息数 < 档位上限（托管）→ 该设备当日上传 < 100（托管）。配额只在**验签通过之后**计费：被拒的上传不占额度。错误：`forbidden`（非 source）、`invalid_field`（信封切不出正文）、`bad_signature`、`body_too_large`、`quota_exceeded`。落库后向 owner 设备的已登记 token 尽力推送（§6.27 的消息推送面）。
 
 ### 6.29 `GET /v1/messages?since=<int>`（owner 或决策器）
 
@@ -713,12 +717,12 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 
 ```json
 { "messages": [ { "message_id": "…", "source_device_id": "…", "status": "active|consumed",
-    "envelope": "<b64>", "received_at": 1790000000000,
+    "envelope": "<b64>", "request_signature": "<b64 §3.9 上传签名>", "received_at": 1790000000000,
     "created_at": 1790000000000, "expires_at": 1790000000000 } ],
   "cursor": 1790000001234, "has_more": false }
 ```
 
-只返回 `expires_at > now` 的行，按 `created_at` 升序，每页 ≤ 200，`cursor` = 本页最大 `created_at`。**不进 §8 的 changes 日志**（90 天滚动日志不被 24 小时消息污染，design §14.3）；拉取时顺带删除已过期的行（与审计清理同性质）。`received_at` 是设备自报值，仅作展示参考；排序、游标与「最大年龄」策略一律用服务器 `created_at`。
+只返回 `expires_at > now` 的行，按 `created_at` 升序，每页 ≤ 200，`cursor` = 本页最大 `created_at`。**不进 §8 的 changes 日志**（90 天滚动日志不被 24 小时消息污染，design §14.3）；拉取时顺带删除已过期的行（与审计清理同性质）。`received_at` 是设备自报值，仅作展示参考；排序、游标与「最大年龄」策略一律用服务器 `created_at`。每行回传 `request_signature`（protocol v2 C）：owner 与决策器按 owner 签名目录重建 §3.9 誊本、验签之后才解密——服务器会代替所有设备验签，但服务器不是信任锚，不验的行直接跳过。
 
 ### 6.30 `PUT /v1/messages/:message_id/wraps` — 决策器补投（owner）
 
