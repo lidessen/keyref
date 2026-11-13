@@ -91,9 +91,11 @@ public struct ApprovalRequestPlaintext: Codable, Equatable, Sendable {
 
 public extension PendingApproval {
     static func make(approvalID: String, cliDeviceID: String, itemID: String,
+                     cliEphemeralPublicKey: Data,
                      requestCiphertext: Data, requestSignature: Data,
                      createdAt: Int64, expiresAt: Int64) -> PendingApproval {
         PendingApproval(approvalID: approvalID, cliDeviceID: cliDeviceID, itemID: itemID,
+                        cliEphemeralPublicKey: cliEphemeralPublicKey,
                         requestCiphertext: requestCiphertext,
                         requestSignature: requestSignature,
                         createdAt: createdAt, expiresAt: expiresAt)
@@ -107,17 +109,24 @@ public extension ApprovalListResponse {
 }
 
 public extension ApprovalDecisionRequest {
-    /// §6.21 同意：one_time_enc ‖ one_time_wrapped_key 是发给 CLI 临时公钥的
-    /// 一次性 item key 包裹。
-    static func approved(oneTimeEnc: Data, oneTimeWrappedKey: Data) -> ApprovalDecisionRequest {
+    /// §6.21 approved: one_time_enc ‖ one_time_wrapped_key is the one-time
+    /// item key wrap for the CLI's ephemeral public key; `decisionSignature`
+    /// is the deciding device's signature over the approval-decision
+    /// transcript (§3.12, v2 B).
+    static func approved(oneTimeEnc: Data, oneTimeWrappedKey: Data,
+                         decisionSignature: Data) -> ApprovalDecisionRequest {
         ApprovalDecisionRequest(decision: "approved",
                                 oneTimeEnc: oneTimeEnc,
-                                oneTimeWrappedKey: oneTimeWrappedKey)
+                                oneTimeWrappedKey: oneTimeWrappedKey,
+                                decisionSignature: decisionSignature)
     }
 
-    /// §6.21 拒绝：不带包裹。
-    static func denied() -> ApprovalDecisionRequest {
-        ApprovalDecisionRequest(decision: "denied", oneTimeEnc: nil, oneTimeWrappedKey: nil)
+    /// §6.21 denied: no wrap — but the decision is still signed
+    /// (§3.12, v2 B).
+    static func denied(decisionSignature: Data) -> ApprovalDecisionRequest {
+        ApprovalDecisionRequest(decision: "denied", oneTimeEnc: nil,
+                                oneTimeWrappedKey: nil,
+                                decisionSignature: decisionSignature)
     }
 }
 
@@ -147,17 +156,35 @@ public enum ApprovalFlows {
         return try ApprovalRequestPlaintext.decode(plaintext)
     }
 
-    /// Re-verifies the CLI's Ed25519 signature over the request ciphertext
-    /// (decision D7; design §8.3 step 3: 解开后先验签名，通过才展示). The
-    /// public key comes from the signed device directory entry for
+    /// Re-verifies the CLI's Ed25519 signature over the approval-request
+    /// transcript (§3.11, v2 A). The transcript covers the subject, the
+    /// expiry, the request's one-time X25519 public key and the digest of
+    /// the request ciphertext — so a signature that passes here also
+    /// authenticates the key a decider would seal a message to.
+    ///
+    /// The public key comes from the signed device directory entry for
     /// `pending.cliDeviceID` — never from the mutable devices table alone.
-    /// Requests that fail here display as invalid and can be ignored.
+    /// The device must be an active `kind = cli` entry. Requests that fail
+    /// here display as invalid and can be ignored.
     public static func verifyRequestSignature(_ pending: PendingApproval,
+                                              vaultID: String,
                                               device: KeyrefDirectoryDevice) throws {
         guard device.deviceID == pending.cliDeviceID else {
             throw KeyrefWireError.badSignature
         }
-        try verifyDeviceSignature(transcript: pending.requestCiphertext,
+        guard device.kind == DeviceKind.cli,
+              device.status == DeviceStatus.active else {
+            throw KeyrefWireError.badSignature
+        }
+        let transcript = try buildApprovalRequestTranscript(ApprovalRequestTranscript(
+            vaultID: vaultID,
+            cliDeviceID: pending.cliDeviceID,
+            subjectKind: pending.isMessageSubject ? ApprovalSubjectKind.message : ApprovalSubjectKind.item,
+            subjectID: pending.isMessageSubject ? pending.messageID : pending.itemID,
+            expiresAt: UInt64(max(0, pending.expiresAt)),
+            cliEphemeralPublicKey: pending.cliEphemeralPublicKey,
+            requestCiphertext: pending.requestCiphertext))
+        try verifyDeviceSignature(transcript: transcript,
                                   signature: pending.requestSignature,
                                   signAlg: device.signAlg,
                                   publicKey: device.signPublicKey)
@@ -191,6 +218,12 @@ public enum ApprovalFlows {
               plaintext.ephemeralPublicKey.count == KeyrefSizes.x25519Key else {
             throw KeyrefWireError.invalidField("ephemeral key must be a 32-byte X25519 public key")
         }
+        // The row's one-time key must be the one inside the request: the
+        // row is what a decider (which never decrypts the request) trusts
+        // (§3.11, v2 A).
+        guard plaintext.ephemeralPublicKey == pending.cliEphemeralPublicKey else {
+            throw KeyrefWireError.invalidField("the request's ephemeral key does not match the approval row")
+        }
         try requireID("cli_device_id", plaintext.cliDeviceID)
     }
 
@@ -199,10 +232,15 @@ public enum ApprovalFlows {
     /// `keyref v1 <US> one-time-item-key <US> vault_id <US> cli_device_id
     /// <US> item_id <US> approval_id <US> SHA-256(request_ciphertext)` — so
     /// the wrap answers exactly this request for this item (design §8.3
-    /// step 3, decision D4). Returns enc ‖ ct in the decision request.
+    /// step 3, decision D4). The result is signed over the
+    /// approval-decision transcript (§3.12, v2 B): HPKE base mode
+    /// authenticates nobody, so the CLI must be able to tell a real
+    /// decision from one the server made up.
     public static func approveDecision(vaultID: String, pending: PendingApproval,
                                        plaintext: ApprovalRequestPlaintext,
-                                       itemKey: Data) throws -> ApprovalDecisionRequest {
+                                       itemKey: Data,
+                                       decisionDeviceID: String,
+                                       signer: TranscriptSigner) throws -> ApprovalDecisionRequest {
         let info = try oneTimeItemKeyInfo(vaultID: vaultID,
                                           recipientDeviceID: plaintext.cliDeviceID,
                                           itemID: plaintext.itemID,
@@ -211,7 +249,11 @@ public enum ApprovalFlows {
         let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: plaintext.ephemeralKEM,
                                                recipientPublicKey: plaintext.ephemeralPublicKey,
                                                info: info, plaintext: itemKey)
-        return .approved(oneTimeEnc: enc, oneTimeWrappedKey: ct)
+        return try signedDecision(vaultID: vaultID, pending: pending,
+                                  decisionDeviceID: decisionDeviceID,
+                                  decision: "approved",
+                                  oneTimeEnc: enc, oneTimeWrappedKey: ct,
+                                  signer: signer)
     }
 
     /// §6.21 / §14.5 approved decision for an SMS consumption.
@@ -224,7 +266,9 @@ public enum ApprovalFlows {
     /// this request.
     public static func approveMessageDecision(vaultID: String, pending: PendingApproval,
                                               plaintext: ApprovalRequestPlaintext,
-                                              messagePlaintext: Data) throws -> ApprovalDecisionRequest {
+                                              messagePlaintext: Data,
+                                              decisionDeviceID: String,
+                                              signer: TranscriptSigner) throws -> ApprovalDecisionRequest {
         guard pending.isMessageSubject else {
             throw KeyrefWireError.invalidField("not a message-subject approval")
         }
@@ -236,12 +280,47 @@ public enum ApprovalFlows {
         let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: plaintext.ephemeralKEM,
                                                recipientPublicKey: plaintext.ephemeralPublicKey,
                                                info: info, plaintext: messagePlaintext)
-        return .approved(oneTimeEnc: enc, oneTimeWrappedKey: ct)
+        return try signedDecision(vaultID: vaultID, pending: pending,
+                                  decisionDeviceID: decisionDeviceID,
+                                  decision: "approved",
+                                  oneTimeEnc: enc, oneTimeWrappedKey: ct,
+                                  signer: signer)
     }
 
-    /// §6.21 denied decision — carries no key material.
-    public static func denyDecision() -> ApprovalDecisionRequest {
-        .denied()
+    /// §6.21 denied decision — carries no key material, but is still
+    /// signed: a denial the CLI cannot authenticate is not evidence that
+    /// the owner refused (§3.12, v2 B).
+    public static func denyDecision(vaultID: String, pending: PendingApproval,
+                                    decisionDeviceID: String,
+                                    signer: TranscriptSigner) throws -> ApprovalDecisionRequest {
+        try signedDecision(vaultID: vaultID, pending: pending,
+                           decisionDeviceID: decisionDeviceID,
+                           decision: "denied",
+                           oneTimeEnc: Data(), oneTimeWrappedKey: Data(),
+                           signer: signer)
+    }
+
+    /// Signs the decision over the approval-decision transcript
+    /// (§3.12, v2 B) and returns the request body for
+    /// `POST /v1/approvals/{id}/decision`.
+    static func signedDecision(vaultID: String, pending: PendingApproval,
+                                decisionDeviceID: String, decision: String,
+                                oneTimeEnc: Data, oneTimeWrappedKey: Data,
+                                signer: TranscriptSigner) throws -> ApprovalDecisionRequest {
+        let transcript = try buildApprovalDecisionTranscript(ApprovalDecisionTranscript(
+            vaultID: vaultID,
+            approvalID: pending.approvalID,
+            decisionDeviceID: decisionDeviceID,
+            decision: decision,
+            requestCiphertext: pending.requestCiphertext,
+            oneTimeEnc: oneTimeEnc,
+            oneTimeWrappedKey: oneTimeWrappedKey))
+        let signature = try signer.sign(transcript)
+        if decision == "approved" {
+            return .approved(oneTimeEnc: oneTimeEnc, oneTimeWrappedKey: oneTimeWrappedKey,
+                             decisionSignature: signature)
+        }
+        return .denied(decisionSignature: signature)
     }
 
     private static func requireID(_ name: String, _ v: String) throws {

@@ -6,7 +6,7 @@ import (
 )
 
 // SchemaVersion is the schema version stamp kept in PRAGMA user_version.
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 type migration struct {
 	version int
@@ -225,6 +225,16 @@ var migrations = []migration{
 		version: 6,
 		stmts: []string{
 			`ALTER TABLE approvals ADD COLUMN decision_device_id TEXT`,
+		},
+	},
+	{
+		// v7 addition (protocol v2 B): the decision device's signature
+		// over the approval-decision transcript. HPKE base mode has no
+		// sender authentication, so without it a malicious server could
+		// hand the CLI a wrap it fabricated.
+		version: 7,
+		stmts: []string{
+			`ALTER TABLE approvals ADD COLUMN decision_signature BLOB`,
 		},
 	},
 }

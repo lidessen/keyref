@@ -37,6 +37,7 @@ import (
 	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/audit"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 )
@@ -90,6 +91,11 @@ type Config struct {
 	OwnerSignPublicKey []byte // pinned at pairing (§9.2)
 	Now                func() time.Time
 	Logger             *log.Logger
+	// Devices returns the owner-signed device directory. It is the only
+	// authority for the CLI key that signs an approval request (protocol
+	// v2 A) — without it the plaintext would go to whatever key the
+	// server put in the row.
+	Devices func() ([]audit.DeviceRecord, error)
 }
 
 // Decider runs the §14.8 loop. Safe for sequential use; RunOnce is
@@ -195,6 +201,15 @@ func (d *Decider) tryApprove(ctx context.Context, policy wire.DelegationPolicy, 
 		logf("approval carries no CLI ephemeral key")
 		return false
 	}
+	// Gate 2b — the request must be signed by the CLI device the owner's
+	// directory lists as active CLI (protocol v2 A). This is what binds
+	// the plaintext ephemeral key above to a real request: the decider
+	// never decrypts request_ciphertext, so without the signature the
+	// server could substitute its own key and read the code.
+	if !d.verifyRequest(row) {
+		logf("approval request signature does not verify under the signed directory")
+		return false
+	}
 
 	// Gate 3 — the message itself.
 	msg, err := d.findMessage(ctx, row.MessageID)
@@ -266,10 +281,32 @@ func (d *Decider) tryApprove(ctx context.Context, policy wire.DelegationPolicy, 
 		logf("decision wrap: %v", err)
 		return false
 	}
+	// Sign the decision before submitting it (protocol §3.12, v2 B): the
+	// CLI verifies this signature before unwrapping, so an unsigned
+	// decision would be refused on the other end.
+	dtb, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID:           d.cfg.VaultID,
+		ApprovalID:        row.ApprovalID,
+		DecisionDeviceID:  d.cfg.DeviceID,
+		Decision:          wire.ApprovalStatusApproved,
+		RequestCiphertext: row.RequestCiphertext,
+		OneTimeEnc:        enc,
+		OneTimeWrappedKey: wrapped,
+	})
+	if err != nil {
+		logf("decision transcript: %v", err)
+		return false
+	}
+	dsig, err := wire.SignEd25519(dtb, d.cfg.Identity.SignPrivate)
+	if err != nil {
+		logf("decision signing: %v", err)
+		return false
+	}
 	if err := d.cfg.Client.SubmitApprovalDecision(row.ApprovalID, &wire.ApprovalDecisionRequest{
 		Decision:          wire.ApprovalStatusApproved,
 		OneTimeEnc:        enc,
 		OneTimeWrappedKey: wrapped,
+		DecisionSignature: dsig,
 	}); err != nil {
 		logf("submit decision: %v", err)
 		return false
@@ -380,4 +417,42 @@ func (l *Limiter) Record(cli string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.history[cli] = append(l.history[cli], l.now())
+}
+
+// verifyRequest checks the CLI's signature over the approval-request
+// transcript (protocol §3.11) using the key the owner's signed directory
+// gives that device. Any doubt — no directory source, unknown device,
+// revoked device, wrong kind, bad signature — is a veto: the approval
+// stays pending for a human (design §14.8 failure semantics).
+func (d *Decider) verifyRequest(row wire.ApprovalRow) bool {
+	if d.cfg.Devices == nil {
+		return false
+	}
+	devices, err := d.cfg.Devices()
+	if err != nil {
+		return false
+	}
+	var dev *audit.DeviceRecord
+	for i := range devices {
+		if devices[i].DeviceID == row.CLIDeviceID {
+			dev = &devices[i]
+			break
+		}
+	}
+	if dev == nil || dev.Status != wire.DeviceStatusActive || dev.Kind != wire.DeviceKindCLI {
+		return false
+	}
+	tb, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID:               d.cfg.VaultID,
+		CLIDeviceID:           row.CLIDeviceID,
+		SubjectKind:           wire.EntityMessage,
+		SubjectID:             row.MessageID,
+		ExpiresAt:             uint64(row.ExpiresAt),
+		CLIEphemeralPublicKey: row.CLIEphemeralPublicKey,
+		RequestCiphertext:     row.RequestCiphertext,
+	})
+	if err != nil {
+		return false
+	}
+	return wire.VerifyCLISignature(tb, row.RequestSignature, dev.SignPublicKey) == nil
 }

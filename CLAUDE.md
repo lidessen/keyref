@@ -166,3 +166,4 @@ The UI follows the "cool editorial" direction settled on 2026-11-01 and specifie
 - `keyref exec --stdin-login` is mutually exclusive with `--stdin`/`--pty`, and the same item cannot be used in two injection positions at once.
 - The CLI zeroes guarded buffers on every exit path via `secret.Purge()`; that is why fatal errors unwind through a panic instead of calling `os.Exit` directly.
 - `out/` and `.build/` are local scratch output and are gitignored — don't commit them.
+- After editing `ios/Sources/KeyrefCore`, `xcodebuild` may compile `KeyrefUI` against a **stale KeyrefCore package product** and report signature errors in the *caller* ("Extra argument 'vaultID' in call"). The second build picks up the new package product and succeeds — re-run before believing the failure, and fall back to `swift build --package-path ios` (which reads the sources directly).

@@ -103,7 +103,7 @@ func TestDecideApprovalForMessageRefusesExpired(t *testing.T) {
 		Status: wire.ApprovalStatusPending, ExpiresAt: 1000, CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
-	err := s.DecideApprovalForMessage(ctx, "v1", "a1", "m1", "dec", true, []byte("w"), 2000, 150)
+	err := s.DecideApprovalForMessage(ctx, "v1", "a1", "m1", "dec", true, []byte("w"), []byte("sig"), 2000, 150)
 	if !errors.Is(err, ErrApprovalNotPending) {
 		t.Fatalf("expired message: err = %v, want ErrApprovalNotPending", err)
 	}
@@ -122,7 +122,7 @@ func TestDecideApprovalExpiresLatePending(t *testing.T) {
 		Status: wire.ApprovalStatusPending, ExpiresAt: 1000, CreatedAt: 1}); err != nil {
 		t.Fatal(err)
 	}
-	err := s.DecideApproval(ctx, "v1", aid, "dec", true, []byte("w"), 5000, 1001)
+	err := s.DecideApproval(ctx, "v1", aid, "dec", true, []byte("w"), []byte("sig"), 5000, 1001)
 	if !errors.Is(err, ErrApprovalNotPending) {
 		t.Fatalf("err = %v, want ErrApprovalNotPending", err)
 	}

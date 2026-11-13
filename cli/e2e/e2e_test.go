@@ -164,6 +164,7 @@ type owner struct {
 	cliDeviceID  string            // assigned at pair completion
 	cliHPKE      []byte            // CLI HPKE public key, from the QR payload
 	cliSign      []byte            // CLI Ed25519 public key, from the QR payload
+	cliGrants    []byte            // digest of the CLI's grants (directory record)
 	// lastApprovalID is set by the approval responder for follow-up
 	// assertions (consumed status, polling floor).
 	lastApprovalID string
@@ -548,6 +549,9 @@ func (o *owner) completePairing(t *testing.T, nonceHex, payloadLine string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if digest, err := wire.GrantsDigest(gts); err == nil {
+		o.cliGrants = digest
+	}
 	req := wire.PairCompleteRequest{
 		Nonce: nonceHex,
 		Device: wire.DeviceInput{
@@ -561,6 +565,24 @@ func (o *owner) completePairing(t *testing.T, nonceHex, payloadLine string) {
 	}
 	if resp := o.do(t, "POST", "/v1/pair/complete", req, nil); resp.StatusCode != 204 {
 		t.Fatalf("pair complete: %d", resp.StatusCode)
+	}
+}
+
+// publishDirectory publishes a new owner-signed directory (§6.15). The
+// devices table follows it (v2 G), so every paired device has to be
+// listed — one the directory omits is revoked.
+func (o *owner) publishDirectory(t *testing.T, revision uint64, devices []wire.DirectoryDevice) {
+	t.Helper()
+	dir, err := wire.BuildDirectoryTranscript(wire.DirectoryTranscript{
+		VaultID: o.vaultID, DirectoryRevision: revision, Devices: devices,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp := o.do(t, "PUT", "/v1/directory", wire.PutDirectoryRequest{
+		DirectoryRevision: revision, DirectorySigned: dir, Signature: o.sign(dir),
+	}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("publish directory: %d", resp.StatusCode)
 	}
 }
 

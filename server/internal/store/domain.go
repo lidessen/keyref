@@ -81,6 +81,7 @@ type Approval struct {
 	Status                string // pending | approved | denied | expired | consumed
 	OneTimeWrap           []byte // NULL until the owner approves
 	DecisionDeviceID      string // device that signed the decision (kind=ios or kind=decider); "" = none yet (schema v6, design §14.5/§14.8)
+	DecisionSignature     []byte // decision device's signature over the approval-decision transcript (schema v7, protocol §3.12)
 	ExpiresAt             int64
 	CreatedAt             int64
 }

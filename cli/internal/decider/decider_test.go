@@ -22,6 +22,7 @@ import (
 	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/audit"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 )
@@ -91,11 +92,12 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 
 // fixture wires one decider + one pending message approval.
 type fixture struct {
-	api     *fakeAPI
-	dec     *Decider
-	owner   *ecdsa.PrivateKey
-	decider *device.Identity
-	now     time.Time
+	api        *fakeAPI
+	dec        *Decider
+	owner      *ecdsa.PrivateKey
+	decider    *device.Identity
+	cliSignPub ed25519.PublicKey
+	now        time.Time
 }
 
 func newFixture(t *testing.T, policy wire.DelegationPolicy) *fixture {
@@ -169,15 +171,36 @@ func newFixtureWithAge(t *testing.T, policy wire.DelegationPolicy, ageSeconds in
 	if _, err := rand.Read(ephemeral); err != nil {
 		t.Fatal(err)
 	}
+	// The request is signed by the CLI device the directory lists
+	// (protocol v2 A): the decider refuses anything it cannot attribute.
+	cliPub, cliPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalExpires := now.UnixMilli() + 120_000
+	reqTB, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID: testVault, CLIDeviceID: testCLI,
+		SubjectKind: wire.EntityMessage, SubjectID: testMsg,
+		ExpiresAt:             uint64(approvalExpires),
+		CLIEphemeralPublicKey: ephemeral,
+		RequestCiphertext:     []byte("ciphertext-for-digest"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqSig, err := wire.SignEd25519(reqTB, cliPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
 	api.approvals = []wire.ApprovalRow{{
 		ApprovalID: testAppr, CLIDeviceID: testCLI, MessageID: testMsg,
 		CLIEphemeralPublicKey: ephemeral,
 		RequestCiphertext:     []byte("ciphertext-for-digest"),
-		RequestSignature:      []byte("sig"),
-		CreatedAt:             now.UnixMilli(), ExpiresAt: now.UnixMilli() + 120_000,
+		RequestSignature:      reqSig,
+		CreatedAt:             now.UnixMilli(), ExpiresAt: approvalExpires,
 	}}
 
-	return &fixture{api: api, owner: ownerKey, decider: deciderID, now: now}
+	return &fixture{api: api, owner: ownerKey, decider: deciderID, now: now, cliSignPub: cliPub}
 }
 
 func (f *fixture) run(t *testing.T, policy wire.DelegationPolicy, reviewer Reviewer) (int, error) {
@@ -190,6 +213,12 @@ func (f *fixture) run(t *testing.T, policy wire.DelegationPolicy, reviewer Revie
 		OwnerSignPublicKey: elliptic.Marshal(elliptic.P256(), f.owner.PublicKey.X, f.owner.PublicKey.Y),
 		Reviewer:           reviewer,
 		Now:                func() time.Time { return f.now },
+		Devices: func() ([]audit.DeviceRecord, error) {
+			return []audit.DeviceRecord{{
+				DeviceID: testCLI, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
+				SignAlg: wire.SignAlgEd25519, SignPublicKey: f.cliSignPub,
+			}}, nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -214,6 +243,21 @@ func TestAutoApprovesInsidePolicy(t *testing.T) {
 	}
 	if n != 1 || len(f.api.decisions) != 1 {
 		t.Fatalf("approved %d, decisions %d", n, len(f.api.decisions))
+	}
+	// The decision is signed by the decider device over exactly the wrap
+	// it delivered (protocol §3.12, v2 B).
+	dec := f.api.decisions[0]
+	dtb, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID: testVault, ApprovalID: testAppr, DecisionDeviceID: testDecider,
+		Decision:          wire.ApprovalStatusApproved,
+		RequestCiphertext: f.api.approvals[0].RequestCiphertext,
+		OneTimeEnc:        dec.OneTimeEnc, OneTimeWrappedKey: dec.OneTimeWrappedKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wire.VerifyDeviceSignature(dtb, dec.DecisionSignature, wire.SignAlgEd25519, f.decider.SignPublic); err != nil {
+		t.Fatalf("decision signature: %v", err)
 	}
 	// The reviewer saw the body isolated from the metadata.
 	if !strings.Contains(reviewed.Body, "482913") || reviewed.Sender != "10086" ||
@@ -313,5 +357,53 @@ func TestLimiter(t *testing.T) {
 	l.Record("c")
 	if l.Allow("c", p) {
 		t.Fatal("daily cap (3) must refuse the fourth")
+	}
+}
+
+// TestRefusesRequestItCannotAttribute pins v2 A at the decider: when the
+// server alters any signed field of the request, the decider must not seal
+// the SMS plaintext to the key in the row.
+func TestRefusesRequestItCannotAttribute(t *testing.T) {
+	cases := map[string]func(*fakeAPI){
+		"swapped ephemeral key": func(a *fakeAPI) {
+			a.approvals[0].CLIEphemeralPublicKey = make([]byte, wire.SizeX25519Key)
+		},
+		"tampered ciphertext": func(a *fakeAPI) {
+			a.approvals[0].RequestCiphertext = []byte("another-ciphertext")
+		},
+		"extended expiry": func(a *fakeAPI) {
+			a.approvals[0].ExpiresAt += 1
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, allowAll)
+			mutate(f.api)
+			n, err := f.run(t, allowAll, ReviewerFunc(func(context.Context, ReviewInput) (Verdict, error) {
+				return Pass, nil
+			}))
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if n != 0 || len(f.api.decisions) != 0 {
+				t.Fatalf("approved %d, decisions %d, want none", n, len(f.api.decisions))
+			}
+		})
+	}
+}
+
+// TestRefusesUnknownCLI: a request from a device the directory does not
+// list as an active CLI gets no decision either.
+func TestRefusesUnknownCLI(t *testing.T) {
+	f := newFixture(t, allowAll)
+	f.api.approvals[0].CLIDeviceID = testSource
+	n, err := f.run(t, allowAll, ReviewerFunc(func(context.Context, ReviewInput) (Verdict, error) {
+		return Pass, nil
+	}))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if n != 0 || len(f.api.decisions) != 0 {
+		t.Fatalf("approved %d, decisions %d, want none", n, len(f.api.decisions))
 	}
 }

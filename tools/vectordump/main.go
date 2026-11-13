@@ -200,32 +200,32 @@ type kvInput struct {
 }
 
 type infoVector struct {
-	Input    kvInput `json:"input"`
-	InfoHex  string  `json:"info_hex"`
+	Input   kvInput `json:"input"`
+	InfoHex string  `json:"info_hex"`
 }
 
 type oneTimeInfoVector struct {
-	VaultID            string `json:"vault_id"`
-	RecipientDeviceID  string `json:"recipient_device_id"`
-	ItemID             string `json:"item_id"`
-	ApprovalID         string `json:"approval_id"`
-	RequestCipherHex   string `json:"request_ciphertext_hex"`
-	InfoHex            string `json:"info_hex"`
+	VaultID           string `json:"vault_id"`
+	RecipientDeviceID string `json:"recipient_device_id"`
+	ItemID            string `json:"item_id"`
+	ApprovalID        string `json:"approval_id"`
+	RequestCipherHex  string `json:"request_ciphertext_hex"`
+	InfoHex           string `json:"info_hex"`
 }
 
 type aadVector struct {
-	VaultID  string `json:"vault_id"`
-	ItemID   string `json:"item_id"`
-	DeviceID string `json:"device_id"`
-	SecretHex   string `json:"secret_hex"`
-	MetaHex     string `json:"meta_hex"`
+	VaultID      string `json:"vault_id"`
+	ItemID       string `json:"item_id"`
+	DeviceID     string `json:"device_id"`
+	SecretHex    string `json:"secret_hex"`
+	MetaHex      string `json:"meta_hex"`
 	VaultMetaHex string `json:"vault_meta_key_hex"`
 	VaultItemHex string `json:"vault_item_key_hex"`
 	RecoveryHex  string `json:"recovery_hex"`
 	AuditHex     string `json:"audit_hex"`
 	// negative: decrypting the §3.7 secret blob under another item's AAD
 	// (or another vault's) must fail.
-	WrongItemHex string `json:"secret_wrong_item_hex"`
+	WrongItemHex  string `json:"secret_wrong_item_hex"`
 	WrongVaultHex string `json:"secret_wrong_vault_hex"`
 }
 
@@ -238,36 +238,56 @@ type aeadVector struct {
 }
 
 type hpkeVector struct {
-	KEMName           string `json:"kem"`
-	RecipientPrivHex  string `json:"recipient_private_hex"`
-	RecipientPubHex   string `json:"recipient_public_hex"`
-	InfoHex           string `json:"info_hex"`
-	EncapSeedHex      string `json:"encapsulation_seed_hex"`
-	PlaintextHex      string `json:"plaintext_hex"`
-	EncHex            string `json:"enc_hex"`
-	CTHex             string `json:"ct_hex"`
+	KEMName          string `json:"kem"`
+	RecipientPrivHex string `json:"recipient_private_hex"`
+	RecipientPubHex  string `json:"recipient_public_hex"`
+	InfoHex          string `json:"info_hex"`
+	EncapSeedHex     string `json:"encapsulation_seed_hex"`
+	PlaintextHex     string `json:"plaintext_hex"`
+	EncHex           string `json:"enc_hex"`
+	CTHex            string `json:"ct_hex"`
 }
 
 type recoveryVector struct {
-	VaultIDHex    string `json:"vault_id_hex"`
-	SeedHex       string `json:"seed_hex"`
-	Code          string `json:"code"`
-	KEKHex        string `json:"kek_hex"`
-	SignPublicHex string `json:"sign_public_hex"`
-	KDFJSON       string `json:"kdf_json"`
+	VaultIDHex      string `json:"vault_id_hex"`
+	SeedHex         string `json:"seed_hex"`
+	Code            string `json:"code"`
+	KEKHex          string `json:"kek_hex"`
+	SignPublicHex   string `json:"sign_public_hex"`
+	KDFJSON         string `json:"kdf_json"`
 	RecoveryWrapHex string `json:"recovery_wrap_hex"`
-	VMKHex        string `json:"vmk_hex"`
-	RecoveryAADHex string `json:"recovery_aad_hex"`
+	VMKHex          string `json:"vmk_hex"`
+	RecoveryAADHex  string `json:"recovery_aad_hex"`
 }
 
 type grantFields struct {
-	DeviceID  string `json:"device_id"`
-	ItemID    string `json:"item_id"`
-	Kind      string `json:"kind"`
-	HPKEEnc   string `json:"hpke_enc"`
+	DeviceID   string `json:"device_id"`
+	ItemID     string `json:"item_id"`
+	Kind       string `json:"kind"`
+	HPKEEnc    string `json:"hpke_enc"`
 	WrappedKey string `json:"wrapped_key"`
-	ExpiresAt uint64 `json:"expires_at"`
-	Revision  uint64 `json:"revision"`
+	ExpiresAt  uint64 `json:"expires_at"`
+	Revision   uint64 `json:"revision"`
+}
+
+type approvalRequestFields struct {
+	VaultID               string `json:"vault_id"`
+	CLIDeviceID           string `json:"cli_device_id"`
+	SubjectKind           string `json:"subject_kind"`
+	SubjectID             string `json:"subject_id"`
+	ExpiresAt             uint64 `json:"expires_at"`
+	CLIEphemeralPublicHex string `json:"cli_ephemeral_public_key_hex"`
+	RequestCiphertextHex  string `json:"request_ciphertext_hex"`
+}
+
+type approvalDecisionFields struct {
+	VaultID              string `json:"vault_id"`
+	ApprovalID           string `json:"approval_id"`
+	DecisionDeviceID     string `json:"decision_device_id"`
+	Decision             string `json:"decision"`
+	RequestCiphertextHex string `json:"request_ciphertext_hex"`
+	OneTimeEncHex        string `json:"one_time_enc_hex"`
+	OneTimeWrappedHex    string `json:"one_time_wrapped_key_hex"`
 }
 
 type transcriptVector struct {
@@ -277,30 +297,30 @@ type transcriptVector struct {
 	SignAlg      string          `json:"sign_alg"`
 	SignerPubHex string          `json:"signer_public_hex"`
 	// a single flipped byte (reported index) must break verification
-	TamperedHex  string `json:"tampered_bytes_hex,omitempty"`
-	TamperedIdx  int    `json:"tampered_index,omitempty"`
+	TamperedHex string `json:"tampered_bytes_hex,omitempty"`
+	TamperedIdx int    `json:"tampered_index,omitempty"`
 }
 
 type vectors struct {
 	Generator string `json:"generator"`
 
-	VaultID   string `json:"vault_id"`
-	OwnerDev  string `json:"owner_device_id"`
-	CLIDev    string `json:"cli_device_id"`
-	ItemID    string `json:"item_id"`
-	OtherItem string `json:"other_item_id"`
+	VaultID    string `json:"vault_id"`
+	OwnerDev   string `json:"owner_device_id"`
+	CLIDev     string `json:"cli_device_id"`
+	ItemID     string `json:"item_id"`
+	OtherItem  string `json:"other_item_id"`
 	ApprovalID string `json:"approval_id"`
 
 	OwnerSignPubHex string `json:"owner_sign_public_hex"`
 	CLISignPubHex   string `json:"cli_sign_public_hex"`
 
-	InfoItemKey  infoVector        `json:"info_item_key"`
-	InfoOneTime  oneTimeInfoVector `json:"info_one_time"`
-	AAD          aadVector         `json:"aad"`
-	AEADBlob     aeadVector        `json:"aead_blob"`
-	HPKEP256     hpkeVector        `json:"hpke_p256"`
-	HPKEX25519   hpkeVector        `json:"hpke_x25519"`
-	Recovery     recoveryVector    `json:"recovery"`
+	InfoItemKey infoVector        `json:"info_item_key"`
+	InfoOneTime oneTimeInfoVector `json:"info_one_time"`
+	AAD         aadVector         `json:"aad"`
+	AEADBlob    aeadVector        `json:"aead_blob"`
+	HPKEP256    hpkeVector        `json:"hpke_p256"`
+	HPKEX25519  hpkeVector        `json:"hpke_x25519"`
+	Recovery    recoveryVector    `json:"recovery"`
 
 	Item          transcriptVector `json:"item_transcript"`
 	GrantView     transcriptVector `json:"grant_view_transcript"`
@@ -312,6 +332,11 @@ type vectors struct {
 	Session       transcriptVector `json:"session_transcript"`
 	VaultDelete   transcriptVector `json:"vault_delete_transcript"`
 	VaultRecovery transcriptVector `json:"vault_recovery_transcript"`
+
+	// approval transcripts (§3.11, §3.12 — v2 A/B)
+	ApprovalRequest  transcriptVector `json:"approval_request_transcript"`
+	ApprovalDecision transcriptVector `json:"approval_decision_transcript"`
+	ApprovalDenied   transcriptVector `json:"approval_denied_transcript"`
 
 	// owner ECDSA signature over the session transcript (exercises the
 	// owner signer on a §3.6 transcript as the iOS session client does)
@@ -603,7 +628,7 @@ func main() {
 		Nonce: nonceHex, DeviceID: cliDevID,
 		HPKEKEM: wire.KEMX25519, HPKEPublicKey: cliXPub,
 		SignAlg: wire.SignAlgEd25519, SignPublicKey: cliPub,
-		Label: labelCLI,
+		Label:  labelCLI,
 		Grants: []wire.GrantTranscript{grantView, grantUse},
 	})
 
@@ -625,6 +650,45 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	// --- approval transcripts (§3.11, §3.12; v2 A/B) -------------------------
+	// The CLI signs the request; the owner signs the decision. The
+	// one-time wrap in the decision is the same layout the server stores
+	// (u16be(len(enc)) ‖ enc ‖ wrapped).
+	approvalReqTB, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID: vaultID, CLIDeviceID: cliDevID,
+		SubjectKind: wire.EntityItem, SubjectID: itemID,
+		ExpiresAt:             1790000000000,
+		CLIEphemeralPublicKey: cliXPub,
+		RequestCiphertext:     requestCT,
+	})
+	if err != nil {
+		panic(err)
+	}
+	approvalReqSig := ed25519.Sign(cliPriv, approvalReqTB)
+
+	approvalDecTB, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID: vaultID, ApprovalID: approvalID,
+		DecisionDeviceID: ownerDevID, Decision: wire.ApprovalStatusApproved,
+		RequestCiphertext: requestCT,
+		OneTimeEnc:        encUse, OneTimeWrappedKey: wrapUse,
+	})
+	if err != nil {
+		panic(err)
+	}
+	approvalDecSig := signOwner(approvalDecTB)
+
+	// A denied decision carries no wrap at all, so its trailing digest is
+	// the digest of the empty string.
+	approvalDeniedTB, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID: vaultID, ApprovalID: approvalID,
+		DecisionDeviceID: ownerDevID, Decision: wire.ApprovalStatusDenied,
+		RequestCiphertext: requestCT,
+	})
+	if err != nil {
+		panic(err)
+	}
+	approvalDeniedSig := signOwner(approvalDeniedTB)
 
 	// --- recovery ------------------------------------------------------------
 	kek, recSignPriv, err := crypto.RecoveryKeysFromSeed(recoverySeed)
@@ -668,22 +732,22 @@ func main() {
 			PlaintextHex: hx(metaJSON), BlobHex: hx(blobMeta),
 		},
 		HPKEX25519: hpkeVector{
-			KEMName: "X25519",
+			KEMName:          "X25519",
 			RecipientPrivHex: hx(cliX25519Priv), RecipientPubHex: hx(cliXPub),
 			// The use-grant envelope: item-key info wrapping the item key.
 			InfoHex: hx(infoItem), EncapSeedHex: hx(x25519EncapSeed),
 			PlaintextHex: hx(itemKey), EncHex: hx(encUse), CTHex: hx(wrapUse),
 		},
 		HPKEP256: hpkeVector{
-			KEMName: "P-256",
+			KEMName:          "P-256",
 			RecipientPrivHex: hx(ownerP256Priv), RecipientPubHex: hx(ownerPPub),
 			InfoHex: hx(infoOneTime), EncapSeedHex: hx(p256EncapSeed),
 			PlaintextHex: hx(itemKey),
 		},
 		Recovery: recoveryVector{
 			VaultIDHex: vaultID, SeedHex: hx(recoverySeed),
-			Code:    crockfordEncode(append(mustHex(vaultID), recoverySeed...)),
-			KEKHex:  hx(kek), SignPublicHex: hx(recSignPub), KDFJSON: kdfJSON,
+			Code:   crockfordEncode(append(mustHex(vaultID), recoverySeed...)),
+			KEKHex: hx(kek), SignPublicHex: hx(recSignPub), KDFJSON: kdfJSON,
 			RecoveryWrapHex: hx(recoveryWrap), VMKHex: hx(vmk), RecoveryAADHex: hx(aadRec),
 		},
 	}
@@ -717,9 +781,9 @@ func main() {
 	v.GrantDelete = tv(grantFieldsOf(grantDelete), grantDeleteTB, signOwner(grantDeleteTB), wire.SignAlgECDSAP256, hx(ownerPub), false)
 
 	dirFields := struct {
-		VaultID            string `json:"vault_id"`
-		DirectoryRevision  uint64 `json:"directory_revision"`
-		Devices            []dirDeviceFields `json:"devices"`
+		VaultID           string            `json:"vault_id"`
+		DirectoryRevision uint64            `json:"directory_revision"`
+		Devices           []dirDeviceFields `json:"devices"`
 	}{
 		VaultID: vaultID, DirectoryRevision: 7,
 		Devices: []dirDeviceFields{
@@ -734,16 +798,16 @@ func main() {
 	v.Directory = tv(dirFields, dirTB, signOwner(dirTB), wire.SignAlgECDSAP256, hx(ownerPub), true)
 
 	pairFields := struct {
-		VaultID       string `json:"vault_id"`
-		OwnerSignPub  string `json:"owner_sign_public_hex"`
-		Nonce         string `json:"nonce"`
-		DeviceID      string `json:"device_id"`
-		HPKEKEM       string `json:"hpke_kem"`
-		HPKEPub       string `json:"hpke_public_key_hex"`
-		SignAlg       string `json:"sign_alg"`
-		SignPub       string `json:"sign_public_key_hex"`
-		Label         string `json:"label"`
-		GrantCount    int    `json:"grant_count"`
+		VaultID      string `json:"vault_id"`
+		OwnerSignPub string `json:"owner_sign_public_hex"`
+		Nonce        string `json:"nonce"`
+		DeviceID     string `json:"device_id"`
+		HPKEKEM      string `json:"hpke_kem"`
+		HPKEPub      string `json:"hpke_public_key_hex"`
+		SignAlg      string `json:"sign_alg"`
+		SignPub      string `json:"sign_public_key_hex"`
+		Label        string `json:"label"`
+		GrantCount   int    `json:"grant_count"`
 	}{
 		VaultID: vaultID, OwnerSignPub: hx(ownerPub), Nonce: nonceHex,
 		DeviceID: cliDevID, HPKEKEM: "X25519", HPKEPub: hx(cliXPub),
@@ -767,10 +831,34 @@ func main() {
 		ChallengeHex string `json:"challenge_hex"`
 	}{vaultID, challengeHex}, deleteTB, signOwner(deleteTB), wire.SignAlgECDSAP256, hx(ownerPub), false)
 
+	v.ApprovalRequest = tv(approvalRequestFields{
+		VaultID: vaultID, CLIDeviceID: cliDevID,
+		SubjectKind: wire.EntityItem, SubjectID: itemID,
+		ExpiresAt:             1790000000000,
+		CLIEphemeralPublicHex: hx(cliXPub),
+		RequestCiphertextHex:  hx(requestCT),
+	}, approvalReqTB, approvalReqSig, wire.SignAlgEd25519, hx(cliPub), true)
+
+	v.ApprovalDecision = tv(approvalDecisionFields{
+		VaultID: vaultID, ApprovalID: approvalID,
+		DecisionDeviceID: ownerDevID, Decision: wire.ApprovalStatusApproved,
+		RequestCiphertextHex: hx(requestCT),
+		OneTimeEncHex:        hx(encUse),
+		OneTimeWrappedHex:    hx(wrapUse),
+	}, approvalDecTB, approvalDecSig, wire.SignAlgECDSAP256, hx(ownerPub), true)
+
+	v.ApprovalDenied = tv(approvalDecisionFields{
+		VaultID: vaultID, ApprovalID: approvalID,
+		DecisionDeviceID: ownerDevID, Decision: wire.ApprovalStatusDenied,
+		RequestCiphertextHex: hx(requestCT),
+		OneTimeEncHex:        "",
+		OneTimeWrappedHex:    "",
+	}, approvalDeniedTB, approvalDeniedSig, wire.SignAlgECDSAP256, hx(ownerPub), false)
+
 	v.VaultRecovery = tv(struct {
-		VaultID       string `json:"vault_id"`
-		RecoveryWrap  string `json:"recovery_wrap_hex"`
-		KDFJSON       string `json:"kdf_json"`
+		VaultID         string `json:"vault_id"`
+		RecoveryWrap    string `json:"recovery_wrap_hex"`
+		KDFJSON         string `json:"kdf_json"`
 		RecoverySignPub string `json:"recovery_sign_pub_hex"`
 		// both signatures cover the same bytes (protocol §6.3/D13)
 		OwnerSignature    string `json:"owner_signature_hex"`
@@ -792,14 +880,14 @@ func main() {
 }
 
 type dirDeviceFields struct {
-	DeviceID       string `json:"device_id"`
-	Kind           string `json:"kind"`
-	Status         string `json:"status"`
-	HPKEKEM        string `json:"hpke_kem"`
-	HPKEPubHex     string `json:"hpke_public_key_hex"`
-	SignAlg        string `json:"sign_alg"`
-	SignPubHex     string `json:"sign_public_key_hex"`
-	RenewalPubHex  string `json:"renewal_sign_public_key_hex"`
+	DeviceID        string `json:"device_id"`
+	Kind            string `json:"kind"`
+	Status          string `json:"status"`
+	HPKEKEM         string `json:"hpke_kem"`
+	HPKEPubHex      string `json:"hpke_public_key_hex"`
+	SignAlg         string `json:"sign_alg"`
+	SignPubHex      string `json:"sign_public_key_hex"`
+	RenewalPubHex   string `json:"renewal_sign_public_key_hex"`
 	GrantsDigestHex string `json:"grants_digest_hex"`
-	ReceiverRole   uint8  `json:"receiver_role"`
+	ReceiverRole    uint8  `json:"receiver_role"`
 }

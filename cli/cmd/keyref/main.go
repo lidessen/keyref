@@ -605,10 +605,10 @@ type execOptions struct {
 	Argv       []string
 	// Source selects the credential source; empty means the configured
 	// default (local, unless a paired vault predates sources).
-	Source     string
-	Stdout     io.Writer
-	Stderr     io.Writer
-	Stdin      io.Reader
+	Source string
+	Stdout io.Writer
+	Stderr io.Writer
+	Stdin  io.Reader
 }
 
 // runExecCore executes one exec end to end: audit wiring, meta
@@ -633,6 +633,7 @@ func runExecCore(opts execOptions) int {
 	// recipients (defense in depth, design.md §9.1).
 	cl := newClient(st, id)
 	var auditRecips []audit.OwnerRecipient
+	var dirDevices []audit.DeviceRecord
 	var reporterRaw []byte
 	var vaultID string
 	var ownerPub []byte
@@ -648,11 +649,39 @@ func runExecCore(opts execOptions) int {
 						if recips, err := audit.OwnersFromDirectory(dirSigned); err == nil {
 							auditRecips = recips
 						}
+						// The same directory is the only authority for the
+						// deciding device's key (protocol v2 B).
+						if devices, err := audit.ParseDirectory(dirSigned); err == nil {
+							dirDevices = devices
+						}
 					}
 				}
 			}
 			paired = true
 		}
+	}
+	// refreshDevices re-syncs once and re-reads the owner-signed directory;
+	// the approval flow calls it when a decision names a device it has not
+	// seen yet (protocol v2 B).
+	refreshDevices := func() ([]audit.DeviceRecord, error) {
+		if len(vaultID) == 0 || len(ownerPub) == 0 || len(reporterRaw) == 0 {
+			return nil, errNotPaired
+		}
+		if _, err := syncing.Run(st, cl, string(reporterRaw)); err != nil {
+			return nil, err
+		}
+		dirSigned, ok, _ := st.GetKV(pair.KVDirectorySigned)
+		if !ok || len(dirSigned) == 0 {
+			return nil, errNoDirectory
+		}
+		dirSig, ok, _ := st.GetKV(pair.KVDirectorySig)
+		if !ok || len(dirSig) == 0 {
+			return nil, errNoDirectory
+		}
+		if err := wire.VerifyOwnerSignature(dirSigned, dirSig, ownerPub); err != nil {
+			return nil, err
+		}
+		return audit.ParseDirectory(dirSigned)
 	}
 	injection := injectionModes(opts)
 	appr := &approvalAudit{}
@@ -752,12 +781,13 @@ func runExecCore(opts execOptions) int {
 	deviceID, _, _ := st.GetKV(session.KVDeviceID)
 	resolveValue := func(ref string) (*secret.Plaintext, int, string) {
 		if rr, ok := refs[ref]; ok && rr.Message {
-			return resolveMessageViaApproval(vaultID, string(deviceID), id, cl, auditRecips,
+			return resolveMessageViaApproval(vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
 				opts, rr, messageIDs[ref], appr)
 		}
 		m := refs[ref].Meta
 		if m.Policy.Sensitivity == "approval" {
-			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, opts, refs[ref], itemIDs[ref], appr)
+			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
+				opts, refs[ref], itemIDs[ref], appr)
 		}
 		return resolveValueFor(st, id, vaultID, ownerPub, refs[ref], itemIDs[ref], ref == opts.LoginRef)
 	}
@@ -827,7 +857,9 @@ func approvalResultOf(policyState string, approvalUsed bool) string {
 // and value are destroyed by exec.Run after the single exec — neither
 // reaches the keyring or the cache (design.md §15).
 func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Identity, cl *client.Client,
-	auditRecips []audit.OwnerRecipient, opts execOptions, rr *exec.ResolvedRef, itemID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
+	auditRecips []audit.OwnerRecipient, dirDevices []audit.DeviceRecord,
+	refreshDevices func() ([]audit.DeviceRecord, error),
+	opts execOptions, rr *exec.ResolvedRef, itemID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
 	appr.used = true
 	it, ok, err := st.GetItem(itemID)
 	if err != nil || !ok {
@@ -846,20 +878,22 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 			return nil, exitcode.InjectionInvalid, "login-not-synced"
 		}
 		value, code, state := approval.RequestSecret(&approval.Options{
-			VaultID:   vaultID,
-			DeviceID:  deviceID,
-			Identity:  id,
-			Owners:    auditRecips,
-			ItemID:    itemID,
-			Ref:       rr.Ref,
-			Argv:      opts.Argv,
-			Refs:      refsOf(opts),
-			Injection: injectionModes(opts),
-			Hosts:     rr.Meta.Policy.AllowedHosts,
-			Reply:     replySpecs,
-			Timeout:   opts.Timeout,
-			Client:    cl,
-			Stderr:    opts.Stderr,
+			VaultID:        vaultID,
+			DeviceID:       deviceID,
+			Identity:       id,
+			Owners:         auditRecips,
+			ItemID:         itemID,
+			Ref:            rr.Ref,
+			Argv:           opts.Argv,
+			Refs:           refsOf(opts),
+			Injection:      injectionModes(opts),
+			Hosts:          rr.Meta.Policy.AllowedHosts,
+			Reply:          replySpecs,
+			Timeout:        opts.Timeout,
+			Client:         cl,
+			Stderr:         opts.Stderr,
+			Devices:        dirDevices,
+			RefreshDevices: refreshDevices,
 		}, &appr.decisionDeviceID)
 		if value == nil {
 			return nil, code, state
@@ -871,20 +905,22 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 		displayRef = "the login item"
 	}
 	key, code, state := approval.RequestItemKey(&approval.Options{
-		VaultID:   vaultID,
-		DeviceID:  deviceID,
-		Identity:  id,
-		Owners:    auditRecips,
-		ItemID:    itemID,
-		Ref:       displayRef,
-		Argv:      opts.Argv,
-		Refs:      refsOf(opts),
-		Injection: injectionModes(opts),
-		Hosts:     rr.Meta.Policy.AllowedHosts,
-		Reply:     replySpecs,
-		Timeout:   opts.Timeout,
-		Client:    cl,
-		Stderr:    opts.Stderr,
+		VaultID:        vaultID,
+		DeviceID:       deviceID,
+		Identity:       id,
+		Owners:         auditRecips,
+		ItemID:         itemID,
+		Ref:            displayRef,
+		Argv:           opts.Argv,
+		Refs:           refsOf(opts),
+		Injection:      injectionModes(opts),
+		Hosts:          rr.Meta.Policy.AllowedHosts,
+		Reply:          replySpecs,
+		Timeout:        opts.Timeout,
+		Client:         cl,
+		Stderr:         opts.Stderr,
+		Devices:        dirDevices,
+		RefreshDevices: refreshDevices,
 	}, &appr.decisionDeviceID)
 	if key == nil {
 		return nil, code, state
@@ -901,22 +937,26 @@ func resolveViaApproval(st *store.Store, vaultID, deviceID string, id *device.Id
 // buffer is destroyed immediately; nothing reaches the keyring or the
 // cache (design §16).
 func resolveMessageViaApproval(vaultID, deviceID string, id *device.Identity, cl *client.Client,
-	auditRecips []audit.OwnerRecipient, opts execOptions, rr *exec.ResolvedRef,
+	auditRecips []audit.OwnerRecipient, dirDevices []audit.DeviceRecord,
+	refreshDevices func() ([]audit.DeviceRecord, error),
+	opts execOptions, rr *exec.ResolvedRef,
 	messageID string, appr *approvalAudit) (*secret.Plaintext, int, string) {
 	appr.used = true
 	value, code, state := approval.RequestMessage(&approval.Options{
-		VaultID:   vaultID,
-		DeviceID:  deviceID,
-		Identity:  id,
-		Owners:    auditRecips,
-		MessageID: messageID,
-		Ref:       rr.Ref,
-		Argv:      opts.Argv,
-		Refs:      refsOf(opts),
-		Injection: injectionModes(opts),
-		Timeout:   opts.Timeout,
-		Client:    cl,
-		Stderr:    opts.Stderr,
+		VaultID:        vaultID,
+		DeviceID:       deviceID,
+		Identity:       id,
+		Owners:         auditRecips,
+		MessageID:      messageID,
+		Ref:            rr.Ref,
+		Argv:           opts.Argv,
+		Refs:           refsOf(opts),
+		Injection:      injectionModes(opts),
+		Timeout:        opts.Timeout,
+		Client:         cl,
+		Stderr:         opts.Stderr,
+		Devices:        dirDevices,
+		RefreshDevices: refreshDevices,
 	}, &appr.decisionDeviceID)
 	if value == nil {
 		return nil, code, state
@@ -1225,6 +1265,22 @@ func cmdDecider(args []string) int {
 		OwnerSignPublicKey: ownerPub,
 		Reviewer:           &decider.HTTPReviewer{URL: *reviewAPI},
 		Logger:             log.New(os.Stderr, "", log.LstdFlags),
+		// The signed directory authenticates the CLI behind each request
+		// (protocol v2 A); re-read every cycle so a revocation lands.
+		Devices: func() ([]audit.DeviceRecord, error) {
+			dirSigned, ok, _ := st.GetKV(pair.KVDirectorySigned)
+			if !ok || len(dirSigned) == 0 {
+				return nil, errNoDirectory
+			}
+			dirSig, ok, _ := st.GetKV(pair.KVDirectorySig)
+			if !ok || len(dirSig) == 0 {
+				return nil, errNoDirectory
+			}
+			if err := wire.VerifyOwnerSignature(dirSigned, dirSig, ownerPub); err != nil {
+				return nil, err
+			}
+			return audit.ParseDirectory(dirSigned)
+		},
 	})
 	if err != nil {
 		return fatalf(1, "%v", err)
@@ -1253,3 +1309,13 @@ func cmdDecider(args []string) int {
 	}
 	return 0
 }
+
+// Errors used by the approval directory refresh (protocol v2 B).
+var (
+	errNotPaired   = errorString("keyref: not paired")
+	errNoDirectory = errorString("keyref: signed directory unavailable; run keyref sync")
+)
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }

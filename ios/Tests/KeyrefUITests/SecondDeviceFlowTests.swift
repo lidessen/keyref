@@ -134,6 +134,20 @@ final class SecondDeviceFlowTests: XCTestCase {
                     origin: origin, urlSession: UITestURLProtocol.makeSession())
     }
 
+    /// The §3.11 approval-request transcript the CLI signs (v2 A).
+    private func requestTranscript(vaultID: String, cliDeviceID: String, itemID: String,
+                                   ephemeral: Curve25519.KeyAgreement.PrivateKey,
+                                   ciphertext: Data) throws -> Data {
+        try buildApprovalRequestTranscript(ApprovalRequestTranscript(
+            vaultID: vaultID,
+            cliDeviceID: cliDeviceID,
+            subjectKind: ApprovalSubjectKind.item,
+            subjectID: itemID,
+            expiresAt: 1790000120000,
+            cliEphemeralPublicKey: ephemeral.publicKey.rawRepresentation,
+            requestCiphertext: ciphertext))
+    }
+
     func testSecondIPhoneJoinFullFlow() async throws {
         let server = FakeKeyrefServer()
         UITestURLProtocol.handler = server.handler
@@ -240,8 +254,11 @@ final class SecondDeviceFlowTests: XCTestCase {
         let approvalID = KeyrefEncoding.newID()
         server.pendingApprovals = [PendingApproval.make(
             approvalID: approvalID, cliDeviceID: cliDeviceID, itemID: itemID,
+            cliEphemeralPublicKey: ephemeral.publicKey.rawRepresentation,
             requestCiphertext: ciphertext,
-            requestSignature: try cliSigner.sign(ciphertext),
+            requestSignature: try cliSigner.sign(try requestTranscript(
+                vaultID: vaultID, cliDeviceID: cliDeviceID, itemID: itemID,
+                ephemeral: ephemeral, ciphertext: ciphertext)),
             createdAt: 1790000000000, expiresAt: 1790000120000)]
 
         // iOS 前台轮询 → 解开 + 验签 + 展示。
@@ -259,6 +276,22 @@ final class SecondDeviceFlowTests: XCTestCase {
         XCTAssertEqual(decision.decision, "approved")
         let oneTimeEnc = try XCTUnwrap(decision.oneTimeEnc)
         let oneTimeWrapped = try XCTUnwrap(decision.oneTimeWrappedKey)
+
+        // The decision carries a signature (§3.12, v2 B): the CLI verifies
+        // it under the owner's public key before it unwraps, so a decision
+        // the server made up does not pass.
+        let decisionTranscript = try buildApprovalDecisionTranscript(ApprovalDecisionTranscript(
+            vaultID: vaultID,
+            approvalID: approvalID,
+            decisionDeviceID: ownerDeviceID,
+            decision: "approved",
+            requestCiphertext: ciphertext,
+            oneTimeEnc: oneTimeEnc,
+            oneTimeWrappedKey: oneTimeWrapped))
+        try verifyDeviceSignature(transcript: decisionTranscript,
+                                  signature: decision.decisionSignature,
+                                  signAlg: SignAlg.ecdsaP256,
+                                  publicKey: owner.signPublicKey)
 
         // CLI 取走包裹，解开 item key（§7.1 步骤 4 / D4 绑定）。
         let unwrapped = try ItemCrypto.unwrapOneTimeItemKey(
@@ -286,8 +319,11 @@ final class SecondDeviceFlowTests: XCTestCase {
         let approvalID2 = KeyrefEncoding.newID()
         server.pendingApprovals = [PendingApproval.make(
             approvalID: approvalID2, cliDeviceID: cliDeviceID, itemID: itemID,
+            cliEphemeralPublicKey: ephemeral2.publicKey.rawRepresentation,
             requestCiphertext: ciphertext2,
-            requestSignature: try cliSigner.sign(ciphertext2),
+            requestSignature: try cliSigner.sign(try requestTranscript(
+                vaultID: vaultID, cliDeviceID: cliDeviceID, itemID: itemID,
+                ephemeral: ephemeral2, ciphertext: ciphertext2)),
             createdAt: 1790000000000, expiresAt: 1790000120000)]
         _ = await phone.loadPendingApprovals()
         try await phone.decideApproval(approvalID: approvalID2, approve: false)
@@ -320,6 +356,7 @@ final class SecondDeviceFlowTests: XCTestCase {
         server.pendingApprovals = [PendingApproval.make(
             approvalID: KeyrefEncoding.newID(), cliDeviceID: cliDeviceID,
             itemID: "99990000aaaabbbbccccddddeeeeffff",
+            cliEphemeralPublicKey: Data(repeating: 3, count: 32),
             requestCiphertext: ciphertext,
             requestSignature: try impostor.sign(ciphertext),
             createdAt: 1, expiresAt: 1790000120000)]

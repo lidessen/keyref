@@ -778,9 +778,9 @@ public struct PendingApproval: Codable, Equatable, Sendable {
     public var itemID: String
     /// Set when the subject is `message:<id>`; empty for items.
     public var messageID: String
-    /// The CLI's one-time X25519 public key, sent in the clear for a
-    /// message subject so a decider can build the wrap (D16); empty for
-    /// items (the owner takes it from the decrypted request).
+    /// The CLI's one-time X25519 public key, sent in the clear for both
+    /// subjects: the request signature (§3.11, v2 A) covers it, so a
+    /// decider — which never decrypts the request — can trust it.
     public var cliEphemeralPublicKey: Data
     public var requestCiphertext: Data
     public var requestSignature: Data
@@ -837,11 +837,26 @@ public struct ApprovalDecisionRequest: Codable, Sendable {
     public var decision: String  // "approved" | "denied"
     public var oneTimeEnc: Data?
     public var oneTimeWrappedKey: Data?
+    /// The deciding device's signature over the approval-decision
+    /// transcript (§3.12, v2 B). Required on approved and denied
+    /// decisions alike — the CLI verifies it before it unwraps.
+    public var decisionSignature: Data
 
     enum CodingKeys: String, CodingKey {
         case decision
         case oneTimeEnc = "one_time_enc"
         case oneTimeWrappedKey = "one_time_wrapped_key"
+        case decisionSignature = "decision_signature"
+    }
+
+    /// Memberwise (declaring `init(from:)` is not done here, so the
+    /// synthesized init is internal).
+    init(decision: String, oneTimeEnc: Data?, oneTimeWrappedKey: Data?,
+         decisionSignature: Data) {
+        self.decision = decision
+        self.oneTimeEnc = oneTimeEnc
+        self.oneTimeWrappedKey = oneTimeWrappedKey
+        self.decisionSignature = decisionSignature
     }
 }
 
@@ -851,6 +866,11 @@ public struct ApprovalStatusResponse: Codable, Sendable {
     public var oneTimeEnc: Data?
     public var oneTimeWrappedKey: Data?
     public var expiresAt: Int64?
+    /// The device that signed the decision (owner or decider); absent
+    /// while the row is pending (§6.22, v2 B).
+    public var decisionDeviceID: String?
+    /// The decision signature, returned next to `decision_device_id`.
+    public var decisionSignature: Data?
 
     enum CodingKeys: String, CodingKey {
         case approvalID = "approval_id"
@@ -858,6 +878,8 @@ public struct ApprovalStatusResponse: Codable, Sendable {
         case oneTimeEnc = "one_time_enc"
         case oneTimeWrappedKey = "one_time_wrapped_key"
         case expiresAt = "expires_at"
+        case decisionDeviceID = "decision_device_id"
+        case decisionSignature = "decision_signature"
     }
 }
 

@@ -20,9 +20,12 @@ func TestApprovalDecisionAfterExpiryRefused(t *testing.T) {
 	id := f.pendingID(t)
 	f.clock.Advance(61 * time.Second)
 
-	s, raw := f.e.do("POST", "/v1/approvals/"+id+"/decision", f.owner.token, wire.ApprovalDecisionRequest{
-		Decision: wire.ApprovalStatusApproved, OneTimeEnc: []byte("enc"), OneTimeWrappedKey: []byte("wk"),
-	})
+	signed := signApprovalDecision(t, f.e, f.owner.vaultID, id, f.owner.deviceID,
+		func(tb []byte) ([]byte, error) { return wire.SignOwnerECDSA(tb, f.owner.signKey) },
+		wire.ApprovalDecisionRequest{
+			Decision: wire.ApprovalStatusApproved, OneTimeEnc: []byte("enc"), OneTimeWrappedKey: []byte("wk"),
+		})
+	s, raw := f.e.do("POST", "/v1/approvals/"+id+"/decision", f.owner.token, signed)
 	if s != 409 {
 		t.Fatalf("late decision: want 409, got %d %s", s, raw)
 	}

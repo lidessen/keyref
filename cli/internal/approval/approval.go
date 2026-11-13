@@ -92,6 +92,14 @@ type Options struct {
 	Timeout   time.Duration
 	Client    *client.Client
 	Stderr    io.Writer // progress notices, never secrets
+
+	// Devices is the owner-signed device directory as last synced: the
+	// only trusted source for the deciding device's key (protocol v2 B).
+	Devices []audit.DeviceRecord
+	// RefreshDevices re-syncs and returns the directory again. It is used
+	// once when the deciding device is not in Devices yet (a decision
+	// arrived before the revocation/rotation reached this CLI). May be nil.
+	RefreshDevices func() ([]audit.DeviceRecord, error)
 }
 
 // Result is the payload an approved decision delivered: exactly one
@@ -248,8 +256,28 @@ func run(opts *Options, unwrap unwrapFunc, decisionDevice *string) (*Result, int
 	requestCiphertext = append(requestCiphertext, enc...)
 	requestCiphertext = append(requestCiphertext, ct...)
 
-	// The CLI device signs the raw ciphertext bytes (protocol D7).
-	signature, err := wire.SignEd25519(requestCiphertext, opts.Identity.SignPrivate)
+	// The CLI device signs the approval-request transcript (protocol
+	// §3.11, v2 A): the signature covers the subject, the expiry and the
+	// one-time public key as well as a digest of the ciphertext.
+	subjectKind, subjectIDForSignature := wire.EntityItem, opts.ItemID
+	if opts.MessageID != "" {
+		subjectKind, subjectIDForSignature = wire.EntityMessage, opts.MessageID
+	}
+	expiresAt := nowMs + timeout.Milliseconds()
+	tb, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID:               opts.VaultID,
+		CLIDeviceID:           opts.DeviceID,
+		SubjectKind:           subjectKind,
+		SubjectID:             subjectIDForSignature,
+		ExpiresAt:             uint64(expiresAt),
+		CLIEphemeralPublicKey: ephPublic,
+		RequestCiphertext:     requestCiphertext,
+	})
+	if err != nil {
+		fmt.Fprintln(opts.Stderr, "keyref: approval request encoding failed")
+		return nil, 1, "internal"
+	}
+	signature, err := wire.SignEd25519(tb, opts.Identity.SignPrivate)
 	if err != nil {
 		fmt.Fprintln(opts.Stderr, "keyref: approval request signing failed")
 		return nil, 1, "internal"
@@ -260,13 +288,11 @@ func run(opts *Options, unwrap unwrapFunc, decisionDevice *string) (*Result, int
 		MessageID:         opts.MessageID,
 		RequestCiphertext: requestCiphertext,
 		RequestSignature:  signature,
-		ExpiresAt:         nowMs + timeout.Milliseconds(),
-	}
-	if opts.MessageID != "" {
-		// 临时公钥以明文随请求提交：决策器不解 request_ciphertext，靠它
-		// 构造一次性包裹（protocol §6.19、D16）。条目审批不带，保持 v1.1
-		// 的请求字节不变。
-		send.CLIEphemeralPublicKey = ephPublic
+		ExpiresAt:         expiresAt,
+		// The one-time public key is a signed field for both subjects:
+		// a decider never decrypts request_ciphertext, so this is the
+		// only authenticated source for the key it wraps to (v2 A).
+		CLIEphemeralPublicKey: ephPublic,
 	}
 	created, err := opts.Client.ApprovalCreate(send)
 	if err != nil {
@@ -356,6 +382,14 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 			fmt.Fprintln(opts.Stderr, "keyref: approval wrap already consumed")
 			return nil, 13, "approval-consumed"
 		case wire.ApprovalStatusApproved:
+			// Before anything is unwrapped: the decision must be signed by
+			// a device the owner's directory lists as active, for this
+			// wrap (protocol §3.12, v2 B). HPKE base mode authenticates
+			// nothing, so an unverified wrap is just server bytes.
+			if err := verifyDecision(opts, approvalID, requestCiphertext, resp); err != nil {
+				fmt.Fprintln(opts.Stderr, "keyref: approval decision is not signed by a trusted device")
+				return nil, 13, "approval-decision-unverified"
+			}
 			// The binding subject is the message for an sms: consumption
 			// (protocol §3.7 one-time-message-key) and the item
 			// otherwise.
@@ -382,4 +416,57 @@ func sortedCopy(in []string) []string {
 	out := append([]string(nil), in...)
 	sort.Strings(out)
 	return out
+}
+
+// verifyDecision checks the decision device's signature over the
+// approval-decision transcript (protocol §3.12, v2 B). The deciding
+// device must come from the owner-signed directory: active, and either
+// the owner (kind=ios) or — for a message subject only — a delegated
+// decider (kind=decider).
+func verifyDecision(opts *Options, approvalID string, requestCiphertext []byte, resp *wire.ApprovalPollResponse) error {
+	if resp.DecisionDeviceID == "" || len(resp.DecisionSignature) == 0 {
+		return errors.New("approval: decision carries no signature")
+	}
+	dev, ok := findDevice(opts.Devices, resp.DecisionDeviceID)
+	if !ok && opts.RefreshDevices != nil {
+		// The device may have been added since the last sync; refresh
+		// once and look again (protocol v2 B).
+		opts.Devices, _ = opts.RefreshDevices()
+		dev, ok = findDevice(opts.Devices, resp.DecisionDeviceID)
+	}
+	if !ok {
+		return errors.New("approval: deciding device is not in the signed directory")
+	}
+	if dev.Status != wire.DeviceStatusActive {
+		return errors.New("approval: deciding device is not active")
+	}
+	switch {
+	case dev.Kind == wire.DeviceKindIOS:
+	case dev.Kind == wire.DeviceKindDecider && opts.MessageID != "":
+		// A delegated decider only ever answers SMS consumptions.
+	default:
+		return errors.New("approval: deciding device kind cannot decide this subject")
+	}
+	tb, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID:           opts.VaultID,
+		ApprovalID:        approvalID,
+		DecisionDeviceID:  resp.DecisionDeviceID,
+		Decision:          resp.Status,
+		RequestCiphertext: requestCiphertext,
+		OneTimeEnc:        resp.OneTimeEnc,
+		OneTimeWrappedKey: resp.OneTimeWrappedKey,
+	})
+	if err != nil {
+		return err
+	}
+	return wire.VerifyDeviceSignature(tb, resp.DecisionSignature, dev.SignAlg, dev.SignPublicKey)
+}
+
+func findDevice(devices []audit.DeviceRecord, id string) (audit.DeviceRecord, bool) {
+	for _, d := range devices {
+		if d.DeviceID == id {
+			return d, true
+		}
+	}
+	return audit.DeviceRecord{}, false
 }

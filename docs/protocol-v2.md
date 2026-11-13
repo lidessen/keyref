@@ -1,6 +1,6 @@
 # keyref 协议变更规格（v2，草案，尚未实现）
 
-状态：**已定方案，未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
+状态：**A、B、G 已实现，其余已定方案、未实现**。本文是 2026-11 review 之后对 [protocol.md](protocol.md) 与 [design.md](design.md) 的变更规格。实现时先把对应章节并入 protocol.md / design.md，再改代码。背景、发现的问题和实施顺序见 [handoff.md](handoff.md)。
 
 兼容性：**破坏性变更，不兼容旧客户端**（已确认没有需要兼容的存量部署）。直接原地修改格式，不加版本协商和回退分支。
 
@@ -19,6 +19,8 @@
 Go 是参考实现。改完 `proto/` 之后重新生成 `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`，并为每个新誊本补向量。
 
 ## A. 审批请求签名
+
+**已实现**（proto/wire、server、CLI、decider、iOS `ApprovalFlows.swift`；protocol.md §3.11/§6.19/§6.20；向量见 `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json` 的 `approval_request_transcript`）。
 
 替换现状的「Ed25519 直接签 request_ciphertext 原始字节」（无域分隔，也不覆盖临时公钥、subject 和过期时间）。
 
@@ -39,6 +41,8 @@ NUL H(request_ciphertext)
 修掉的问题：decider 把短信明文包给服务器转交的未签名公钥。
 
 ## B. 审批决定签名（新增）
+
+**已实现**（proto/wire、server 的 approvals 表新增 `decision_signature` 列、schema v7、CLI `internal/approval`、decider、iOS `LiveBackend.decideApproval`；protocol.md §3.12/§6.21/§6.22；向量见 `approval_decision_transcript` 与 `approval_denied_transcript`）。
 
 誊本 `approval-decision`，由做出决定的设备签（owner：ECDSA P-256；decider：Ed25519）：
 

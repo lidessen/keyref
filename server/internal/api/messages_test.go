@@ -209,14 +209,12 @@ func TestMessageFlow(t *testing.T) {
 	// CLI consumes via approval; two concurrent approvals for one
 	// message are rejected (design §14.3).
 	mkReq := func() wire.ApprovalCreateRequest {
-		ct := randBytes(t, 64)
-		return wire.ApprovalCreateRequest{
+		return signApprovalRequest(t, cli, owner.vaultID, wire.ApprovalCreateRequest{
 			MessageID:             created.MessageID,
 			CLIEphemeralPublicKey: randBytes(t, wire.SizeX25519Key),
-			RequestCiphertext:     ct,
-			RequestSignature:      signBytes(t, cli.signPriv, ct),
+			RequestCiphertext:     randBytes(t, 64),
 			ExpiresAt:             futureExpires(),
-		}
+		})
 	}
 	var first wire.ApprovalCreateResponse
 	if status := env.doOut("POST", "/v1/approvals", cli.token, mkReq(), &first); status != http.StatusCreated {
@@ -243,12 +241,15 @@ func TestMessageFlow(t *testing.T) {
 	}
 
 	// Owner approves; the CLI picks the wrap up exactly once.
-	if status, _ := env.do("POST", "/v1/approvals/"+first.ApprovalID+"/decision", owner.token,
+	ownerDecision := signApprovalDecision(t, env, owner.vaultID, first.ApprovalID, owner.deviceID,
+		func(tb []byte) ([]byte, error) { return wire.SignOwnerECDSA(tb, owner.signKey) },
 		wire.ApprovalDecisionRequest{
 			Decision:          wire.ApprovalStatusApproved,
 			OneTimeEnc:        randBytes(t, 32),
 			OneTimeWrappedKey: randBytes(t, 60),
-		}); status != http.StatusNoContent {
+		})
+	if status, _ := env.do("POST", "/v1/approvals/"+first.ApprovalID+"/decision", owner.token,
+		ownerDecision); status != http.StatusNoContent {
 		t.Fatalf("owner decision: status %d", status)
 	}
 	var poll wire.ApprovalPollResponse
@@ -325,10 +326,11 @@ func TestDeciderDecisionPath(t *testing.T) {
 	}
 	itemCT := randBytes(t, 64)
 	var itemApproval wire.ApprovalCreateResponse
-	if status := env.doOut("POST", "/v1/approvals", cli.token, wire.ApprovalCreateRequest{
-		ItemID: itemID, RequestCiphertext: itemCT,
-		RequestSignature: signBytes(t, cli.signPriv, itemCT), ExpiresAt: futureExpires(),
-	}, &itemApproval); status != http.StatusCreated {
+	if status := env.doOut("POST", "/v1/approvals", cli.token, signApprovalRequest(t, cli, owner.vaultID,
+		wire.ApprovalCreateRequest{
+			ItemID: itemID, CLIEphemeralPublicKey: randBytes(t, wire.SizeX25519Key),
+			RequestCiphertext: itemCT, ExpiresAt: futureExpires(),
+		}), &itemApproval); status != http.StatusCreated {
 		t.Fatalf("item approval: status %d", status)
 	}
 
@@ -355,11 +357,11 @@ func TestDeciderDecisionPath(t *testing.T) {
 	}
 	msgCT := randBytes(t, 64)
 	var msgApproval wire.ApprovalCreateResponse
-	if status := env.doOut("POST", "/v1/approvals", cli.token, wire.ApprovalCreateRequest{
-		MessageID: created.MessageID, CLIEphemeralPublicKey: randBytes(t, 32),
-		RequestCiphertext: msgCT, RequestSignature: signBytes(t, cli.signPriv, msgCT),
-		ExpiresAt: futureExpires(),
-	}, &msgApproval); status != http.StatusCreated {
+	if status := env.doOut("POST", "/v1/approvals", cli.token, signApprovalRequest(t, cli, owner.vaultID,
+		wire.ApprovalCreateRequest{
+			MessageID: created.MessageID, CLIEphemeralPublicKey: randBytes(t, 32),
+			RequestCiphertext: msgCT, ExpiresAt: futureExpires(),
+		}), &msgApproval); status != http.StatusCreated {
 		t.Fatalf("message approval: status %d", status)
 	}
 
@@ -380,12 +382,15 @@ func TestDeciderDecisionPath(t *testing.T) {
 		t.Fatalf("decider item decision: status %d, want 403", status)
 	}
 	// ...but may approve the message one.
-	if status, _ := env.do("POST", "/v1/approvals/"+msgApproval.ApprovalID+"/decision", dec.token,
+	decDecision := signApprovalDecision(t, env, owner.vaultID, msgApproval.ApprovalID, dec.deviceID,
+		func(tb []byte) ([]byte, error) { return wire.SignEd25519(tb, dec.signPriv) },
 		wire.ApprovalDecisionRequest{
 			Decision:          wire.ApprovalStatusApproved,
 			OneTimeEnc:        randBytes(t, 32),
 			OneTimeWrappedKey: randBytes(t, 60),
-		}); status != http.StatusNoContent {
+		})
+	if status, _ := env.do("POST", "/v1/approvals/"+msgApproval.ApprovalID+"/decision", dec.token,
+		decDecision); status != http.StatusNoContent {
 		t.Fatalf("decider message decision: status %d", status)
 	}
 	// The CLI's poll names the decider (protocol §6.22) — design §14.5

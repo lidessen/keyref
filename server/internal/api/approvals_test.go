@@ -46,24 +46,26 @@ func newApprovalFixture(t *testing.T) *approvalFixture {
 	return &approvalFixture{e: e, owner: owner, cli: cli, item: item, clock: clock}
 }
 
-// submit signs a §6.19 approval request with the CLI device key.
+// submit signs a §6.19 approval request with the CLI device key over the
+// v2 request transcript (protocol §3.11) and posts it.
 func (f *approvalFixture) submit(t *testing.T, ciphertext []byte, expiresAt int64) (int, []byte) {
 	t.Helper()
-	sig, err := wire.SignEd25519(ciphertext, f.cli.signPriv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return f.e.do("POST", "/v1/approvals", f.cli.token, wire.ApprovalCreateRequest{
-		ItemID:            f.item,
-		RequestCiphertext: ciphertext,
-		RequestSignature:  sig,
-		ExpiresAt:         expiresAt,
+	return f.submitRaw(t, wire.ApprovalCreateRequest{
+		ItemID:                f.item,
+		CLIEphemeralPublicKey: randBytes(t, wire.SizeX25519Key),
+		RequestCiphertext:     ciphertext,
+		ExpiresAt:             expiresAt,
 	})
 }
 
-// submitRaw posts the request body as-is (negative signature tests).
+// submitRaw signs the request as the fixture CLI and posts it; a
+// pre-set RequestSignature is left alone so the negative signature tests
+// can post tampered bodies.
 func (f *approvalFixture) submitRaw(t *testing.T, req wire.ApprovalCreateRequest) (int, []byte) {
 	t.Helper()
+	if len(req.RequestSignature) == 0 {
+		req = signApprovalRequest(t, f.cli, f.owner.vaultID, req)
+	}
 	return f.e.do("POST", "/v1/approvals", f.cli.token, req)
 }
 
@@ -87,9 +89,11 @@ func (f *approvalFixture) poll(t *testing.T, approvalID string) (int, wire.Appro
 	return s, out
 }
 
-// decision posts an owner decision.
+// decision posts an owner-signed decision (protocol §3.12).
 func (f *approvalFixture) decision(t *testing.T, approvalID string, req wire.ApprovalDecisionRequest) int {
 	t.Helper()
+	req = signApprovalDecision(t, f.e, f.owner.vaultID, approvalID, f.owner.deviceID,
+		func(tb []byte) ([]byte, error) { return wire.SignOwnerECDSA(tb, f.owner.signKey) }, req)
 	return f.e.doOut("POST", "/v1/approvals/"+approvalID+"/decision", f.owner.token, req, nil)
 }
 
@@ -133,7 +137,17 @@ func TestApprovalFlowHappyPath(t *testing.T) {
 	if !bytes.Equal(row.RequestCiphertext, reqCT) || row.CLIDeviceID != f.cli.deviceID || row.ItemID != f.item {
 		t.Fatalf("pending row mismatch: %+v", row)
 	}
-	if err := wire.VerifyCLISignature(row.RequestCiphertext, row.RequestSignature, f.cli.signPub); err != nil {
+	reb, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID: f.owner.vaultID, CLIDeviceID: row.CLIDeviceID,
+		SubjectKind: wire.EntityItem, SubjectID: row.ItemID,
+		ExpiresAt:             uint64(row.ExpiresAt),
+		CLIEphemeralPublicKey: row.CLIEphemeralPublicKey,
+		RequestCiphertext:     row.RequestCiphertext,
+	})
+	if err != nil {
+		t.Fatalf("rebuild request transcript: %v", err)
+	}
+	if err := wire.VerifyCLISignature(reb, row.RequestSignature, f.cli.signPub); err != nil {
 		t.Fatalf("owner-side CLI signature verification failed: %v", err)
 	}
 
@@ -167,10 +181,8 @@ func TestApprovalFlowHappyPath(t *testing.T) {
 	}
 
 	// The decision is no longer applicable.
-	s, raw = f.e.do("POST", "/v1/approvals/"+created.ApprovalID+"/decision", f.owner.token,
-		wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusDenied})
-	if s != 409 || expectError(t, raw, "approval_not_pending") != 0 {
-		t.Fatalf("second decision: want 409 approval_not_pending, got %d %s", s, raw)
+	if s := f.decision(t, created.ApprovalID, wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusDenied}); s != 409 {
+		t.Fatalf("second decision: want 409 approval_not_pending, got %d", s)
 	}
 }
 
@@ -275,17 +287,29 @@ func TestApprovalSignatureRequired(t *testing.T) {
 
 	// Garbage signature → 403 bad_signature (§7.1: no unauthenticated
 	// approval requests).
+	eph := randBytes(t, wire.SizeX25519Key)
 	sig, _ := wire.SignEd25519([]byte("other-bytes"), f.cli.signPriv)
-	if s, raw := f.submitRaw(t, wire.ApprovalCreateRequest{
-		ItemID: f.item, RequestCiphertext: []byte("ct"), RequestSignature: sig, ExpiresAt: expires,
+	if s, raw := f.e.do("POST", "/v1/approvals", f.cli.token, wire.ApprovalCreateRequest{
+		ItemID: f.item, CLIEphemeralPublicKey: eph, RequestCiphertext: []byte("ct"),
+		RequestSignature: sig, ExpiresAt: expires,
 	}); s != 403 || expectError(t, raw, "bad_signature") != 0 {
 		t.Fatalf("wrong-signature create: want 403 bad_signature, got %d %s", s, raw)
 	}
-	// Missing signature field → the same (Ed25519 over ct cannot verify).
-	if s, raw := f.submitRaw(t, wire.ApprovalCreateRequest{
-		ItemID: f.item, RequestCiphertext: []byte("ct"), ExpiresAt: expires,
+	// A signature that verifies over the ciphertext alone (the v1 rule)
+	// no longer covers the transcript → 403.
+	ct := []byte("ct")
+	if s, raw := f.e.do("POST", "/v1/approvals", f.cli.token, wire.ApprovalCreateRequest{
+		ItemID: f.item, CLIEphemeralPublicKey: eph, RequestCiphertext: ct,
+		RequestSignature: signBytes(t, f.cli.signPriv, ct), ExpiresAt: expires,
 	}); s != 403 {
-		t.Fatalf("missing signature: want 403, got %d %s", s, raw)
+		t.Fatalf("v1-style signature: want 403, got %d %s", s, raw)
+	}
+	// Missing signature field → the same, since the empty signature cannot
+	// verify over the rebuilt transcript.
+	if s, raw := f.e.do("POST", "/v1/approvals", f.cli.token, wire.ApprovalCreateRequest{
+		ItemID: f.item, CLIEphemeralPublicKey: eph, RequestCiphertext: []byte("ct"), ExpiresAt: expires,
+	}); s != 403 {
+		t.Fatalf("missing signature: want 400, got %d %s", s, raw)
 	}
 
 	// The owner (or any non-CLI) cannot submit approvals.
@@ -319,8 +343,11 @@ func TestApprovalCreateValidation(t *testing.T) {
 	}
 
 	// Unknown and tombstoned items do not accept approvals.
-	if s, _ := f.e.do("POST", "/v1/approvals", f.cli.token, wire.ApprovalCreateRequest{
-		ItemID: randHexID(t), RequestCiphertext: []byte("ct"), ExpiresAt: nowMs + 60_000,
+	if s, _ := f.submitRaw(t, wire.ApprovalCreateRequest{
+		ItemID:                randHexID(t),
+		CLIEphemeralPublicKey: randBytes(t, wire.SizeX25519Key),
+		RequestCiphertext:     []byte("ct"),
+		ExpiresAt:             nowMs + 60_000,
 	}); s != 404 {
 		t.Fatalf("unknown item: want 404, got %d", s)
 	}
@@ -508,5 +535,86 @@ func TestApprovalSyncVisibilityAndStorage(t *testing.T) {
 	}
 	if total != before {
 		t.Fatalf("non-pending approvals still counted: %d != %d", total, before)
+	}
+}
+
+// TestApprovalRequestSignatureCoversKeyAndExpiry pins v2 A: the CLI
+// signature must cover the one-time public key and the expiry, so a
+// server that swaps the key a decider wraps the SMS plaintext to cannot
+// produce a request that verifies.
+func TestApprovalRequestSignatureCoversKeyAndExpiry(t *testing.T) {
+	f := newApprovalFixture(t)
+	expires := f.clock.t.UnixMilli() + 60_000
+	signed := signApprovalRequest(t, f.cli, f.owner.vaultID, wire.ApprovalCreateRequest{
+		ItemID:                f.item,
+		CLIEphemeralPublicKey: randBytes(t, wire.SizeX25519Key),
+		RequestCiphertext:     []byte("ct"),
+		ExpiresAt:             expires,
+	})
+
+	swapped := signed
+	swapped.CLIEphemeralPublicKey = randBytes(t, wire.SizeX25519Key)
+	if s, raw := f.e.do("POST", "/v1/approvals", f.cli.token, swapped); s != 403 {
+		t.Fatalf("swapped ephemeral key: want 403, got %d %s", s, raw)
+	}
+	longer := signed
+	longer.ExpiresAt = expires + 1_000
+	if s, raw := f.e.do("POST", "/v1/approvals", f.cli.token, longer); s != 403 {
+		t.Fatalf("extended expiry: want 403, got %d %s", s, raw)
+	}
+	// The request as signed is accepted.
+	if s, raw := f.e.do("POST", "/v1/approvals", f.cli.token, signed); s != 201 {
+		t.Fatalf("untouched request: %d %s", s, raw)
+	}
+
+	// An item request without the one-time public key is refused: both
+	// subjects carry it now (protocol v2 A).
+	if s, raw := f.e.do("POST", "/v1/approvals", f.cli.token, wire.ApprovalCreateRequest{
+		ItemID: f.item, RequestCiphertext: []byte("ct"), ExpiresAt: expires,
+	}); s != 400 {
+		t.Fatalf("missing ephemeral key: want 400, got %d %s", s, raw)
+	}
+}
+
+// TestApprovalDecisionSignatureRequired pins v2 B: a decision is only
+// accepted with a signature from the deciding device over exactly the
+// decision that is applied.
+func TestApprovalDecisionSignatureRequired(t *testing.T) {
+	f := newApprovalFixture(t)
+	if s, raw := f.submit(t, []byte("ct"), f.clock.t.UnixMilli()+60_000); s != 201 {
+		t.Fatalf("create: %d %s", s, raw)
+	}
+	id := f.pendingID(t)
+
+	// No signature at all.
+	if s, raw := f.e.do("POST", "/v1/approvals/"+id+"/decision", f.owner.token,
+		wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusDenied}); s != 400 {
+		t.Fatalf("unsigned decision: want 400, got %d %s", s, raw)
+	}
+
+	// A signature that covers a different wrap does not verify.
+	enc, wrapped := randBytes(t, 32), randBytes(t, 48)
+	signed := signApprovalDecision(t, f.e, f.owner.vaultID, id, f.owner.deviceID,
+		func(tb []byte) ([]byte, error) { return wire.SignOwnerECDSA(tb, f.owner.signKey) },
+		wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusApproved,
+			OneTimeEnc: enc, OneTimeWrappedKey: wrapped})
+	tampered := signed
+	tampered.OneTimeWrappedKey = randBytes(t, 48)
+	if s, raw := f.e.do("POST", "/v1/approvals/"+id+"/decision", f.owner.token, tampered); s != 403 {
+		t.Fatalf("tampered wrap: want 403, got %d %s", s, raw)
+	}
+	// The row is untouched and still pending.
+	if id2 := f.pendingID(t); id2 != id {
+		t.Fatalf("failed decision disturbed the queue: %s != %s", id2, id)
+	}
+
+	// The decision as signed is applied.
+	if s, raw := f.e.do("POST", "/v1/approvals/"+id+"/decision", f.owner.token, signed); s != 204 {
+		t.Fatalf("signed decision: %d %s", s, raw)
+	}
+	// The poll carries the decision signature back (protocol §6.22).
+	_, out := f.poll(t, id)
+	if !bytes.Equal(out.DecisionSignature, signed.DecisionSignature) {
+		t.Fatalf("poll decision signature mismatch")
 	}
 }

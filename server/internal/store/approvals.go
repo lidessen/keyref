@@ -21,7 +21,7 @@ var (
 
 const approvalCols = `approval_id, vault_id, cli_device_id, item_id, subject,
 cli_ephemeral_public_key, request_ciphertext, request_signature, status,
-one_time_wrap, expires_at, created_at, decision_device_id`
+one_time_wrap, expires_at, created_at, decision_device_id, decision_signature`
 
 func scanApproval(row interface{ Scan(...any) error }) (*Approval, error) {
 	var a Approval
@@ -30,7 +30,8 @@ func scanApproval(row interface{ Scan(...any) error }) (*Approval, error) {
 	var decider sql.NullString
 	err := row.Scan(&a.ID, &a.VaultID, &a.CLIDeviceID, &a.ItemID, &a.Subject,
 		&a.CLIEphemeralPublicKey, &a.RequestCiphertext, &a.RequestSignature,
-		&a.Status, &a.OneTimeWrap, &a.ExpiresAt, &a.CreatedAt, &decider)
+		&a.Status, &a.OneTimeWrap, &a.ExpiresAt, &a.CreatedAt, &decider,
+		&a.DecisionSignature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -118,10 +119,10 @@ func (s *Store) ListApprovals(ctx context.Context, vaultID, status string) ([]Ap
 // as well (schema v4 keeps it NOT NULL, D16).
 func (s *Store) InsertApproval(ctx context.Context, a *Approval) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.VaultID, a.CLIDeviceID, a.ItemID, a.Subject, a.CLIEphemeralPublicKey,
 		a.RequestCiphertext, a.RequestSignature, a.Status, a.OneTimeWrap,
-		a.ExpiresAt, a.CreatedAt, a.DecisionDeviceID)
+		a.ExpiresAt, a.CreatedAt, a.DecisionDeviceID, a.DecisionSignature)
 	if err != nil {
 		return fmt.Errorf("store: insert approval: %w", err)
 	}
@@ -157,10 +158,10 @@ func txAppendApprovalChange(ctx context.Context, tx *sql.Tx, vaultID, approvalID
 // decisionDeviceID — the device that signed the decision — and append
 // the approval change.
 func (s *Store) DecideApproval(ctx context.Context, vaultID, approvalID, decisionDeviceID string,
-	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
+	approved bool, oneTimeWrap, decisionSignature []byte, expiresAt int64, now int64) error {
 	var lateDecision bool
 	err := s.WithTx(ctx, func(tx *sql.Tx) error {
-		expired, err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now)
+		expired, err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, decisionSignature, expiresAt, now)
 		if err != nil {
 			return err
 		}
@@ -181,7 +182,7 @@ func (s *Store) DecideApproval(ctx context.Context, vaultID, approvalID, decisio
 // atomically, so a second approval can never deliver the same code. A
 // message that is no longer active fails with ErrApprovalNotPending.
 func (s *Store) DecideApprovalForMessage(ctx context.Context, vaultID, approvalID, messageID, decisionDeviceID string,
-	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
+	approved bool, oneTimeWrap, decisionSignature []byte, expiresAt int64, now int64) error {
 	var lateDecision bool
 	err := s.WithTx(ctx, func(tx *sql.Tx) error {
 		if approved {
@@ -200,7 +201,7 @@ func (s *Store) DecideApprovalForMessage(ctx context.Context, vaultID, approvalI
 				return ErrApprovalNotPending
 			}
 		}
-		expired, err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now)
+		expired, err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, decisionSignature, expiresAt, now)
 		if err != nil {
 			return err
 		}
@@ -229,7 +230,7 @@ func (s *Store) DecideApprovalForMessage(ctx context.Context, vaultID, approvalI
 // appended) instead of decided; expired=true tells the caller to commit
 // that flip and then report ErrApprovalNotPending.
 func (s *Store) decideApprovalTx(ctx context.Context, tx *sql.Tx, vaultID, approvalID, decisionDeviceID string,
-	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) (expired bool, err error) {
+	approved bool, oneTimeWrap, decisionSignature []byte, expiresAt int64, now int64) (expired bool, err error) {
 	var status string
 	var rowExpiresAt int64
 	err = tx.QueryRowContext(ctx,
@@ -256,9 +257,11 @@ func (s *Store) decideApprovalTx(ctx context.Context, tx *sql.Tx, vaultID, appro
 		newStatus = wire.ApprovalStatusApproved
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE approvals SET status = ?, one_time_wrap = ?, expires_at = ?, decision_device_id = ?
+		`UPDATE approvals SET status = ?, one_time_wrap = ?, expires_at = ?, decision_device_id = ?,
+decision_signature = ?
 WHERE approval_id = ? AND vault_id = ? AND status = ?`,
-		newStatus, oneTimeWrap, expiresAt, decisionDeviceID, approvalID, vaultID, wire.ApprovalStatusPending); err != nil {
+		newStatus, oneTimeWrap, expiresAt, decisionDeviceID, decisionSignature,
+		approvalID, vaultID, wire.ApprovalStatusPending); err != nil {
 		return false, fmt.Errorf("store: decide approval: %w", err)
 	}
 	return false, txAppendApprovalChange(ctx, tx, vaultID, approvalID, now)
@@ -360,13 +363,9 @@ func SplitOneTimeWrap(wrap []byte) (enc, wrapped []byte, err error) {
 // PackOneTimeWrap stores enc ‖ wrapped with a u16be length prefix so the
 // two HPKE parts survive the round trip through the single BLOB column.
 func PackOneTimeWrap(enc, wrapped []byte) ([]byte, error) {
-	if len(enc) > 0xFFFF {
-		return nil, fmt.Errorf("store: one_time_enc too long")
-	}
-	out := make([]byte, 0, 2+len(enc)+len(wrapped))
-	out = append(out, byte(len(enc)>>8), byte(len(enc)))
-	out = append(out, enc...)
-	return append(out, wrapped...), nil
+	// One implementation, shared with the decision transcript that
+	// commits to these bytes (protocol §3.12).
+	return wire.PackApprovalWrap(enc, wrapped)
 }
 
 // PendingApprovalBytes sums the request ciphertext bytes of pending
@@ -437,10 +436,10 @@ func (s *Store) InsertApprovalCapped(ctx context.Context, a *Approval, maxPendin
 			return ErrApprovalCapReached
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			a.ID, a.VaultID, a.CLIDeviceID, a.ItemID, a.Subject, a.CLIEphemeralPublicKey,
 			a.RequestCiphertext, a.RequestSignature, a.Status, a.OneTimeWrap,
-			a.ExpiresAt, a.CreatedAt, a.DecisionDeviceID); err != nil {
+			a.ExpiresAt, a.CreatedAt, a.DecisionDeviceID, a.DecisionSignature); err != nil {
 			return fmt.Errorf("store: insert approval: %w", err)
 		}
 		return txAppendApprovalChange(ctx, tx, a.VaultID, a.ID, now)

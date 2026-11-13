@@ -16,7 +16,9 @@ public extension ApprovalFlows {
     /// info as `approveDecision`. Returns enc ‖ ct in the decision request.
     static func approveSecretDeliveryDecision(vaultID: String, pending: PendingApproval,
                                               plaintext: ApprovalRequestPlaintext,
-                                              secretValueBytes: Data) throws -> ApprovalDecisionRequest {
+                                              secretValueBytes: Data,
+                                              decisionDeviceID: String,
+                                              signer: TranscriptSigner) throws -> ApprovalDecisionRequest {
         guard !secretValueBytes.isEmpty else {
             throw KeyrefWireError.invalidField("secret value must not be empty")
         }
@@ -28,6 +30,10 @@ public extension ApprovalFlows {
         let (enc, ct) = try KeyrefHPKE.wrapKey(kemName: plaintext.ephemeralKEM,
                                                recipientPublicKey: plaintext.ephemeralPublicKey,
                                                info: info, plaintext: secretValueBytes)
-        return .approved(oneTimeEnc: enc, oneTimeWrappedKey: ct)
+        return try signedDecision(vaultID: vaultID, pending: pending,
+                                  decisionDeviceID: decisionDeviceID,
+                                  decision: "approved",
+                                  oneTimeEnc: enc, oneTimeWrappedKey: ct,
+                                  signer: signer)
     }
 }

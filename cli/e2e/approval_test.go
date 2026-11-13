@@ -148,10 +148,9 @@ func (o *owner) serveOneApprovalFor(t *testing.T, itemID string, decision approv
 // blind relay for either.
 func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision approvalDecision, wantReply []string) {
 	t.Helper()
-	// Signature over the raw ciphertext, before any decryption.
-	if err := wire.VerifyCLISignature(row.RequestCiphertext, row.RequestSignature, o.cliSign); err != nil {
-		t.Fatalf("owner: CLI approval signature verification failed: %v", err)
-	}
+	// Signature over the approval-request transcript, before any
+	// decryption (protocol §3.11, v2 A).
+	o.verifyApprovalRequest(t, row)
 	// Ciphertext layout: enc(65B P-256) ‖ ct‖tag.
 	enc, ct := row.RequestCiphertext[:65], row.RequestCiphertext[65:]
 	info, err := crypto.Info(crypto.PurposeApprovalRequest, o.vaultID, o.deviceID)
@@ -229,6 +228,7 @@ func (o *owner) answerApproval(t *testing.T, row *wire.ApprovalRow, decision app
 			Decision: wire.ApprovalStatusApproved, OneTimeEnc: oneEnc, OneTimeWrappedKey: wrapped,
 		}
 	}
+	o.signApprovalDecision(t, row, &body)
 	if resp := o.do(t, "POST", "/v1/approvals/"+row.ApprovalID+"/decision", body, nil); resp.StatusCode != 204 {
 		t.Fatalf("owner decision: %d", resp.StatusCode)
 	}
@@ -407,11 +407,22 @@ func TestApprovalUnsignedRequestRejected(t *testing.T) {
 	badSig, _ := wire.SignEd25519([]byte("other bytes entirely"), signPriv)
 	req := wire.ApprovalCreateRequest{
 		ItemID: itemApproval, RequestCiphertext: ct, RequestSignature: badSig,
-		ExpiresAt: time.Now().Add(60 * time.Second).UnixMilli(),
+		CLIEphemeralPublicKey: make([]byte, wire.SizeX25519Key),
+		ExpiresAt:             time.Now().Add(60 * time.Second).UnixMilli(),
 	}
 	if resp := rogue.do(t, "POST", "/v1/approvals", req, nil); resp.StatusCode != 403 {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("unsigned approval: want 403, got %d (%s)", resp.StatusCode, body)
+	}
+	// Both subjects carry the one-time public key now (protocol v2 A),
+	// so a request without it is refused before the signature check.
+	noKey := wire.ApprovalCreateRequest{
+		ItemID: itemApproval, RequestCiphertext: ct, RequestSignature: badSig,
+		ExpiresAt: time.Now().Add(60 * time.Second).UnixMilli(),
+	}
+	if resp := rogue.do(t, "POST", "/v1/approvals", noKey, nil); resp.StatusCode != 400 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("approval without the one-time key: want 400, got %d (%s)", resp.StatusCode, body)
 	}
 	// Nothing reached the pending queue.
 	var list wire.ApprovalListResponse
@@ -647,4 +658,42 @@ func mcpText(t *testing.T, resp map[string]any) string {
 	first, _ := content[0].(map[string]any)
 	text, _ := first["text"].(string)
 	return text
+}
+
+// verifyApprovalRequest rebuilds the v2 request transcript from the row
+// and verifies the CLI signature under the key from the QR payload
+// (protocol §3.11, v2 A).
+func (o *owner) verifyApprovalRequest(t *testing.T, row *wire.ApprovalRow) {
+	t.Helper()
+	kind, id := wire.EntityItem, row.ItemID
+	if row.MessageID != "" {
+		kind, id = wire.EntityMessage, row.MessageID
+	}
+	tb, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID: o.vaultID, CLIDeviceID: row.CLIDeviceID,
+		SubjectKind: kind, SubjectID: id, ExpiresAt: uint64(row.ExpiresAt),
+		CLIEphemeralPublicKey: row.CLIEphemeralPublicKey,
+		RequestCiphertext:     row.RequestCiphertext,
+	})
+	if err != nil {
+		t.Fatalf("owner: request transcript: %v", err)
+	}
+	if err := wire.VerifyCLISignature(tb, row.RequestSignature, o.cliSign); err != nil {
+		t.Fatalf("owner: CLI approval signature verification failed: %v", err)
+	}
+}
+
+// signApprovalDecision fills DecisionSignature over the v2 decision
+// transcript (protocol §3.12, v2 B). The CLI refuses an unsigned wrap.
+func (o *owner) signApprovalDecision(t *testing.T, row *wire.ApprovalRow, body *wire.ApprovalDecisionRequest) {
+	t.Helper()
+	tb, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID: o.vaultID, ApprovalID: row.ApprovalID, DecisionDeviceID: o.deviceID,
+		Decision: body.Decision, RequestCiphertext: row.RequestCiphertext,
+		OneTimeEnc: body.OneTimeEnc, OneTimeWrappedKey: body.OneTimeWrappedKey,
+	})
+	if err != nil {
+		t.Fatalf("owner: decision transcript: %v", err)
+	}
+	body.DecisionSignature = o.sign(tb)
 }

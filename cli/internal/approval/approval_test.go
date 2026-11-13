@@ -63,7 +63,10 @@ func newFakeOwner(t *testing.T, decision string) *fakeOwner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := &fakeOwner{t: t, decision: decision, itemKey: randMaterial(t), keys: keys}
+	// Every decision comes from the fixture owner unless a test clears it
+	// (protocol v2 B makes an unsigned decision a refusal).
+	o := &fakeOwner{t: t, decision: decision, itemKey: randMaterial(t), keys: keys,
+		decisionDeviceID: testOwnerID}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/approvals", o.handleCreate)
 	mux.HandleFunc("GET /v1/approvals/", o.handlePoll)
@@ -79,9 +82,25 @@ func (o *fakeOwner) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if err := dec.Decode(&req); err != nil {
 		o.t.Fatalf("owner decode create: %v", err)
 	}
-	// The owner verifies the CLI signature over the ciphertext BEFORE
-	// decrypting (design §8.3 step 3).
-	if err := wire.VerifyCLISignature(req.RequestCiphertext, req.RequestSignature, o.keys.SignPublic); err != nil {
+	// The owner verifies the CLI signature over the approval-request
+	// transcript BEFORE decrypting (design §8.3 step 3, protocol §3.11).
+	subjectKind, subjectID := wire.EntityItem, req.ItemID
+	if req.MessageID != "" {
+		subjectKind, subjectID = wire.EntityMessage, req.MessageID
+	}
+	tb, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID:               testVaultID,
+		CLIDeviceID:           testDeviceID,
+		SubjectKind:           subjectKind,
+		SubjectID:             subjectID,
+		ExpiresAt:             uint64(req.ExpiresAt),
+		CLIEphemeralPublicKey: req.CLIEphemeralPublicKey,
+		RequestCiphertext:     req.RequestCiphertext,
+	})
+	if err != nil {
+		o.t.Fatalf("owner: request transcript: %v", err)
+	}
+	if err := wire.VerifyCLISignature(tb, req.RequestSignature, o.keys.SignPublic); err != nil {
 		o.t.Fatalf("owner: CLI signature verification failed: %v", err)
 	}
 	// The server-side ciphertext layout is enc ‖ ct ‖ tag: split at the
@@ -155,11 +174,33 @@ func (o *fakeOwner) handlePoll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		o.t.Fatal(err)
 	}
-	json.NewEncoder(w).Encode(wire.ApprovalPollResponse{
+	resp := wire.ApprovalPollResponse{
 		ApprovalID: o.approvalID, Status: wire.ApprovalStatusApproved,
 		OneTimeEnc: enc, OneTimeWrappedKey: wrapped, ExpiresAt: time.Now().Add(60 * time.Second).UnixMilli(),
 		DecisionDeviceID: o.decisionDeviceID,
-	})
+	}
+	// A real decider signs the decision (protocol §3.12); an empty
+	// decisionDeviceID stands for a server that never carried one.
+	if o.decisionDeviceID != "" {
+		dtb, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+			VaultID:           testVaultID,
+			ApprovalID:        o.approvalID,
+			DecisionDeviceID:  o.decisionDeviceID,
+			Decision:          wire.ApprovalStatusApproved,
+			RequestCiphertext: o.lastCT,
+			OneTimeEnc:        enc,
+			OneTimeWrappedKey: wrapped,
+		})
+		if err != nil {
+			o.t.Fatal(err)
+		}
+		sig, err := wire.SignEd25519(dtb, o.keys.SignPrivate)
+		if err != nil {
+			o.t.Fatal(err)
+		}
+		resp.DecisionSignature = sig
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (o *fakeOwner) identity() *device.Identity {
@@ -187,6 +228,10 @@ func (o *fakeOwner) options(cl *client.Client) *Options {
 		Timeout:   5 * time.Second,
 		Client:    cl,
 		Stderr:    &bytes.Buffer{},
+		Devices: []audit.DeviceRecord{{
+			DeviceID: testOwnerID, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
+			SignAlg: wire.SignAlgEd25519, SignPublicKey: o.keys.SignPublic,
+		}},
 	}
 }
 
@@ -438,16 +483,39 @@ func TestRequestDecisionDeviceID(t *testing.T) {
 		t.Fatalf("decision device = %q, want %q", decider, testOwnerID)
 	}
 
-	// No decision_device_id in the response → the caller sees "".
+	// An approved response with no deciding device and no signature is
+	// refused before anything is unwrapped (protocol v2 B): HPKE base
+	// mode proves nothing about who sent the wrap.
 	plain := newFakeOwner(t, "approved")
+	plain.mu.Lock()
+	plain.decisionDeviceID = ""
+	plain.mu.Unlock()
 	var noDecider string
 	key, code, state = RequestItemKey(plain.options(client.New(plain.srv.URL, nil)), &noDecider)
-	if key == nil {
-		t.Fatalf("RequestItemKey failed: code %d state %s", code, state)
+	if key != nil || code != 13 || state != "approval-decision-unverified" {
+		t.Fatalf("unsigned decision: key=%v code=%d state=%s, want code 13 approval-decision-unverified", key, code, state)
 	}
-	key.Destroy()
-	if noDecider != "" {
-		t.Fatalf("decision device = %q, want empty for a response without the key", noDecider)
+
+	// A decision signed by a device the owner's directory does not list
+	// is refused as well (protocol v2 B).
+	stranger := newFakeOwner(t, "approved")
+	stranger.mu.Lock()
+	stranger.decisionDeviceID = "cccccccccccccccccccccccccccccccc"
+	stranger.mu.Unlock()
+	var unknown string
+	key, code, state = RequestItemKey(stranger.options(client.New(stranger.srv.URL, nil)), &unknown)
+	if key != nil || code != 13 || state != "approval-decision-unverified" {
+		t.Fatalf("unknown deciding device: key=%v code=%d state=%s, want code 13 approval-decision-unverified", key, code, state)
+	}
+
+	// So is a decision from a device the directory marks as revoked.
+	revoked := newFakeOwner(t, "approved")
+	opts := revoked.options(client.New(revoked.srv.URL, nil))
+	opts.Devices[0].Status = wire.DeviceStatusRevoked
+	var gone string
+	key, code, state = RequestItemKey(opts, &gone)
+	if key != nil || code != 13 || state != "approval-decision-unverified" {
+		t.Fatalf("revoked deciding device: key=%v code=%d state=%s, want code 13 approval-decision-unverified", key, code, state)
 	}
 }
 

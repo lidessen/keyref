@@ -30,6 +30,7 @@ import (
 	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 
+	"github.com/lidessen/keyref/cli/internal/audit"
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/decider"
 	"github.com/lidessen/keyref/cli/internal/device"
@@ -112,6 +113,48 @@ func (o *owner) registerDecider(t *testing.T) *deciderDevice {
 	return d
 }
 
+// directoryDevice renders a paired device as a signed-directory record
+// (§3.3). The decider trusts only what the owner signs here.
+func (o *owner) ownerDirectoryDevice() wire.DirectoryDevice {
+	return wire.DirectoryDevice{
+		DeviceID: o.deviceID, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
+		HPKEKEM: wire.KEMP256, HPKEPublicKey: o.hpkePub,
+		SignAlg: wire.SignAlgECDSAP256, SignPublicKey: o.signPub,
+		GrantsDigest: wire.EmptyGrantsDigest(),
+	}
+}
+
+func (o *owner) cliDirectoryDevice() wire.DirectoryDevice {
+	digest := o.cliGrants
+	if len(digest) == 0 {
+		digest = wire.EmptyGrantsDigest()
+	}
+	return wire.DirectoryDevice{
+		DeviceID: o.cliDeviceID, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
+		HPKEKEM: wire.KEMX25519, HPKEPublicKey: o.cliHPKE,
+		SignAlg: wire.SignAlgEd25519, SignPublicKey: o.cliSign,
+		GrantsDigest: digest,
+	}
+}
+
+func (src *sourceDevice) directoryDevice() wire.DirectoryDevice {
+	return wire.DirectoryDevice{
+		DeviceID: src.deviceID, Kind: wire.DeviceKindSource, Status: wire.DeviceStatusActive,
+		HPKEKEM: wire.KEMX25519, HPKEPublicKey: src.hpkePub,
+		SignAlg: wire.SignAlgEd25519, SignPublicKey: src.signPriv.Public().(ed25519.PublicKey),
+		GrantsDigest: wire.EmptyGrantsDigest(),
+	}
+}
+
+func (d *deciderDevice) directoryDevice() wire.DirectoryDevice {
+	return wire.DirectoryDevice{
+		DeviceID: d.deviceID, Kind: wire.DeviceKindDecider, Status: wire.DeviceStatusActive,
+		HPKEKEM: wire.KEMX25519, HPKEPublicKey: d.identity.HPKEPublic,
+		SignAlg: wire.SignAlgEd25519, SignPublicKey: d.identity.SignPublic,
+		GrantsDigest: wire.EmptyGrantsDigest(),
+	}
+}
+
 // putDelegation installs (or revokes, with an empty policy) the owner's
 // delegation (§6.31).
 func (o *owner) putDelegation(t *testing.T, revision uint64, policy wire.DelegationPolicy) {
@@ -182,6 +225,16 @@ func TestDeciderAutoApproves(t *testing.T) {
 	messageID := o.uploadSMS(t, src)
 
 	dec := o.registerDecider(t)
+	// The CLI verifies the decider's decision against the owner-signed
+	// directory (protocol v2 B), so the decider and the requesting CLI
+	// have to be in it before the CLI syncs.
+	o.publishDirectory(t, 2, []wire.DirectoryDevice{
+		o.ownerDirectoryDevice(), o.cliDirectoryDevice(),
+		src.directoryDevice(), dec.directoryDevice(),
+	})
+	if sync := runCLI(t, "sync"); sync.code != 0 {
+		t.Fatalf("sync after directory: %d: %s", sync.code, sync.stderr)
+	}
 	o.putDelegation(t, 1, wire.DelegationPolicy{
 		V: 1, Senders: []string{"10086"}, MaxAgeMin: 5, PerCLIHourly: 10, PerCLIDaily: 50,
 	})
@@ -218,11 +271,40 @@ func TestDeciderAutoApproves(t *testing.T) {
 
 	// Wait for the pending approval, then let the decider answer it.
 	waitForMessageApproval(t, o, messageID)
+	// The decider trusts the owner-signed directory (protocol v2 A): the
+	// CLI device that asked to consume the SMS must be an active entry
+	// there, otherwise the server could have put its own key in the row.
+	dirTB, err := wire.BuildDirectoryTranscript(wire.DirectoryTranscript{
+		VaultID: o.vaultID, DirectoryRevision: 2,
+		Devices: []wire.DirectoryDevice{
+			{DeviceID: o.deviceID, Kind: wire.DeviceKindIOS, Status: wire.DeviceStatusActive,
+				HPKEKEM: wire.KEMP256, HPKEPublicKey: o.hpkePub,
+				SignAlg: wire.SignAlgECDSAP256, SignPublicKey: o.signPub,
+				GrantsDigest: wire.EmptyGrantsDigest()},
+			{DeviceID: o.cliDeviceID, Kind: wire.DeviceKindCLI, Status: wire.DeviceStatusActive,
+				HPKEKEM: wire.KEMX25519, HPKEPublicKey: o.cliHPKE,
+				SignAlg: wire.SignAlgEd25519, SignPublicKey: o.cliSign,
+				GrantsDigest: wire.EmptyGrantsDigest()},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirSig := o.sign(dirTB)
+	if err := wire.VerifyOwnerSignature(dirTB, dirSig, o.signPub); err != nil {
+		t.Fatalf("directory signature: %v", err)
+	}
+	devices, err := audit.ParseDirectory(dirTB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	d, err := decider.New(decider.Config{
 		VaultID: o.vaultID, DeviceID: dec.deviceID, Identity: dec.identity,
 		Client:             client.New(serverURL, func() (string, error) { return dec.token, nil }),
 		OwnerSignPublicKey: o.signPub,
 		Reviewer:           &decider.HTTPReviewer{URL: review.URL},
+		Devices:            func() ([]audit.DeviceRecord, error) { return devices, nil },
 	})
 	if err != nil {
 		t.Fatal(err)

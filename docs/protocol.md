@@ -329,6 +329,37 @@ policy_json(utf-8)
 - 空委托（撤回）= `policy_json` 为 `{"v":1}`：全部字段缺省 ⇒ 无 sender 白名单 ⇒ 决策器无可自动批准的对象。
 - 决策器把 `delegation_revision` 与最新策略一起拉取（§6.31）；策略字节与签名必须先验后用（owner 公钥已钉死）。
 
+### 3.11 approval-request 誊本（CLI Ed25519 签，protocol v2 A）
+
+```text
+"KEYREF1" <NUL> "approval-request" <NUL> vault_id(hex) <NUL> cli_device_id(hex) <NUL>
+subject_kind <NUL> subject_id(hex) <NUL> u64be(expires_at) <NUL>
+cli_ephemeral_public_key(32 原始字节) <NUL> H(request_ciphertext)
+```
+
+- 签名者：发起请求的 CLI（Ed25519）。
+- `subject_kind` 取 `item` 或 `message`；`subject_id` 是条目 id 或消息 id。
+- `expires_at` 是请求里的毫秒时间戳，服务器**原样落库**（不重算）。
+- `cli_ephemeral_public_key`（X25519，32 字节）对**两种 subject 都必填**（§6.19）。
+- `H(x)` = SHA-256(x)，32 字节原始值。末尾没有 NUL。
+- 服务器：用请求字段加会话的 vault id、device id 重建誊本，在调用设备的公钥下验签（§6.19）。
+- owner（iOS）与决策器：从行重建誊本，在**签名目录**里取该 CLI 的 Ed25519 公钥验签（设备必须 `kind = cli`、`status = active`）。owner 另外要求解密后的请求正文里的临时公钥等于行上的 `cli_ephemeral_public_key`。**决策器不解密请求正文，这个签名就是它所包裹的临时公钥的唯一认证来源。**
+- 它取代的是「Ed25519 直接签 `request_ciphertext` 原始字节」——旧签名没有域分隔，也不覆盖临时公钥、subject 和过期时间。
+
+### 3.12 approval-decision 誊本（owner ECDSA P-256 / 决策器 Ed25519 签，protocol v2 B）
+
+```text
+"KEYREF1" <NUL> "approval-decision" <NUL> vault_id(hex) <NUL> approval_id(hex) <NUL>
+decision_device_id(hex) <NUL> decision <NUL> H(request_ciphertext) <NUL> H(wrap)
+```
+
+- 签名者：做出决定的设备——owner（ECDSA P-256）或被委托的决策器（Ed25519）。
+- `decision` 取 `approved` 或 `denied`。
+- `wrap` = `u16be(len(one_time_enc)) ‖ one_time_enc ‖ one_time_wrapped_key`（服务器落库的打包形式，§6.21）；`denied` 时为空串，`H(wrap)` = SHA-256("")。
+- 服务器：在调用设备的公钥下验签，落库（approvals 表新增一列，按 `SchemaVersion` 迁移），并在 §6.22 返回。
+- CLI 在状态为 `approved` 时、**解包之前**验签：在本地保存的 owner 签名目录里查 `decision_device_id`——必须 `status = active`，并且是 `kind = ios`，或在 subject 为 message 时是 `kind = decider`；重建誊本并验签。本地查不到该设备时同步一次、重查一次。**任何失败：退出码 13，不解包。**
+- 理由：HPKE base 模式没有发送方认证，没有这个签名，服务器可以凭空造一个决定（对 message subject 可以直接塞进伪造的短信正文）。
+
 ---
 
 ## 4. 库可行性结论（2026-10-24 实测）
@@ -581,11 +612,16 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
 
 ```json
 { "item_id": "…", "request_ciphertext": "<b64 enc‖ct，HPKE 给 owner>",
-  "request_signature": "<b64 Ed25519，签 request_ciphertext 原始字节>",
+  "request_signature": "<b64 Ed25519，签 §3.11 誊本>",
+  "cli_ephemeral_public_key": "<b64 32B>",
   "expires_at": 1790000000000 }
 ```
 
-**消息消费形态**（design v0.8 §14.5）：`item_id` 省略，改传 `message_id`（32 hex，指向一条 `status = active` 的消息），并必须带 `cli_ephemeral_public_key`（请求内一次性 X25519 公钥的 32 字节原始值——决策器不解密 request_ciphertext，靠这个明文字段构造一次性包裹；条目审批可省略，owner 从密文内取）。明文 JSON 的 `item_id` 字段换为 `message_id`，其余不变。同一 `message_id` 同时最多一个未终结审批：存在 pending 时 → `409 approval_not_pending`。
+`request_signature` 覆盖的是 **§3.11 誊本**（含 subject、过期时间、一次性公钥与密文摘要），不再是 `request_ciphertext` 的原始字节。服务器用请求字段加会话的 vault id、device id 重建誊本，在调用设备的公钥下验签；验不过 → `403 bad_signature`，不落库。
+
+`cli_ephemeral_public_key`（请求内一次性 X25519 公钥的 32 字节原始值）**对两种 subject 都必填**，落库，并在 §6.20 的行里返回：owner 用它和密文内的那把做交叉核对，决策器靠 §3.11 签名确认它可信。
+
+**消息消费形态**（design v0.8 §14.5）：`item_id` 省略，改传 `message_id`（32 hex，指向一条 `status = active` 的消息）。明文 JSON 的 `item_id` 字段换为 `message_id`，其余不变。同一 `message_id` 同时最多一个未终结审批：存在 pending 时 → `409 approval_not_pending`。
 
 → `201 {"approval_id":"…","expires_at":…}`。`expires_at − now ≤ 120000`（CLI `--timeout`）。正文 ≤ 8 KiB、每库 pending ≤ 10，超出 `413` / `429 quota_exceeded`。`request_ciphertext` = `enc(32B 一次性 X25519) ‖ ct‖tag`；明文 JSON：
 
@@ -598,12 +634,14 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
 
 ### 6.20 `GET /v1/approvals?status=pending`（owner；决策器仅见 message subject）
 
-`{"approvals":[{"approval_id":"…","cli_device_id":"…","item_id":"…","message_id":"…(消息类才有)","cli_ephemeral_public_key":"…(消息类才有)","request_ciphertext":"…","request_signature":"…","created_at":…,"expires_at":…}]}`。iOS 解开后**先验 CLI 签名**（对密文），再展示；决策器不解开 request_ciphertext，只按 §3.10 的委托策略与明文元数据评估。
+`{"approvals":[{"approval_id":"…","cli_device_id":"…","item_id":"…","message_id":"…(消息类才有)","cli_ephemeral_public_key":"…(两种 subject 都有)","request_ciphertext":"…","request_signature":"…","created_at":…,"expires_at":…}]}`。iOS 解开后**先验 CLI 签名**（对 §3.11 誊本，设备须在签名目录里且 `kind=cli`、`status=active`），再核对正文里的临时公钥与行上的一致，然后才展示；决策器不解开 request_ciphertext，按 §3.10 的委托策略与明文元数据评估，但**必须先验 §3.11 签名**——行上的 `cli_ephemeral_public_key` 只有验过签名才可信。
 
 ### 6.21 `POST /v1/approvals/:approval_id/decision`（owner 或决策器）
 
-同意：`{"decision":"approved","one_time_enc":"<b64>","one_time_wrapped_key":"<b64 ct‖tag>"}`。
-包裹 = HPKE(X25519, recipient=请求的临时公钥, info=§3.7 一次性模板, AAD 空)；服务器置 `expires_at = now + 60000`。拒绝：`{"decision":"denied"}`。→ `204`。错误：`approval_not_pending`、`bad_signature`（缺 CLI 签名的旧行）、`forbidden`（决策器对非 message subject 的审批做决定——服务器强制，design §14.8）。服务器把**签署这次决定的设备 id**（owner `kind=ios` 或决策器 `kind=decider`）写进审批行，同意与拒绝都记（schema v6，design v0.8 §14.5/§14.8），由 §6.22 轮询回传、CLI 转写进审计事件。
+同意：`{"decision":"approved","one_time_enc":"<b64>","one_time_wrapped_key":"<b64 ct‖tag>","decision_signature":"<b64 §3.12 誊本的签名>"}`。
+包裹 = HPKE(X25519, recipient=请求的临时公钥, info=§3.7 一次性模板, AAD 空)；服务器置 `expires_at = now + 60000`。拒绝：`{"decision":"denied","decision_signature":"<b64>"}`。→ `204`。错误：`invalid_field`（缺 `decision_signature` 或签名验不过）、`approval_not_pending`、`forbidden`（决策器对非 message subject 的审批做决定——服务器强制，design §14.8）。服务器把**签署这次决定的设备 id**（owner `kind=ios` 或决策器 `kind=decider`）和**这次决定的签名**写进审批行，同意与拒绝都记（schema v6 / v7，design v0.8 §14.5/§14.8），由 §6.22 轮询回传、CLI 转写进审计事件。
+
+`decision_signature` **必填**（同意与拒绝都要）：它是决定设备对 §3.12 誊本的签名，服务器在调用设备的公钥下验签（算法按设备：owner ECDSA P-256，决策器 Ed25519）。没有它，HPKE base 模式就没有发送方认证——服务器可以凭空造一个决定。
 
 **载荷三种**（design v0.7 §6.6、v0.8 §14.5）：同步条目照旧包 32 字节 item key；**仅本机条目**（`items.secret_ciphertext` 为 NULL，design §6.6）包该条目的 secret **值本身**——owner 解开本地包裹后的明文字节（UTF-8 的 value 字符串，≤64 KiB；不是 §3.7 的 secret JSON 包装，也不是密文）。CLI 的 unwrap 结果直接作为注入值。**消息消费**（design v0.8 §14.5）包**该消息的明文 JSON**（§3.9 的 `{"v":1,"sender":…,"body":…,"sim":…,"received_at":…}` 原始字节，≤4 KiB）——消息密钥不出 owner/决策器域，CLI 解开即得正文。decision 端点正文上限 **96 KiB**（审批请求仍 8 KiB）。CLI 按本地缓存中该条目是否缺 `secret_ciphertext`、审批请求是否带 `message_id` 区分三种投递。仅本机条目不得拥有 `use` 授权（服务器互斥校验，错误码 `local_item_grant_conflict`）。
 
@@ -614,10 +652,12 @@ CLI 验 `pairing_signature` 后把 `owner_sign_public_key` 钉死进本地配置
 ```json
 { "approval_id": "…", "status": "approved",
   "one_time_enc": "<b64>", "one_time_wrapped_key": "<b64>", "expires_at": 1790000000060,
-  "decision_device_id": "…(32 hex，可选)" }
+  "decision_device_id": "…(32 hex，可选)", "decision_signature": "<b64(可选)>" }
 ```
 
-**可选字段 `decision_device_id`**（32 hex）：签署该次 decision 的设备——owner（`kind=ios`）或被委托的决策器（`kind=decider`，design v0.8 §14.5/§14.8）。服务器只在 decision 被接受时写入（§6.21），因此 `pending` 行与从未做出决定的行（如 `expired`）**省略**该字段。纯增量：v1.1 的 CLI 与 iOS 解码时只读自己认识的键，行为不变。
+**可选字段 `decision_device_id`**（32 hex）：签署该次 decision 的设备——owner（`kind=ios`）或被委托的决策器（`kind=decider`，design v0.8 §14.5/§14.8）。服务器只在 decision 被接受时写入（§6.21），因此 `pending` 行与从未做出决定的行（如 `expired`）**省略**该字段。
+
+**可选字段 `decision_signature`**：与 `decision_device_id` 同时出现，是那次决定对 §3.12 誊本的签名。CLI 在 `approved` 时**先验签再解包**：在本地保存的签名目录里查 `decision_device_id`（须 `status=active`，且 `kind=ios`；message subject 时可以是 `kind=decider`），重建 §3.12 誊本并验签。查不到该设备时同步一次、重查一次。验不过 → 退出码 13，不解包。
 
 轮询间隔 < 2 秒 → `429 rate_limited`；轮询**不计**每日请求配额（design §8.3）。
 
@@ -700,10 +740,10 @@ MVP `wrap_count=1`（单 owner；Phase 2 多 owner 时按 owner device_id 升序
 
 ### 7.1 审批一次性包裹（design §8.3）
 
-1. CLI 生成一次性 X25519（用后即弃），构造 §6.19 明文，HPKE 给 owner（info=§3.7 `approval-request`），Ed25519 签密文字节，`POST /v1/approvals`。
-2. 服务器验 CLI 签名（设备 active、在目录内）→ 不过 `403 bad_signature` 才落库。
-3. iOS 拉取 → 解开 → 验 CLI 签名 → Face ID → `POST decision` 附 HPKE(recipient=临时公钥, info=§3.7 one-time 模板) 的 item key 包裹。
-4. CLI 每 2 秒轮询 `GET /v1/approvals/:id`，取走包裹（原子 consumed），解开 item key，`exec`，结束即 zeroize（memguard）。
+1. CLI 生成一次性 X25519（用后即弃），构造 §6.19 明文，HPKE 给 owner（info=§3.7 `approval-request`），Ed25519 签 **§3.11 誊本**（含 subject、过期时间、一次性公钥、密文摘要），`POST /v1/approvals`。
+2. 服务器重建誊本并验 CLI 签名（设备 active、在目录内）→ 不过 `403 bad_signature` 才落库。
+3. iOS 拉取 → 解开 → 验 CLI 签名（对 §3.11 誊本）+ 核对临时公钥 → Face ID → `POST decision` 附 HPKE(recipient=临时公钥, info=§3.7 one-time 模板) 的 item key 包裹 + 对 §3.12 誊本的签名。
+4. CLI 每 2 秒轮询 `GET /v1/approvals/:id`，取走包裹（原子 consumed），**先验决定签名（§3.12）再解包**，解开 item key，`exec`，结束即 zeroize（memguard）。
 
 ### 7.2 会话挑战（design §8.2）
 

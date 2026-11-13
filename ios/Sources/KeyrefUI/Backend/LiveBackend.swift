@@ -1858,7 +1858,7 @@ public final class LiveBackend: AppBackend {
                 let plaintext = try ApprovalFlows.openRequest(row, owner: owner,
                                                               vaultID: vaultID,
                                                               ownerDeviceID: deviceID)
-                try ApprovalFlows.verifyRequestSignature(row, device: device)
+                try ApprovalFlows.verifyRequestSignature(row, vaultID: vaultID, device: device)
                 try ApprovalFlows.validatePlaintext(plaintext, pending: row)
 
                 if row.isMessageSubject {
@@ -2033,6 +2033,11 @@ public final class LiveBackend: AppBackend {
         guard let record = approvalRecords[approvalID] else {
             throw APIError.notFound
         }
+        // The decision is signed over the approval-decision transcript
+        // (§3.12, v2 B): HPKE base mode authenticates nobody, so the CLI
+        // must be able to tell a real decision from a server-made one.
+        guard let owner, let deviceID = ownDeviceID else { throw LockError.noVault }
+        let signer = owner.signer
         let decision: ApprovalDecisionRequest
         if approve {
             // §14.5: an SMS consumption delivers the message's plaintext
@@ -2046,7 +2051,8 @@ public final class LiveBackend: AppBackend {
                 }
                 decision = try ApprovalFlows.approveMessageDecision(
                     vaultID: vaultID, pending: record.row,
-                    plaintext: record.plaintext, messagePlaintext: payload)
+                    plaintext: record.plaintext, messagePlaintext: payload,
+                    decisionDeviceID: deviceID, signer: signer)
                 try await api.submitApprovalDecision(approvalID: approvalID, decision)
                 approvalRecords.removeValue(forKey: approvalID)
                 return
@@ -2068,7 +2074,8 @@ public final class LiveBackend: AppBackend {
                 let secretValue = try decryptSecret(itemRow, vmk: vmkValue, vaultID: vaultID)
                 decision = try ApprovalFlows.approveSecretDeliveryDecision(
                     vaultID: vaultID, pending: record.row,
-                    plaintext: record.plaintext, secretValueBytes: Data(secretValue.value.utf8))
+                    plaintext: record.plaintext, secretValueBytes: Data(secretValue.value.utf8),
+                    decisionDeviceID: deviceID, signer: signer)
             } else {
                 let itemKey = try ItemCrypto.unwrapItemKey(vmk: vmkValue,
                                                            blob: itemRow.vaultWrappedItemKey,
@@ -2077,10 +2084,14 @@ public final class LiveBackend: AppBackend {
                 decision = try ApprovalFlows.approveDecision(vaultID: vaultID,
                                                              pending: record.row,
                                                              plaintext: record.plaintext,
-                                                             itemKey: itemKey)
+                                                             itemKey: itemKey,
+                                                             decisionDeviceID: deviceID,
+                                                             signer: signer)
             }
         } else {
-            decision = ApprovalFlows.denyDecision()
+            decision = try ApprovalFlows.denyDecision(vaultID: vaultID, pending: record.row,
+                                                       decisionDeviceID: deviceID,
+                                                       signer: signer)
         }
         try await api.submitApprovalDecision(approvalID: approvalID, decision)
         approvalRecords.removeValue(forKey: approvalID)

@@ -70,7 +70,7 @@ public let labelMaxBytes = 32
 
 // MARK: - assembly helpers
 
-private func begin(_ kind: String) -> Data {
+func begin(_ kind: String) -> Data {
     var b = Data()
     b.append(contentsOf: transcriptPrefix.utf8)
     b.append(KeyrefEncoding.fieldSeparator)
@@ -79,7 +79,7 @@ private func begin(_ kind: String) -> Data {
     return b
 }
 
-private func requireID(_ name: String, _ v: String) throws {
+func requireID(_ name: String, _ v: String) throws {
     guard KeyrefEncoding.isValidID(v) else {
         throw KeyrefWireError.invalidField("\(name) must be 32 lowercase hex characters")
     }

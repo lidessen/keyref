@@ -589,3 +589,63 @@ func decodeDirectoryData(t *testing.T, c wire.SyncChange) wire.DirectoryData {
 	}
 	return d
 }
+
+// signApprovalRequest fills RequestSignature with the CLI device's
+// signature over the v2 approval-request transcript (protocol §3.11).
+func signApprovalRequest(t *testing.T, cli *testCLI, vaultID string, req wire.ApprovalCreateRequest) wire.ApprovalCreateRequest {
+	t.Helper()
+	kind, id := wire.EntityItem, req.ItemID
+	if req.MessageID != "" {
+		kind, id = wire.EntityMessage, req.MessageID
+	}
+	tb, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID:               vaultID,
+		CLIDeviceID:           cli.deviceID,
+		SubjectKind:           kind,
+		SubjectID:             id,
+		ExpiresAt:             uint64(req.ExpiresAt),
+		CLIEphemeralPublicKey: req.CLIEphemeralPublicKey,
+		RequestCiphertext:     req.RequestCiphertext,
+	})
+	if err != nil {
+		// A malformed subject cannot produce a transcript; leave the
+		// signature empty and let the server reject the request on the
+		// same grounds it would have anyway.
+		return req
+	}
+	sig, err := wire.SignEd25519(tb, cli.signPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.RequestSignature = sig
+	return req
+}
+
+// signApprovalDecision fills DecisionSignature with the deciding
+// device's signature over the v2 approval-decision transcript (§3.12).
+func signApprovalDecision(t *testing.T, e *testEnv, vaultID, approvalID, deviceID string,
+	sign func([]byte) ([]byte, error), req wire.ApprovalDecisionRequest) wire.ApprovalDecisionRequest {
+	t.Helper()
+	a, err := e.st.GetApproval(context.Background(), vaultID, approvalID)
+	if err != nil {
+		t.Fatalf("load approval: %v", err)
+	}
+	tb, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID:           vaultID,
+		ApprovalID:        approvalID,
+		DecisionDeviceID:  deviceID,
+		Decision:          req.Decision,
+		RequestCiphertext: a.RequestCiphertext,
+		OneTimeEnc:        req.OneTimeEnc,
+		OneTimeWrappedKey: req.OneTimeWrappedKey,
+	})
+	if err != nil {
+		t.Fatalf("build approval decision transcript: %v", err)
+	}
+	sig, err := sign(tb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.DecisionSignature = sig
+	return req
+}

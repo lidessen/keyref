@@ -58,12 +58,16 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field")
 		return
 	}
+	// The request's one-time public key is a signed field for both
+	// subjects (protocol v2 A): the decider never decrypts the request,
+	// so this is the only authenticated source for the key it wraps the
+	// SMS plaintext to.
+	if len(req.CLIEphemeralPublicKey) != wire.SizeX25519Key {
+		writeError(w, "invalid_field")
+		return
+	}
 	var msg *store.Message
 	if req.MessageID != "" {
-		if len(req.CLIEphemeralPublicKey) != wire.SizeX25519Key {
-			writeError(w, "invalid_field")
-			return
-		}
 		msg, err = s.st.GetMessage(r.Context(), ac.vault.ID, req.MessageID)
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, "not_found")
@@ -99,7 +103,26 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := wire.VerifyCLISignature(req.RequestCiphertext, req.RequestSignature, ac.device.SignPublicKey); err != nil {
+	// The signature covers the subject, the expiry and the one-time
+	// public key as well as a digest of the ciphertext (protocol §3.11).
+	subjectKind, subjectIDForSignature := wire.EntityItem, req.ItemID
+	if req.MessageID != "" {
+		subjectKind, subjectIDForSignature = wire.EntityMessage, req.MessageID
+	}
+	tb, err := wire.BuildApprovalRequestTranscript(wire.ApprovalRequestTranscript{
+		VaultID:               ac.vault.ID,
+		CLIDeviceID:           ac.device.ID,
+		SubjectKind:           subjectKind,
+		SubjectID:             subjectIDForSignature,
+		ExpiresAt:             uint64(req.ExpiresAt),
+		CLIEphemeralPublicKey: req.CLIEphemeralPublicKey,
+		RequestCiphertext:     req.RequestCiphertext,
+	})
+	if err != nil {
+		writeError(w, "invalid_field")
+		return
+	}
+	if err := wire.VerifyCLISignature(tb, req.RequestSignature, ac.device.SignPublicKey); err != nil {
 		writeError(w, "bad_signature")
 		return
 	}
@@ -297,6 +320,31 @@ func (s *Server) handleApprovalDecision(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	// The decision must be signed by the device that submitted it
+	// (protocol §3.12, v2 B). HPKE base mode authenticates nothing, so
+	// this signature is what stops the server from handing the CLI a wrap
+	// it fabricated.
+	if len(req.DecisionSignature) == 0 {
+		writeError(w, "invalid_field")
+		return
+	}
+	dtb, err := wire.BuildApprovalDecisionTranscript(wire.ApprovalDecisionTranscript{
+		VaultID:           ac.vault.ID,
+		ApprovalID:        approvalID,
+		DecisionDeviceID:  ac.device.ID,
+		Decision:          req.Decision,
+		RequestCiphertext: a.RequestCiphertext,
+		OneTimeEnc:        req.OneTimeEnc,
+		OneTimeWrappedKey: req.OneTimeWrappedKey,
+	})
+	if err != nil {
+		writeError(w, "invalid_field")
+		return
+	}
+	if err := wire.VerifyDeviceSignature(dtb, req.DecisionSignature, ac.device.SignAlg, ac.device.SignPublicKey); err != nil {
+		writeError(w, "bad_signature")
+		return
+	}
 	approved := req.Decision == wire.ApprovalStatusApproved
 	// The deciding device is whoever signed this decision — the owner
 	// (kind=ios) or the delegated decider (kind=decider). It is stored on
@@ -306,10 +354,10 @@ func (s *Server) handleApprovalDecision(w http.ResponseWriter, r *http.Request) 
 		// Decision + one-way consumed stamp commit together (design
 		// §14.3): a second approval can never deliver the same code.
 		err = s.st.DecideApprovalForMessage(r.Context(), ac.vault.ID, approvalID, a.SubjectID(), ac.device.ID,
-			approved, wrap, expiresAt, now)
+			approved, wrap, req.DecisionSignature, expiresAt, now)
 	} else {
 		err = s.st.DecideApproval(r.Context(), ac.vault.ID, approvalID, ac.device.ID,
-			approved, wrap, expiresAt, now)
+			approved, wrap, req.DecisionSignature, expiresAt, now)
 	}
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -360,7 +408,8 @@ func (s *Server) handleApprovalPoll(w http.ResponseWriter, r *http.Request) {
 	// DecisionDeviceID is empty (→ omitted, protocol §6.22) until a
 	// decision has been accepted; pending and never-decided rows carry
 	// nothing.
-	resp := wire.ApprovalPollResponse{ApprovalID: a.ID, Status: a.Status, DecisionDeviceID: a.DecisionDeviceID}
+	resp := wire.ApprovalPollResponse{ApprovalID: a.ID, Status: a.Status,
+		DecisionDeviceID: a.DecisionDeviceID, DecisionSignature: a.DecisionSignature}
 	switch a.Status {
 	case wire.ApprovalStatusPending:
 		if a.ExpiresAt < nowMs {

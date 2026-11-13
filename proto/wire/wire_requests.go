@@ -253,14 +253,15 @@ const (
 // ApprovalCreateRequest is the body of POST /v1/approvals (protocol
 // §6.19). request_ciphertext = HPKE enc ‖ ct (encapsulated to an owner
 // device, info purpose=approval-request); request_signature is the CLI
-// device's Ed25519 over the raw request_ciphertext bytes.
+// device's Ed25519 over the approval-request transcript (§3.11, v2 A).
 //
 // Subject (protocol §6.19, D16): exactly one of item_id (item
 // consumption, v1.1 shape) or message_id (SMS code consumption, design
-// v0.8 §14.5) must be set. A message request must also carry
-// CLIEphemeralPublicKey — the request's one-time X25519 public key as a
-// plaintext field, because the decider never decrypts
-// request_ciphertext (design §14.8).
+// v0.8 §14.5) must be set. CLIEphemeralPublicKey — the request's
+// one-time X25519 public key — is required for BOTH subjects: the
+// decider never decrypts request_ciphertext, so the signed transcript is
+// the only thing that authenticates the key it wraps the SMS plaintext
+// to (protocol v2 A).
 type ApprovalCreateRequest struct {
 	ItemID                string `json:"item_id,omitempty"`
 	MessageID             string `json:"message_id,omitempty"`
@@ -326,6 +327,10 @@ type ApprovalDecisionRequest struct {
 	Decision          string `json:"decision"`
 	OneTimeEnc        Blob   `json:"one_time_enc,omitempty"`
 	OneTimeWrappedKey Blob   `json:"one_time_wrapped_key,omitempty"`
+	// DecisionSignature is the deciding device's signature over the
+	// approval-decision transcript (§3.12, v2 B), required on both
+	// approved and denied decisions.
+	DecisionSignature Blob `json:"decision_signature"`
 }
 
 // ApprovalPollResponse is the body of GET /v1/approvals/:approval_id
@@ -341,6 +346,9 @@ type ApprovalPollResponse struct {
 	OneTimeWrappedKey Blob   `json:"one_time_wrapped_key,omitempty"`
 	ExpiresAt         int64  `json:"expires_at,omitempty"`
 	DecisionDeviceID  string `json:"decision_device_id,omitempty"`
+	// DecisionSignature accompanies DecisionDeviceID so the CLI can
+	// verify the decision before unwrapping (protocol §3.12, v2 B).
+	DecisionSignature Blob `json:"decision_signature,omitempty"`
 }
 
 // ApprovalStatusData is the sync "approval" entity data (protocol §8.2,

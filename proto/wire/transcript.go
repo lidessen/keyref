@@ -762,3 +762,155 @@ func ParseDelegationTranscript(signed []byte, wantVaultID string) (DelegationTra
 	}
 	return t, nil
 }
+
+// ApprovalRequestTranscript is the structured form of the CLI-signed
+// approval request (protocol §3.11, v2 A). It replaces the v1 rule that
+// signed the raw request ciphertext: the signature now also covers the
+// subject, the expiry and the request's one-time X25519 public key, so a
+// decider — which never decrypts the request — can trust the key it
+// wraps the SMS plaintext to.
+type ApprovalRequestTranscript struct {
+	VaultID               string
+	CLIDeviceID           string
+	SubjectKind           string // item | message
+	SubjectID             string
+	ExpiresAt             uint64 // unix milliseconds
+	CLIEphemeralPublicKey []byte // 32-byte X25519 public key
+	RequestCiphertext     []byte
+}
+
+// BuildApprovalRequestTranscript assembles the signed transcript bytes:
+//
+//	"KEYREF1" NUL "approval-request" NUL vault_id(hex) NUL
+//	cli_device_id(hex) NUL subject_kind NUL subject_id(hex) NUL
+//	u64be(expires_at) NUL cli_ephemeral_public_key(32 raw) NUL
+//	H(request_ciphertext)
+//
+// There is no trailing NUL. Every field is fixed-length or an enum, so
+// the encoding is injective.
+func BuildApprovalRequestTranscript(t ApprovalRequestTranscript) ([]byte, error) {
+	if err := requireID("vault_id", t.VaultID); err != nil {
+		return nil, err
+	}
+	if err := requireID("cli_device_id", t.CLIDeviceID); err != nil {
+		return nil, err
+	}
+	if t.SubjectKind != EntityItem && t.SubjectKind != EntityMessage {
+		return nil, fmt.Errorf("%w: subject_kind must be item or message", ErrInvalidField)
+	}
+	if err := requireID("subject_id", t.SubjectID); err != nil {
+		return nil, err
+	}
+	if t.ExpiresAt == 0 {
+		return nil, fmt.Errorf("%w: expires_at must be set", ErrInvalidField)
+	}
+	if len(t.CLIEphemeralPublicKey) != SizeX25519Key {
+		return nil, fmt.Errorf("%w: cli_ephemeral_public_key must be %d bytes", ErrInvalidField, SizeX25519Key)
+	}
+	if len(t.RequestCiphertext) == 0 {
+		return nil, fmt.Errorf("%w: request_ciphertext must not be empty", ErrInvalidField)
+	}
+	sum := sha256.Sum256(t.RequestCiphertext)
+	b := beginTranscript("approval-request")
+	b = append(b, t.VaultID...)
+	b = appendSep(b)
+	b = append(b, t.CLIDeviceID...)
+	b = appendSep(b)
+	b = append(b, t.SubjectKind...)
+	b = appendSep(b)
+	b = append(b, t.SubjectID...)
+	b = appendSep(b)
+	b = appendU64(b, t.ExpiresAt)
+	b = appendSep(b)
+	b = append(b, t.CLIEphemeralPublicKey...)
+	b = appendSep(b)
+	b = append(b, sum[:]...)
+	return b, nil
+}
+
+// ApprovalDecisionTranscript is the structured form of the decision a
+// decider (owner or delegated decider) signs before the CLI unwraps the
+// one-time wrap (protocol §3.12, v2 B). HPKE base mode authenticates
+// nothing, so without this signature a malicious server could hand the
+// CLI a wrap it fabricated.
+type ApprovalDecisionTranscript struct {
+	VaultID           string
+	ApprovalID        string
+	DecisionDeviceID  string
+	Decision          string // approved | denied
+	RequestCiphertext []byte
+	OneTimeEnc        []byte // approved only
+	OneTimeWrappedKey []byte // approved only
+}
+
+// PackApprovalWrap renders the one-time wrap in the layout the decision
+// transcript hashes and the server stores:
+//
+//	u16be(len(one_time_enc)) ‖ one_time_enc ‖ one_time_wrapped_key
+//
+// A denied decision has no wrap at all.
+func PackApprovalWrap(enc, wrapped []byte) ([]byte, error) {
+	if len(enc) > 0xFFFF {
+		return nil, fmt.Errorf("%w: one_time_enc too long", ErrInvalidField)
+	}
+	out := make([]byte, 0, 2+len(enc)+len(wrapped))
+	out = append(out, byte(len(enc)>>8), byte(len(enc)))
+	out = append(out, enc...)
+	return append(out, wrapped...), nil
+}
+
+// BuildApprovalDecisionTranscript assembles the signed transcript bytes:
+//
+//	"KEYREF1" NUL "approval-decision" NUL vault_id(hex) NUL
+//	approval_id(hex) NUL decision_device_id(hex) NUL decision NUL
+//	H(request_ciphertext) NUL H(one_time_wrap)
+//
+// The default (denied) decision carries no wrap, so its trailing digest
+// is SHA-256 of the empty string. There is no trailing NUL.
+func BuildApprovalDecisionTranscript(t ApprovalDecisionTranscript) ([]byte, error) {
+	if err := requireID("vault_id", t.VaultID); err != nil {
+		return nil, err
+	}
+	if err := requireID("approval_id", t.ApprovalID); err != nil {
+		return nil, err
+	}
+	if err := requireID("decision_device_id", t.DecisionDeviceID); err != nil {
+		return nil, err
+	}
+	var wrap []byte
+	switch t.Decision {
+	case ApprovalStatusApproved:
+		if len(t.OneTimeEnc) == 0 || len(t.OneTimeWrappedKey) == 0 {
+			return nil, fmt.Errorf("%w: an approved decision must carry the one-time wrap", ErrInvalidField)
+		}
+		w, err := PackApprovalWrap(t.OneTimeEnc, t.OneTimeWrappedKey)
+		if err != nil {
+			return nil, err
+		}
+		wrap = w
+	case ApprovalStatusDenied:
+		if len(t.OneTimeEnc) != 0 || len(t.OneTimeWrappedKey) != 0 {
+			return nil, fmt.Errorf("%w: a denied decision carries no wrap", ErrInvalidField)
+		}
+	default:
+		return nil, fmt.Errorf("%w: decision must be approved or denied", ErrInvalidField)
+	}
+	if len(t.RequestCiphertext) == 0 {
+		return nil, fmt.Errorf("%w: request_ciphertext must not be empty", ErrInvalidField)
+	}
+	reqSum := sha256.Sum256(t.RequestCiphertext)
+	wrapSum := sha256.Sum256(wrap)
+	b := beginTranscript("approval-decision")
+	b = append(b, t.VaultID...)
+	b = appendSep(b)
+	b = append(b, t.ApprovalID...)
+	b = appendSep(b)
+	b = append(b, t.DecisionDeviceID...)
+	b = appendSep(b)
+	b = append(b, t.Decision...)
+	b = appendSep(b)
+	b = append(b, reqSum[:]...)
+	b = appendSep(b)
+	b = append(b, wrapSum[:]...)
+	return b, nil
+}

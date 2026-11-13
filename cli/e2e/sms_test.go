@@ -81,6 +81,7 @@ type approvalRequestMessage struct {
 type sourceDevice struct {
 	deviceID string
 	signPriv ed25519.PrivateKey
+	hpkePub  []byte // the key the owner seals message keys to
 	nonce    string
 	token    string
 }
@@ -134,7 +135,7 @@ func (o *owner) registerSource(t *testing.T) *sourceDevice {
 	if _, err := rand.Read(hpkePub); err != nil {
 		t.Fatal(err)
 	}
-	d := &sourceDevice{deviceID: newID(t), signPriv: priv, nonce: newID(t)}
+	d := &sourceDevice{deviceID: newID(t), signPriv: priv, hpkePub: hpkePub, nonce: newID(t)}
 
 	nonceRaw, err := hex.DecodeString(d.nonce)
 	if err != nil {
@@ -288,9 +289,7 @@ func (o *owner) serveOneMessageApproval(t *testing.T, messageID, body string) *s
 
 func (o *owner) answerMessageApproval(t *testing.T, row *wire.ApprovalRow, body string) {
 	t.Helper()
-	if err := wire.VerifyCLISignature(row.RequestCiphertext, row.RequestSignature, o.cliSign); err != nil {
-		t.Fatalf("owner: CLI approval signature verification failed: %v", err)
-	}
+	o.verifyApprovalRequest(t, row)
 	if len(row.ItemID) != 0 {
 		t.Fatalf("message approval carried an item id: %q", row.ItemID)
 	}
@@ -342,10 +341,12 @@ func (o *owner) answerMessageApproval(t *testing.T, row *wire.ApprovalRow, body 
 	if err != nil {
 		t.Fatal(err)
 	}
+	decision := wire.ApprovalDecisionRequest{
+		Decision: wire.ApprovalStatusApproved, OneTimeEnc: oneEnc, OneTimeWrappedKey: wrapped,
+	}
+	o.signApprovalDecision(t, row, &decision)
 	if resp := o.do(t, "POST", "/v1/approvals/"+row.ApprovalID+"/decision",
-		wire.ApprovalDecisionRequest{
-			Decision: wire.ApprovalStatusApproved, OneTimeEnc: oneEnc, OneTimeWrappedKey: wrapped,
-		}, nil); resp.StatusCode != http.StatusNoContent {
+		decision, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("owner message decision: %d", resp.StatusCode)
 	}
 	o.lastApprovalID = row.ApprovalID
@@ -464,8 +465,10 @@ func (o *owner) serveOneMessageDenial(t *testing.T, messageID string) *sync.Wait
 				if row.MessageID != messageID {
 					continue
 				}
+				denial := wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusDenied}
+				o.signApprovalDecision(t, &row, &denial)
 				if resp := o.do(t, "POST", "/v1/approvals/"+row.ApprovalID+"/decision",
-					wire.ApprovalDecisionRequest{Decision: wire.ApprovalStatusDenied}, nil); resp.StatusCode != http.StatusNoContent {
+					denial, nil); resp.StatusCode != http.StatusNoContent {
 					t.Errorf("owner denial decision: %d", resp.StatusCode)
 				}
 				return
