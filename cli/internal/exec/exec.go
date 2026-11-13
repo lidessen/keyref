@@ -786,3 +786,42 @@ func splitFdSpec(spec string) (fd int, ref string, err error) {
 	}
 	return n, spec[i+1:], nil
 }
+
+// CollectRefs returns every ref a Request's injection specs name, in
+// first-mention order. A caller that resolves refs itself — a local
+// source, which has no synced item metas — uses this to populate Refs
+// before calling Run. Malformed specs are skipped here: Run rejects them
+// itself with the proper exit code, and pre-filling a ref from a spec
+// that will be rejected would only widen what gets decrypted.
+func CollectRefs(req *Request) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(ref string) {
+		if ref == "" || seen[ref] {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	for _, spec := range req.EnvRefs {
+		if _, ref, err := splitEnvSpec(spec); err == nil {
+			add(ref)
+		}
+	}
+	for _, spec := range req.FdRefs {
+		if _, ref, err := splitFdSpec(spec); err == nil {
+			add(ref)
+		}
+	}
+	add(req.StdinRef)
+	add(req.LoginRef)
+	for _, rp := range req.Replies {
+		add(rp.Ref)
+	}
+	if HasArgvPlaceholder(req.Argv) {
+		for _, ref := range ArgvPlaceholderRefs(req.Argv) {
+			add(ref)
+		}
+	}
+	return out
+}

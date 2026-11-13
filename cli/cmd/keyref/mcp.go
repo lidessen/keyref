@@ -14,6 +14,7 @@ import (
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/meta"
+	"github.com/lidessen/keyref/cli/internal/source"
 	"github.com/lidessen/keyref/cli/internal/store"
 )
 
@@ -351,8 +352,12 @@ func (s *mcpServer) toolExec(args json.RawMessage) (any, *mcpError) {
 		AllowArgv: a.AllowArgv,
 		Argv:      a.Argv,
 		Timeout:   timeout,
-		Stdout:    &out,
-		Stderr:    &errBuf,
+		// The MCP server is a paired CLI device: all three tools speak
+		// the paired vault, whatever the CLI's default source is
+		// (design.md §7.8).
+		Source: source.SyncName,
+		Stdout: &out,
+		Stderr: &errBuf,
 	})
 	var text strings.Builder
 	text.WriteString(out.String())

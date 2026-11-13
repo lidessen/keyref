@@ -1,8 +1,10 @@
 # keyref 设计文档
 
-状态：草案 v0.8。本文是规格，不是实现记录。仓库里的 `ios/`、`cli/`、`server/` 已有 Phase 1/2 的非 iOS 实现与 iOS app。
+状态：草案 v0.9。本文是规格，不是实现记录。仓库里的 `ios/`、`cli/`、`server/` 已有 Phase 1/2 的非 iOS 实现与 iOS app。
 
-日期：2026-10-25。
+日期：2026-11-13。
+
+v0.9：新增 §17「统一命令面与 source」——CLI 只有一套命令，后端由 source 决定：`local`（本机离线库，默认）与 `sync`（已配对的 iOS 库，CLI 只读）；`keyref local` 子命令取消。选源顺序为 `--source` > `KEYREF_SOURCE` > 配置的默认 > `local`；本地主密钥放操作系统密钥环，`KEYREF_LOCAL_MASTER`（32 随机字节的 base64）为无头环境的覆盖项。`get --reveal` 是 §16「没有 reveal 路径」在 local source 上的唯一例外：只有 local 接受它，sync 拒绝。§16 相应补一条不变量。
 
 v0.8：新增 §14「短信验证码采集」——多台 Android 以 `source` 设备上传端到端加密的验证码消息，owner 在 iOS 收件箱查看，agent 经审批一次性消费 `sms:<message_id>`；消息 24 小时过期即焚，通知复用 §8.3 的 APNs 管道。可选地，owner 可把消息消费的 decision 签署权委托给 `decider` 设备（例如本地部署的 JEV 决策服务），委托策略由 owner 签名、只能缩小不能扩大（§14.8）。原「开放问题」「实现时保持不变的约束」顺延为 §15、§16。
 
@@ -1378,6 +1380,7 @@ A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设�
 - 客户端把任何服务器 URL 都当成不可信的存储。官方托管不因为是我们在运行就少做一层加密。
 - `list` 和 `get` 不解密 secret。掩码用 meta 里已经算好的 `masked`。
 - 不增加 `keyref get --reveal`、环境变量开关或调试 flag 来打印明文。需要明文的是子进程，不是父进程的 stdout。
+- 上一条的唯一例外是 local source 的 `keyref get <ref> --reveal`（§17.4）：它必须显式点名、只对 local 有效、只写原始字节、不带任何其他输出；sync source 一律拒绝。
 - 不用 `system()` 或 `sh -c` 执行 agent 的命令。
 - 不把 VMK 放进任何 `kind = cli` 的包裹。
 - 不把 `approval` 条目的 item key 写进 CLI 的密钥环或 sqlite。
@@ -1395,3 +1398,44 @@ A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设�
 - 决策器的 decision 只接受 `message:` subject，服务器强制（§14.8）。
 - `sms:<message_id>` 不被 `list` / `get` 识别，只在 `exec` 注入中出现，且每次都审批。
 - 锁屏通知与推送正文不包含短信内容与 sender；内容只出现在已解锁的客户端里。
+
+## 17. 统一命令面与 source
+
+### 17.1 问题
+
+CLI 原本只有一套命令，全部对着已配对的 iOS 库（`pair` / `session` / `sync` / `list` / `get` / `exec` …），另有一个孤立的 `keyref local init|set|delete` 子命令管本机离线库。两套命令面意味着两套帮助、两套退出码、两套心智模型，而本机离线库这条路径其实更基础：它不需要手机、不需要服务器、不需要审批。
+
+决定：**只有一套命令面**，后端由 **source** 决定。没有 `keyref local` 子命令。
+
+### 17.2 内置 source
+
+| source | 类型 | 读 | 写 | 说明 |
+| --- | --- | --- | --- | --- |
+| `local` | 本机离线库 | 是 | 是 | `<data dir>/local.db`，SQLite，明文不落盘之外任何地方 |
+| `sync` | 已配对的 iOS 库 | 是 | 否 | CLI 不能创建、修改或删除条目（§2.1 编辑权） |
+
+`local` 是**默认** source：一条新的安装，`keyref set` 直接就是本机库。
+
+### 17.3 选源顺序
+
+`--source NAME` > `KEYREF_SOURCE` > 配置的默认（`<data dir>/sources.json`）> `local`。
+
+`keyref source list|default|add|remove` 管理这套配置：`add` 注册另一个本地库（`--path` 必须是绝对路径），`remove` 只删配置、不删文件。
+
+升级兼容：已经配对过的数据目录在没有 `sources.json` 时，第一次运行把默认 source 记成 `sync`——升级不能让老用户原本能用的命令落到一个空库上。`keyref pair` 成功也把默认 source 设为 `sync`（配对意味着这台 CLI 由 iOS 库支撑）。`keyref source default local` 切回来。
+
+### 17.4 本地库
+
+- **主密钥**：32 随机字节。`keyref init` 生成并写进操作系统密钥环（macOS Keychain、Linux Secret Service）；`KEYREF_LOCAL_MASTER` 覆盖它，值是同一把钥匙的**标准 base64**。环境变量给的钥匙只用不抄，绝不写进密钥环。钥匙丢了库就没了——CLI 不生成、不恢复、不备份它。
+- **目录**：库文件所在目录必须是私有目录（0700），否则拒绝创建或打开。
+- **ref 单向存**：行 id 是 ref 的 HMAC，文件里没有可读的 ref。因此 `list` 只属于 `sync` source；本机库只能凭 ref 取。`set` 存的是原始字节（1 字节到 1 MiB，含末尾换行），取回来还是同样的字节。
+- **`get`**：默认只给掩码——头三个字符加末四个字符，短值、二进制值和含空白字符的值什么都不给。`--reveal` 写原始字节到 stdout，别的什么都不写。这是 §16 那条不变量的唯一例外，且只有 local source 接受。
+- **`exec`**：与 `sync` 同一套代码路径——同样的 deny-shells 策略、同样的注入形态、同样的脱敏器；没有授予、没有审批、没有远程审计，条目的策略是合成的 deny-shells。argv 注入在本地库上不可用：本地条目没有策略记录可以同意把秘密放进进程参数。
+
+### 17.5 MCP
+
+`keyref mcp` 始终对着 `sync` source：它是「一台已配对的 CLI 设备」（§7.8），三个工具（list / get / exec）必须说同一种话。MCP 没有 local 模式——`list` 在本机库上不存在（§17.4）。
+
+### 17.6 不变的东西
+
+本地 source 不改变威胁模型的其余部分：明文仍然只进子进程（除非人显式 `--reveal`），`exec` 仍然先做策略检查再 spawn，仍然不经过 shell，仍然脱敏输出。区别只在范围——本机库没有远端、没有授予、没有审批，所以也没有审批后的审计事件。

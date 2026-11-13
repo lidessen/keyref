@@ -28,11 +28,11 @@ import (
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/exitcode"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/meta"
 	"github.com/lidessen/keyref/cli/internal/pair"
 	"github.com/lidessen/keyref/cli/internal/secret"
 	"github.com/lidessen/keyref/cli/internal/session"
+	"github.com/lidessen/keyref/cli/internal/source"
 	"github.com/lidessen/keyref/cli/internal/store"
 	"github.com/lidessen/keyref/cli/internal/syncing"
 )
@@ -85,6 +85,8 @@ func dispatch(cmd string, args []string) int {
 	switch cmd {
 	case "server":
 		return cmdServer(args)
+	case "source":
+		return cmdSource(args)
 	case "decider":
 		return cmdDecider(args[1:])
 	case "pair":
@@ -93,6 +95,12 @@ func dispatch(cmd string, args []string) int {
 		return cmdSession(args)
 	case "sync":
 		return cmdSync(args)
+	case "init":
+		return cmdInit(args)
+	case "set":
+		return cmdSet(args)
+	case "delete":
+		return cmdDelete(args)
 	case "list":
 		return cmdList(args)
 	case "get":
@@ -105,8 +113,6 @@ func dispatch(cmd string, args []string) int {
 		return cmdUnlock()
 	case "exec":
 		return cmdExec(args)
-	case "local":
-		return cmdLocal(args)
 	case "mcp":
 		return cmdMCP(args)
 	case "help", "-h", "--help":
@@ -123,20 +129,35 @@ func usage(w *os.File) {
 	fmt.Fprint(w, `usage: keyref <command> [args]
 
 commands:
-  server [set <origin>]     show or set the sync-server origin
-  pair [--name <label>]     pair with the iOS vault (QR code + fingerprint)
+  init [--source NAME]    create the local vault (key goes to the OS keyring)
+  set <ref>               store a secret read from stdin
+  get <ref> [--format json] [--reveal]
+                          one entry; masked by default, --reveal prints the
+                          raw secret bytes (local sources only)
+  delete <ref>            delete an entry from a local source
+  list [--format json]    refs, names, masks (paired vault only)
+  exec [flags] -- <argv>  run a command with injected secrets
+  source <list|default|add|remove>
+                          show or configure credential sources
+  server [set <origin>]   show or set the sync-server origin
+  pair [--name <label>]   pair with the iOS vault (QR code + fingerprint)
                             --kind decider pairs an auto-approval delegate
-  session                   establish or refresh the server session
-  sync                      pull authorized ciphertext changes
-  list [--format json]      refs, names, masks (no plaintext)
-  get <ref> [--format json] one item, same view
-  status                    pairing, session and grant expiry status
-  lock | unlock             block or restore key unwrapping
-  exec [flags] -- <argv>    run a command with injected secrets
-  local <init|set|delete>    manage an independent local vault
-  mcp                       serve list/get/exec over stdio as MCP JSON-RPC
-  decider run               auto-approve SMS consumptions inside the owner's
+  session                 establish or refresh the server session
+  sync                    pull authorized ciphertext changes
+  status                  pairing, session and grant expiry status
+  lock | unlock           block or restore key unwrapping
+  mcp                     serve list/get/exec over stdio as MCP JSON-RPC
+  decider run             auto-approve SMS consumptions inside the owner's
                             delegation policy (design v0.8 §14.8)
+
+sources:
+  local                   the standalone offline vault (the default)
+  sync                    the paired iOS vault (read-only for the CLI)
+  Every data command takes --source NAME; KEYREF_SOURCE does the same, and
+  "keyref source default NAME" persists the choice. The local master key
+  lives in the OS keyring; KEYREF_LOCAL_MASTER (32 random bytes, standard
+  base64) overrides it for headless use. A local vault stores refs one-way,
+  so "list" works on the paired vault only.
 
 exec flags:
   --env NAME=REF            inject the secret as an environment variable
@@ -190,16 +211,7 @@ func mustStore() *store.Store {
 
 // mustIdentity loads (or creates) the device identity from the keyring.
 func mustIdentity() *device.Identity {
-	var ks keyring.SecretStore = keyring.OSKeyring{}
-	if dir := os.Getenv("KEYREF_KEYRING_DIR"); dir != "" {
-		dirKS, err := keyring.NewDirStore(dir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "keyref:", err)
-			panic(fatalExit{1})
-		}
-		ks = dirKS
-	}
-	id, err := device.LoadOrCreate(ks)
+	id, err := device.LoadOrCreate(secretStore())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "keyref:", err)
 		panic(fatalExit{1})
@@ -262,6 +274,12 @@ func cmdPair(args []string) int {
 	})
 	if err != nil {
 		return fatalf(1, "%v", err)
+	}
+	// Pairing means this CLI is now backed by the iOS vault: make it
+	// the default source, which is also what the commands did before
+	// sources existed. `keyref source default local` switches back.
+	if err := source.SetDefault(mustPaths(), source.SyncName); err != nil {
+		fmt.Fprintf(os.Stderr, "keyref: paired, but could not set the default source: %v\n", err)
 	}
 	return 0
 }
@@ -336,8 +354,16 @@ func cmdSync(args []string) int {
 func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	format := fs.String("format", "text", "text | json")
-	if err := fs.Parse(args); err != nil {
+	sourceName := fs.String("source", "", "source to operate on")
+	if _, err := parseArgs(fs, args); err != nil {
 		return 2
+	}
+	spec, err := resolveSource(*sourceName)
+	if err != nil {
+		return fatalf(1, "%v", err)
+	}
+	if spec.Kind == source.KindLocal {
+		return fatalf(2, "local sources store refs one-way (HMAC), so they cannot be listed; use keyref get <ref>")
 	}
 	st := mustStore()
 	if locked(st) {
@@ -368,10 +394,23 @@ func cmdList(args []string) int {
 func cmdGet(args []string) int {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	format := fs.String("format", "text", "text | json")
-	if err := fs.Parse(args); err != nil || fs.NArg() != 1 {
-		return fatalf(2, "usage: keyref get <ref> [--format json]")
+	reveal := fs.Bool("reveal", false, "print the raw secret bytes (local sources only)")
+	sourceName := fs.String("source", "", "source to operate on")
+	rest, err := parseArgs(fs, args)
+	if err != nil || len(rest) != 1 {
+		return fatalf(2, "usage: keyref get <ref> [--format json] [--reveal] [--source NAME]")
 	}
-	ref := fs.Arg(0)
+	ref := rest[0]
+	spec, err := resolveSource(*sourceName)
+	if err != nil {
+		return fatalf(1, "%v", err)
+	}
+	if spec.Kind == source.KindLocal {
+		return runLocalGet(spec, ref, *format, *reveal)
+	}
+	if *reveal {
+		return fatalf(2, "--reveal is not available on the paired vault: the CLI never prints a synced secret")
+	}
 	st := mustStore()
 	if locked(st) {
 		return fatalf(exitcode.SessionLocked, "session is locked; run keyref unlock")
@@ -417,6 +456,9 @@ func truncate(s string, n int) string {
 
 func cmdStatus(args []string) int {
 	st := mustStore()
+	if spec, err := resolveSource(""); err == nil {
+		fmt.Printf("source: %s\n", spec.Name)
+	}
 	fmt.Printf("server: %s\n", config.Origin(mustPaths()))
 	if vault, ok, _ := st.GetKV(session.KVVaultID); ok && len(vault) > 0 {
 		fmt.Printf("pairing: vault %s\n", string(vault))
@@ -504,6 +546,7 @@ func cmdExec(args []string) int {
 	replies := multiFlag{}
 	fs.Var(&replies, "reply", "REGEX=REF type REF into the pty input when REGEX matches the pre-redaction output (needs --pty, approval item, allowCommands)")
 	timeoutSecs := fs.Int64("timeout", 120, "approval wait timeout in seconds (approval items)")
+	sourceName := fs.String("source", "", "source to operate on")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -538,6 +581,7 @@ func cmdExec(args []string) int {
 		AllowArgv: *allowArgv, Pty: *pty, Replies: parsedReplies,
 		Timeout: time.Duration(*timeoutSecs) * time.Second,
 		Argv:    argv,
+		Source:  *sourceName,
 		Stdout:  os.Stdout, Stderr: os.Stderr, Stdin: os.Stdin,
 	})
 }
@@ -559,6 +603,9 @@ type execOptions struct {
 	Replies    []exec.Reply
 	Timeout    time.Duration
 	Argv       []string
+	// Source selects the credential source; empty means the configured
+	// default (local, unless a paired vault predates sources).
+	Source     string
 	Stdout     io.Writer
 	Stderr     io.Writer
 	Stdin      io.Reader
@@ -569,6 +616,13 @@ type execOptions struct {
 // standard grants or, for approval items, the per-exec approval flow —
 // and the redacted run.
 func runExecCore(opts execOptions) int {
+	spec, err := resolveSource(opts.Source)
+	if err != nil {
+		return fatalf(1, "%v", err)
+	}
+	if spec.Kind == source.KindLocal {
+		return runLocalExec(opts, spec)
+	}
 	st := mustStore()
 	id := mustIdentity()
 

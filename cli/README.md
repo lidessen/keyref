@@ -1,107 +1,124 @@
 # cli
 
-给 AI agent 用的命令行。二进制名叫 `keyref`。它的 stdout 里永远没有秘密的明文。
+The command line for AI agents. The binary is called `keyref`.
 
-设计见 [docs/design.md](../docs/design.md) 的「引用语法」「exec」和「CLI」几节；线格式以 [docs/protocol.md](../docs/protocol.md) 为准。
+One command surface covers every credential source. A **source** is a backend the commands read from and write to: the standalone **local** vault (the default, offline, no pairing) or the **sync** vault (the paired iOS vault, read-only for the CLI). There is no `local` subcommand — `keyref set` on the default source *is* the local store.
 
-命令（design §12.2，已实现）：
+On the paired vault the stdout never contains secret plaintext. A local source has one explicit exception: `keyref get --reveal`, which a person has to ask for by name.
 
-| 命令 | 作用 |
+See the "reference syntax", "exec" and "CLI" sections of [docs/design.md](../docs/design.md) for the design, and [docs/protocol.md](../docs/protocol.md) for the wire format.
+
+Commands (design §12.2 and §17, implemented):
+
+| Command | Purpose |
 | --- | --- |
-| `keyref pair` | 生成设备密钥，在终端显示二维码，和 iOS 保险库配对 |
-| `keyref session` | 建立或续期服务器会话（挑战换令牌，protocol §6.7） |
-| `keyref status` | 配对状态、会话是否解锁、授予剩余有效期 |
-| `keyref lock` / `keyref unlock` | 丢掉或恢复内存里的条目密钥 |
-| `keyref sync` | 拉取授权范围内的密文 |
-| `keyref list` | 名称、描述、`ref`、掩码。没有明文 |
-| `keyref get <ref>` | 单条的同样视图 |
-| `keyref exec -- ...` | 把秘密注入子进程，脱敏 stdout/stderr；支持 `--env`、`--stdin`、`--stdin-login`、`--fd`、`--pty`/`--reply` |
-| `keyref server` | 查看或设置同步服务器的 URL |
-| `keyref mcp` | stdio 上的 JSON-RPC 2.0（MCP）：工具只有 `list` / `get` / `exec`，语义与 CLI 同构（design §7.8） |
-| `keyref local init\|set\|delete` | 显式管理独立的本地凭据库，不需要配对或同步 |
+| `keyref init` | Create the local vault; the master key goes to the OS keyring |
+| `keyref set <ref>` | Store a secret read from stdin (local sources) |
+| `keyref get <ref>` | One entry: names, descriptions, `ref`, masks. `--reveal` prints the raw bytes (local sources only) |
+| `keyref delete <ref>` | Delete an entry (local sources) |
+| `keyref list` | Names, descriptions, `ref`, masks (paired vault) |
+| `keyref exec -- ...` | Inject secrets into a child process, redact stdout/stderr; supports `--env`, `--stdin`, `--stdin-login`, `--fd`, `--pty`/`--reply` |
+| `keyref source list\|default\|add\|remove` | Show or configure the sources |
+| `keyref pair` | Generate a device key, show a QR code in the terminal, pair with the iOS vault |
+| `keyref session` | Establish or renew a server session (challenge for a token, protocol §6.7) |
+| `keyref status` | Pairing state, whether the session is unlocked, remaining grant lifetime |
+| `keyref lock` / `keyref unlock` | Drop or restore the in-memory item keys |
+| `keyref sync` | Pull the ciphertext within the granted scope |
+| `keyref server` | View or set the sync server URL |
+| `keyref mcp` | JSON-RPC 2.0 (MCP) over stdio: the tools are only `list` / `get` / `exec`, with the same semantics as the CLI (design §7.8). The server is a paired CLI device: all three tools speak the `sync` source |
 
-没有 `reveal`、`export` 或 `--print`。`get` 的 JSON 里不设 `value` 字段。
+On the paired vault there is no `reveal`, no `export` and no `--print`; the JSON of `get` has no `value` field.
 
-### 同步登录条目
+### Sources
+
+Every data command takes `--source NAME`. `KEYREF_SOURCE` does the same, and `keyref source default NAME` persists the choice. With none of them set, the source is `local` — or `sync`, if this data directory already held a paired vault before sources existed.
+
+| Source | Kind | Notes |
+| --- | --- | --- |
+| `local` | local | The standalone offline vault at `<data dir>/local.db`. Read and write |
+| `sync` | sync | The paired iOS vault. Read only: the CLI may never create, edit or delete an item (design §2.1) |
+
+`keyref source add NAME --path /absolute/vault.db` registers another local vault; `keyref source remove NAME` drops it from the configuration and leaves its file alone. A local vault's directory must be private (mode 0700) — keyref refuses to create or open one otherwise.
+
+`keyref pair` makes `sync` the default source, which is what the commands did before sources existed; `keyref source default local` switches back.
+
+### Local sources
+
+```sh
+keyref init                                   # create the local vault
+keyref set my-ref < /path/to/secret-input     # store a secret, read from stdin
+keyref get my-ref                             # ref, source, mask, size
+keyref get my-ref --reveal                    # the raw bytes, nothing else
+keyref delete my-ref
+keyref exec --env TOKEN=my-ref -- /absolute/path/to/consumer
+```
+
+The master key is 32 random bytes. `keyref init` generates one and stores it in the OS keyring (macOS Keychain, Linux Secret Service); `KEYREF_LOCAL_MASTER` overrides it for headless use, carrying the same key as the standard base64 encoding of 32 bytes. An environment-provided key is used as-is and never copied into the keyring. Losing the key means losing the vault — keyref cannot recover or regenerate it.
+
+`set` reads 1 byte to 1 MiB from stdin and saves it byte for byte, including a trailing newline; the value never appears in the command arguments or in any output. `get` prints a mask computed from the value (the head and the last four characters, and nothing at all for short, binary or whitespace-containing values). `--reveal` is the one deliberate plaintext path: it writes the raw secret bytes to stdout and nothing else, it exists for local sources only, and the paired vault rejects it.
+
+A local vault stores its refs one-way — the row id is an HMAC of the ref — so `keyref list` cannot enumerate them and a ref cannot be recovered from the file. You need the ref to get the entry.
+
+`exec` on a local source is the same code path as on the paired one: the deny-shells policy, the injection shapes and the redactor are identical (design §7.3, §7.4). There is no grant, no approval round and no remote audit, and `list` is the paired vault's command only.
+
+### Synced login items
 
 ```sh
 keyref exec --stdin-login login-ref -- /absolute/path/to/consumer
 ```
 
-CLI 需要已配对且已解锁，条目须可注入，并通过条目的显式 `allowCommands`
-策略。调用方提供受信子命令的绝对路径，Keyref 的条目策略检查命令名。
-Keyref 对该条目执行一次现有授权流程，
-包括在条目要求审批时等待一次 owner 决定。授权后从同一次解密中读取
-`username` 和 `value`，按此顺序通过子进程的匿名 stdin 管道分别写一行，
-每行以 LF 结束，随后关闭输入。两字段各须为 1 至 1024 字节的 UTF-8，
-不能包含 CR、LF 或 NUL。条目或字段缺失、不支持或验证失败时不启动子进程。
-两字段均加入子进程输出的字节流脱敏，替换标记为 `***`。替换作用于原始字节，
-可能改变 JSON 等机器可读内容。该入口只供 CLI 使用。
+The CLI must be paired and unlocked, the item must be injectable, and the item's explicit `allowCommands` policy must permit it. The caller supplies the absolute path of a trusted subcommand; Keyref's item policy checks the command name. Keyref runs one existing authorization flow for that item, including waiting for one owner decision when the item requires approval. After authorization, `username` and `value` are read from the same decryption and written to the child's anonymous stdin pipe as two separate lines, in that order, each line terminated by LF, after which the input is closed. Each field must be 1 to 1024 bytes of UTF-8 and must not contain CR, LF or NUL. If the item or a field is missing, unsupported or fails validation, the child is not started. Both fields join the byte-stream redaction of the child's output and are replaced with the marker `***`. The replacement acts on raw bytes and may therefore change machine-readable content such as JSON. This entry point is for CLI use only.
 
-`--stdin-login` 与 `--stdin`、`--pty` 互斥。同一条目不能同时用于其他注入
-位置。其他条目的 `--env` 和普通 `--pass` 按原规则处理。Keyref 校验命令策略，
-消费程序校验秘密的实际收值目标。
+`--stdin-login` is mutually exclusive with `--stdin` and `--pty`. The same item cannot be used in another injection position at the same time. `--env` and the ordinary `--pass` of other items follow the original rules. Keyref validates the command policy; the consuming program validates where the secret actually ends up.
 
-`--timeout` 仍限定审批等待，不限定子进程运行时长。子进程留在调用方的进程组，
-调用方可以同时取消 Keyref 和子进程。子进程启动后向 Keyref 单独发 SIGINT 或
-SIGTERM 会终止该子进程。已发出的操作仍需按消费程序的回执结算。Keyref 不会在取消、
-超时或子进程退出后自动再发审批或重启子进程。
+`--timeout` still bounds the approval wait, not the child's runtime. The child stays in the caller's process group, so the caller can cancel Keyref and the child together. Sending a standalone SIGINT or SIGTERM to the child after it started terminates that child. Operations already issued still have to be settled against the consuming program's receipt. Keyref does not automatically re-issue an approval or restart the child after a cancellation, a timeout or the child's exit.
 
-### 独立本地凭据库
+### Go library: a registrable storage provider
 
-此模式与同步 vault 分开，不使用其授权、owner 审批或远程审计。它需要一个绝对路径；父目录须为私有目录。每次命令均从 `--master-env` 指定的环境变量读取同一个主密钥：该值是 **32 个随机字节的标准 base64 编码**。Keyref 不持久化主密钥，也不会自动生成或恢复它；请先通过可信的方式保管并注入它。丢失或更换主密钥会导致无法读取既有条目。环境变量和进程内存并非对同一用户的恶意进程提供隔离。
-
-```sh
-keyref local init --vault /absolute/private/directory/vault.db --master-env KEYREF_LOCAL_MASTER
-keyref local set --vault /absolute/private/directory/vault.db --master-env KEYREF_LOCAL_MASTER my-ref < /path/to/secret-input
-keyref local delete --vault /absolute/private/directory/vault.db --master-env KEYREF_LOCAL_MASTER my-ref
-```
-
-`init` 不覆盖已有文件；`set` 从 stdin 读取 1 字节至 1 MiB，逐字节保存（包括末尾换行），不会把秘密放进命令参数或输出。准备输入时应避免 shell 历史、终端回显及不受信文件造成泄露；本命令不会擦除输入文件。`delete` 只能删除显式引用的条目。代码清理内存仅是尽力而为。
-
-### Go 库：可注册的存储 provider
-
-`github.com/lidessen/keyref/cli/store` 提供统一的 `Store` 接口（`Put`、`Use`、`Delete`、`Close`）。`Use` 仅在回调中提供明文，调用者应避免保留或记录；内存清理不是同用户进程隔离。每个 `store.NewRegistry()` 默认注册独立本地库：
+`github.com/lidessen/keyref/cli/store` provides a unified `Store` interface (`Put`, `Use`, `Delete`, `Close`). `Use` provides the plaintext only inside the callback, and callers should avoid retaining or logging it; in-memory clearing is not isolation from a same-user process. Every `store.NewRegistry()` registers the standalone local store by default:
 
 ```go
 registry := store.NewRegistry()
 vault, err := registry.Open(store.Options{Config: store.LocalOptions{Path: path, Key: masterKey}})
-// 检查 err；使用 vault 后调用 Close。
+// check err; call Close when done with the vault.
 ```
 
-`Create` 使用同一 Options 并按后端语义创建。空 `Provider` 选择 `local`；显式的未知 provider 或后端错误直接返回错误，绝不回退。应用可用 `Registry.Register(name, factory)` 注册自己的后端；工厂接收该 provider 的配置以及 create/open 标记，并负责验证配置和实现存储语义。注册是实例级的，Keyref 当前内置的只有 local，不意味着同步 vault 或云服务已经可用。CLI 的 `local` 子命令也通过这个入口调用同一个本地后端。
+`Create` uses the same Options and creates according to the backend's semantics. An empty `Provider` selects `local`; an explicitly named unknown provider or a backend error returns the error directly — never a fallback. An application can register its own backend with `Registry.Register(name, factory)`; the factory receives that provider's configuration and a create/open flag, and is responsible for validating the configuration and implementing the storage semantics. Registration is per instance. The only backend Keyref ships with today is the local one; that does not mean the synced vault or a cloud service is available. The CLI's local source calls the same local backend through this entry point.
 
 
-默认服务器是官方托管。`keyref server set https://keys.example.com` 或环境变量 `KEYREF_SERVER` 指向自托管。配对二维码里带上这个 origin，手机在改服务器前会请人确认。两端的加密不因为服务器是谁在运行而不同。
+The default server is the official hosted service. `keyref server set https://keys.example.com` or the `KEYREF_SERVER` environment variable points the CLI at a self-hosted one. The pairing QR code carries that origin, and the phone asks for confirmation before you change the server. Encryption on both sides does not depend on who is running the server.
 
-- 语言用 **Go**（design v0.4 起，与服务器同一门语言；早期「Rust + zeroize」的决定已推翻，内存卫生降级为守护分配加显式清零，见 design §12.2）。
-- 私钥进操作系统密钥环（macOS Keychain、Linux Secret Service）。解开后的条目密钥与秘密明文只活在守护分配的内存里（memguard：mlock、GC 不可见、`lock` 与退出显式清零）。
-- 不要用 shell 去跑用户命令。`sh -c`、`echo`、`env` 一类默认拒绝。
-- 机器可读输出用英文表头，方便 agent 解析。
+- The language is **Go** (since design v0.4, the same language as the server; the earlier "Rust + zeroize" decision was overturned and memory hygiene was downgraded to guarded allocation plus explicit zeroing — see design §12.2).
+- Private keys go into the OS keyring (macOS Keychain, Linux Secret Service). Unwrapped item keys and secret plaintext live only in guarded memory (memguard: mlock, invisible to the GC, explicitly zeroed at `lock` and on exit).
+- Never run user commands through a shell. `sh -c`, `echo`, `env` and the like are rejected by default.
+- Machine-readable output uses English headers so agents can parse it.
 
-目录布局（实际树，2026-10-27 核对；`cli/internal` 共 17 个包）：
+Directory layout (actual tree, checked 2026-11-13; `cli/internal` has 20 packages):
 
 ```
 cli/
-├── cmd/keyref/          # 命令入口（main.go + mcp.go：stdio JSON-RPC）
-├── internal/approval/   # approval 条目的审批请求/轮询/一次性解包（design §8.3）
-├── internal/audit/      # exec 审计事件的封箱与上传
-├── internal/client/     # 同步 API 的薄 HTTP 客户端
-├── internal/config/     # origin 配置（0700 目录）
-├── internal/device/     # 设备身份：X25519 HPKE 密钥 + 签名密钥
-├── internal/exec/       # 策略（含 shebang 解析）、注入、脱敏、pty/reply
-├── internal/exitcode/   # design §7.6 退出码表
-├── internal/itemcrypt/  # grant 解包、meta/secret 解密
-├── internal/keyring/    # SecretStore 接口；go-keyring 实现；测试用目录实现
-├── internal/meta/       # list/get：只解 meta，输出掩码
-├── internal/pair/       # 二维码生成、pair/register、pair/status 轮询
-├── internal/qr/         # 终端二维码渲染
-├── internal/secret/     # memguard 守护缓冲区、秘密 JSON 无字符串解析
-├── internal/session/    # 挑战→令牌、token 复用与续期
-├── internal/store/      # cache.sqlite（0600，密文缓存）
-├── internal/syncing/    # 服务器变更应用到本地缓存
-├── internal/testowner/  # 测试与 e2e 用的软件 P-256 owner
-└── e2e/                 # //go:build e2e 端到端测试
+├── cmd/keyref/          # command entry points (main.go + mcp.go: stdio JSON-RPC)
+├── internal/approval/   # approval requests / polling / one-time unwrap for approval items (design §8.3)
+├── internal/audit/      # boxing and upload of exec audit events
+├── internal/client/     # a thin HTTP client for the sync API
+├── internal/config/     # origin configuration (0700 directory)
+├── internal/decider/    # the optional auto-approval delegate and its mandatory review gate (design v0.8 §14.8)
+├── internal/device/     # device identity: X25519 HPKE key + signing key
+├── internal/localvault/ # the local master key: OS keyring, KEYREF_LOCAL_MASTER override
+├── internal/exec/       # policy (including shebang parsing), injection, redaction, pty/reply
+├── internal/exitcode/   # the exit-code table of design §7.6
+├── internal/itemcrypt/  # grant unwrap, meta/secret decryption
+├── internal/keyring/    # the SecretStore interface; a go-keyring implementation; a directory implementation for tests
+├── internal/meta/       # list/get: decrypts only the meta and prints masks
+├── internal/pair/       # QR code generation, pair/register, pair/status polling
+├── internal/qr/         # terminal QR rendering
+├── internal/secret/     # memguard guarded buffers, secret JSON parsing without strings
+├── internal/session/    # challenge → token, token reuse and renewal
+├── internal/store/      # cache.sqlite (0600, ciphertext cache)
+├── internal/source/     # the source registry: local (default) and sync
+├── internal/syncing/    # applying server changes to the local cache
+├── internal/testowner/  # a software P-256 owner for tests and e2e
+└── e2e/                 # //go:build e2e end-to-end tests
 ```
 
-验收时用固定夹具：夹具里的明文不得出现在 `list`、`get`、`exec` 的 stdout/stderr 里，包括 base64、hex 和 URL 编码。
+Accept against fixed fixtures: the fixture plaintext must not appear in the stdout/stderr of `list`, `get` or `exec`, including base64, hex and URL encodings.
