@@ -71,7 +71,14 @@ func (s *Server) handlePairRegister(w http.ResponseWriter, r *http.Request) {
 		ProposedName:  req.ProposedName,
 		ExpiresAt:     now.Add(PairSessionTTL).UnixMilli(),
 	}
-	if err := s.st.PutPairSession(r.Context(), ps); err != nil {
+	// Drop long-dead registrations so the table stays bounded.
+	_ = s.st.DeleteExpiredPairSessions(r.Context(), now.Add(-time.Hour).UnixMilli())
+	if err := s.st.PutPairSession(r.Context(), ps); errors.Is(err, store.ErrPairConsumed) {
+		// A nonce is one-shot: re-registering a used one answers like any
+		// other dead pairing (§6.18).
+		writeError(w, "pair_expired")
+		return
+	} else if err != nil {
 		writeError(w, "internal")
 		return
 	}

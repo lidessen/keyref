@@ -50,8 +50,13 @@ func (s *Server) handlePutDelegation(w http.ResponseWriter, r *http.Request) {
 	// Verify the §3.10 transcript shape and the owner signature under
 	// the CALLING owner's key (which the directory already pinned — the
 	// same trust anchor §6.15 uses for directory updates).
-	if _, err := wire.ParseDelegationTranscript(req.DelegationSigned, ac.vault.ID); err != nil {
+	parsed, err := wire.ParseDelegationTranscript(req.DelegationSigned, ac.vault.ID)
+	if err != nil {
 		writeError(w, "invalid_field")
+		return
+	}
+	if parsed.DelegationRevision != uint64(req.DelegationRevision) {
+		writeError(w, "invalid_field") // structured fields must match the bytes
 		return
 	}
 	if err := wire.VerifyOwnerSignature(req.DelegationSigned, req.Signature, ac.device.SignPublicKey); err != nil {

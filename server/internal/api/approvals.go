@@ -103,13 +103,10 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "bad_signature")
 		return
 	}
-	pending, err := s.st.CountApprovalsByStatus(r.Context(), ac.vault.ID, wire.ApprovalStatusPending)
-	if err != nil {
+	// Abandoned approvals (CLI never polled) must not hold the ceiling or
+	// the one-live-approval-per-message rule below.
+	if err := s.st.ExpirePendingApprovals(r.Context(), ac.vault.ID, nowMs); err != nil {
 		writeError(w, "internal")
-		return
-	}
-	if pending >= MaxPendingApprovals {
-		writeError(w, "quota_exceeded")
 		return
 	}
 	// One live approval per MESSAGE subject (design §14.3: a message
@@ -144,11 +141,15 @@ func (s *Server) handleApprovalCreate(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:             req.ExpiresAt,
 		CreatedAt:             nowMs,
 	}
-	if err := s.st.InsertApproval(r.Context(), a); err != nil {
+	// Count + insert + change append are one transaction, so concurrent
+	// creates cannot exceed the per-vault ceiling.
+	if err := s.st.InsertApprovalCapped(r.Context(), a, MaxPendingApprovals, nowMs); errors.Is(err, store.ErrApprovalCapReached) {
+		writeError(w, "quota_exceeded")
+		return
+	} else if err != nil {
 		writeError(w, "internal")
 		return
 	}
-	s.appendApprovalChange(r, ac.vault.ID, a.ID, nowMs)
 	// Best-effort APNs wake-up for the owner devices (design §8.3
 	// Phase 2). Runs after the row and its change are durable; failures
 	// are logged inside and never reach the approval creator.
@@ -191,6 +192,10 @@ func (s *Server) handleApprovalList(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		writeError(w, "forbidden")
+		return
+	}
+	if err := s.st.ExpirePendingApprovals(r.Context(), ac.vault.ID, s.cfg.Now().UnixMilli()); err != nil {
+		writeError(w, "internal")
 		return
 	}
 	rows, err := s.st.ListApprovals(r.Context(), ac.vault.ID, status)

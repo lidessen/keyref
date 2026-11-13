@@ -16,6 +16,7 @@ import (
 var (
 	ErrApprovalNotPending = errors.New("store: approval is not pending")
 	ErrApprovalExpired    = errors.New("store: approval expired")
+	ErrApprovalCapReached = errors.New("store: pending approval ceiling reached")
 )
 
 const approvalCols = `approval_id, vault_id, cli_device_id, item_id, subject,
@@ -157,9 +158,21 @@ func txAppendApprovalChange(ctx context.Context, tx *sql.Tx, vaultID, approvalID
 // the approval change.
 func (s *Store) DecideApproval(ctx context.Context, vaultID, approvalID, decisionDeviceID string,
 	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
-	return s.WithTx(ctx, func(tx *sql.Tx) error {
-		return s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now)
+	var lateDecision bool
+	err := s.WithTx(ctx, func(tx *sql.Tx) error {
+		expired, err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now)
+		if err != nil {
+			return err
+		}
+		if expired {
+			lateDecision = true
+		}
+		return nil
 	})
+	if err == nil && lateDecision {
+		return ErrApprovalNotPending
+	}
+	return err
 }
 
 // DecideApprovalForMessage is DecideApproval plus the same-transaction
@@ -169,23 +182,31 @@ func (s *Store) DecideApproval(ctx context.Context, vaultID, approvalID, decisio
 // message that is no longer active fails with ErrApprovalNotPending.
 func (s *Store) DecideApprovalForMessage(ctx context.Context, vaultID, approvalID, messageID, decisionDeviceID string,
 	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
-	return s.WithTx(ctx, func(tx *sql.Tx) error {
+	var lateDecision bool
+	err := s.WithTx(ctx, func(tx *sql.Tx) error {
 		if approved {
 			var status string
+			var msgExpiresAt int64
 			err := tx.QueryRowContext(ctx,
-				`SELECT status FROM messages WHERE vault_id = ? AND message_id = ?`,
-				vaultID, messageID).Scan(&status)
+				`SELECT status, expires_at FROM messages WHERE vault_id = ? AND message_id = ?`,
+				vaultID, messageID).Scan(&status, &msgExpiresAt)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrApprovalNotPending
 			} else if err != nil {
 				return fmt.Errorf("store: decide message approval: read message: %w", err)
 			}
-			if status != wire.MessageStatusActive {
+			// An expired message is as good as gone (design §14.5).
+			if status != wire.MessageStatusActive || msgExpiresAt <= now {
 				return ErrApprovalNotPending
 			}
 		}
-		if err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now); err != nil {
+		expired, err := s.decideApprovalTx(ctx, tx, vaultID, approvalID, decisionDeviceID, approved, oneTimeWrap, expiresAt, now)
+		if err != nil {
 			return err
+		}
+		if expired {
+			lateDecision = true
+			return nil
 		}
 		if approved {
 			if _, err := tx.ExecContext(ctx,
@@ -196,23 +217,39 @@ func (s *Store) DecideApprovalForMessage(ctx context.Context, vaultID, approvalI
 		}
 		return nil
 	})
+	if err == nil && lateDecision {
+		return ErrApprovalNotPending
+	}
+	return err
 }
 
 // decideApprovalTx is the shared body of DecideApproval: it assumes an
-// open transaction and appends the approval change inside it.
+// open transaction and appends the approval change inside it. A pending
+// row already past its expires_at is flipped to expired (and the change
+// appended) instead of decided; expired=true tells the caller to commit
+// that flip and then report ErrApprovalNotPending.
 func (s *Store) decideApprovalTx(ctx context.Context, tx *sql.Tx, vaultID, approvalID, decisionDeviceID string,
-	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) error {
+	approved bool, oneTimeWrap []byte, expiresAt int64, now int64) (expired bool, err error) {
 	var status string
-	err := tx.QueryRowContext(ctx,
-		`SELECT status FROM approvals WHERE approval_id = ? AND vault_id = ?`,
-		approvalID, vaultID).Scan(&status)
+	var rowExpiresAt int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT status, expires_at FROM approvals WHERE approval_id = ? AND vault_id = ?`,
+		approvalID, vaultID).Scan(&status, &rowExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
+		return false, ErrNotFound
 	} else if err != nil {
-		return fmt.Errorf("store: decide approval: read: %w", err)
+		return false, fmt.Errorf("store: decide approval: read: %w", err)
 	}
 	if status != wire.ApprovalStatusPending {
-		return ErrApprovalNotPending
+		return false, ErrApprovalNotPending
+	}
+	if rowExpiresAt < now {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE approvals SET status = ? WHERE approval_id = ? AND vault_id = ? AND status = ?`,
+			wire.ApprovalStatusExpired, approvalID, vaultID, wire.ApprovalStatusPending); err != nil {
+			return false, fmt.Errorf("store: decide approval: expire: %w", err)
+		}
+		return true, txAppendApprovalChange(ctx, tx, vaultID, approvalID, now)
 	}
 	newStatus := wire.ApprovalStatusDenied
 	if approved {
@@ -222,9 +259,9 @@ func (s *Store) decideApprovalTx(ctx context.Context, tx *sql.Tx, vaultID, appro
 		`UPDATE approvals SET status = ?, one_time_wrap = ?, expires_at = ?, decision_device_id = ?
 WHERE approval_id = ? AND vault_id = ? AND status = ?`,
 		newStatus, oneTimeWrap, expiresAt, decisionDeviceID, approvalID, vaultID, wire.ApprovalStatusPending); err != nil {
-		return fmt.Errorf("store: decide approval: %w", err)
+		return false, fmt.Errorf("store: decide approval: %w", err)
 	}
-	return txAppendApprovalChange(ctx, tx, vaultID, approvalID, now)
+	return false, txAppendApprovalChange(ctx, tx, vaultID, approvalID, now)
 }
 
 // ExpireApproval flips one pending row to expired and appends the
@@ -342,4 +379,70 @@ WHERE vault_id = ? AND status = ?`, vaultID, wire.ApprovalStatusPending).Scan(&n
 		return 0, fmt.Errorf("store: pending approval bytes: %w", err)
 	}
 	return n, nil
+}
+
+// expirePendingTx flips a vault's pending rows past their expires_at to
+// expired and appends one approval change per row, inside tx.
+func expirePendingTx(ctx context.Context, tx *sql.Tx, vaultID string, now int64) error {
+	rows, err := tx.QueryContext(ctx,
+		`UPDATE approvals SET status = ? WHERE vault_id = ? AND status = ? AND expires_at < ?
+RETURNING approval_id`,
+		wire.ApprovalStatusExpired, vaultID, wire.ApprovalStatusPending, now)
+	if err != nil {
+		return fmt.Errorf("store: expire pending approvals: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, id := range ids {
+		if err := txAppendApprovalChange(ctx, tx, vaultID, id, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExpirePendingApprovals expires a vault's pending approvals whose
+// deadline has passed, so abandoned rows cannot hold the pending ceiling.
+func (s *Store) ExpirePendingApprovals(ctx context.Context, vaultID string, now int64) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error { return expirePendingTx(ctx, tx, vaultID, now) })
+}
+
+// InsertApprovalCapped expires stale pending rows, counts the remaining
+// pending ones and inserts a in ONE transaction, so concurrent creates
+// cannot exceed maxPending. ErrApprovalCapReached when the cap is full.
+func (s *Store) InsertApprovalCapped(ctx context.Context, a *Approval, maxPending int64, now int64) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		if err := expirePendingTx(ctx, tx, a.VaultID, now); err != nil {
+			return err
+		}
+		var n int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM approvals WHERE vault_id = ? AND status = ?`,
+			a.VaultID, wire.ApprovalStatusPending).Scan(&n); err != nil {
+			return fmt.Errorf("store: count approvals: %w", err)
+		}
+		if n >= maxPending {
+			return ErrApprovalCapReached
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO approvals (`+approvalCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			a.ID, a.VaultID, a.CLIDeviceID, a.ItemID, a.Subject, a.CLIEphemeralPublicKey,
+			a.RequestCiphertext, a.RequestSignature, a.Status, a.OneTimeWrap,
+			a.ExpiresAt, a.CreatedAt, a.DecisionDeviceID); err != nil {
+			return fmt.Errorf("store: insert approval: %w", err)
+		}
+		return txAppendApprovalChange(ctx, tx, a.VaultID, a.ID, now)
+	})
 }

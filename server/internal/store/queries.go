@@ -216,6 +216,8 @@ func (s *Store) DeleteVaultCascade(ctx context.Context, vaultID string) error {
 			`DELETE FROM audit_events WHERE vault_id = ?`,
 			`DELETE FROM changes WHERE vault_id = ?`,
 			`DELETE FROM items WHERE vault_id = ?`,
+			`DELETE FROM message_usage_daily WHERE device_id IN (SELECT device_id FROM devices WHERE vault_id = ?)`,
+			`DELETE FROM messages WHERE vault_id = ?`,
 			`DELETE FROM usage_daily WHERE vault_id = ?`,
 			`DELETE FROM devices WHERE vault_id = ?`,
 			`DELETE FROM vaults WHERE vault_id = ?`,
@@ -1110,17 +1112,36 @@ func (s *Store) HasUsageSince(ctx context.Context, key, day string) (bool, error
 // ---------------------------------------------------------------------------
 // pair sessions
 
-// PutPairSession upserts a pairing registration row (protocol §6.16).
+// PutPairSession inserts a pairing registration row (protocol §6.16). A
+// nonce is one-shot: if a row for the nonce hash already exists (pending,
+// consumed or expired and not yet swept) the register fails with
+// ErrPairConsumed, so a completed pairing is never un-consumed and a
+// pending row's keys are never overwritten.
 func (s *Store) PutPairSession(ctx context.Context, ps *PairSession) error {
-	_, err := s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO pair_sessions (nonce_hash, hpke_public_key, sign_public_key, proposed_name, expires_at, consumed_at, result_json)
 VALUES (?,?,?,?,?,NULL,NULL)
-ON CONFLICT (nonce_hash) DO UPDATE SET hpke_public_key = excluded.hpke_public_key,
-sign_public_key = excluded.sign_public_key, proposed_name = excluded.proposed_name,
-expires_at = excluded.expires_at, consumed_at = NULL, result_json = NULL`,
+ON CONFLICT (nonce_hash) DO NOTHING`,
 		ps.NonceHash, ps.HPKEPublicKey, ps.SignPublicKey, ps.ProposedName, ps.ExpiresAt)
 	if err != nil {
 		return fmt.Errorf("store: put pair session: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: put pair session: %w", err)
+	}
+	if n == 0 {
+		return ErrPairConsumed
+	}
+	return nil
+}
+
+// DeleteExpiredPairSessions drops pairing rows whose expiry is older than
+// before (callers pass now minus a grace window so a just-expired nonce
+// still answers pair_expired rather than vanishing mid-flow).
+func (s *Store) DeleteExpiredPairSessions(ctx context.Context, before int64) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM pair_sessions WHERE expires_at < ?`, before); err != nil {
+		return fmt.Errorf("store: delete expired pair sessions: %w", err)
 	}
 	return nil
 }
