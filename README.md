@@ -17,6 +17,7 @@ The agent writes the stable reference `openai-prod`, not the secret itself. `key
 | --- | --- |
 | [docs/design.md](docs/design.md) | The full design (Chinese) |
 | [docs/protocol.md](docs/protocol.md) | The wire contract: endpoints, request/response examples, exact transcript byte layout |
+| [PROJECT-MAP.md](PROJECT-MAP.md) | Project map (Chinese): goals, boundaries, mechanisms, risks and health |
 | [server/](server/) | Ciphertext sync service, Go + SQLite; the hosted and self-hosted deployments are the same binary |
 | [cli/](cli/) | The `keyref` CLI for agents, Go (same language as the server since v0.4). One command surface over both credential sources |
 | [ios/](ios/) | The iOS owner app, Swift / SwiftUI, implemented |
