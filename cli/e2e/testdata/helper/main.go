@@ -20,6 +20,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "provider-env" {
+		os.Exit(providerEnvironmentProbe(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "print-env" {
 		fmt.Printf("K=%s\n", os.Getenv("K"))
 		return

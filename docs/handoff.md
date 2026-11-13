@@ -30,6 +30,8 @@
 
 - **S1/S2 独立复核收尾（2026-11-14）。** 两位 fresh-context reviewer 分别复核 `0047831` 和 `9eca165`。S2 发现 URL userinfo 可绕过旧 `allowedHosts` 正则、旧库迁移会保存不完整 meta、并发首开和 Stat 回填存在竞态；已改为完整 URL 解析，错误不含原 URL，schema 迁移串行化，Stat 只读，Use 解密后按旧密文条件回填真实 meta。读写共用 policy 校验，读取 meta 有界。补回归覆盖 userinfo/端口/IPv6/坏 URL、拒绝前不启动子进程、真实 CLI 在坏 secret 密文下仍可 get/list、替换清空策略、并发首开、替换/删除不被回填覆盖、已保存降级 meta 的修复、写入上限回滚。S1 补拒绝输入/读失败清零和脱敏 Write 失败回调测试。四模块 vet/test、独立模块构建、受影响三包 race、macOS 全量 e2e 212.436s、Linux 全量 e2e 228.544s 通过；最后的帮助文案订正另跑 CLI vet/test/build。审查后的修复由本窗口复验，未宣称 reviewer 已二次验收。后续计划及未关闭债务见 [K1 计划](k1.md) 与 [K1 自查](k1-self-check.md)。
 
+- **K1 最小注入的 Keyref 侧契约（2026-11-14）。** 新增 `TestProviderEnvironmentContract`：运行时生成 provider 值和本地主密钥，真实 CLI 启动测试消费者，回环服务核对认证 header；覆盖 JEV/OPENAI/GEMINI 三种环境名、父环境同名值覆盖、显式配置/状态传递、主密钥与无关凭证不继承、stdout 原值及 stderr base64 脱敏；缺失 ref、锁定、错误消费者分别以 11/12/10 拒绝且不启动子进程。只扫描该夹具的隔离文件，不宣称覆盖真实 Neowind 的持久输出。已交付固定 hash 的 Keyref 二进制给 Neowind 项目窗；真实消费和落盘证据待对方到安全点提供。可重跑命令与两侧状态见 [注入验收记录](k1-injection-evidence.md)。
+
 ## 1. 已经提交的修复
 
 | 提交 | 范围 | 验证情况 |

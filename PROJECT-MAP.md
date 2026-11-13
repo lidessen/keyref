@@ -1,7 +1,7 @@
 # keyref 项目地图
 
 - 状态：current
-- 最后核对：acb0aba / 2026-11-14
+- 最后核对：7979b0f（生产代码基线） / 2026-11-14
 - 维护者：keyref 项目窗
 - 战略健康：需关注 —— 注入与脱敏主线已可用，local 的 reveal 确认和项目授权仍不足以支撑 K1 整体承诺。
 - 用途：给技术型决策者判断项目有没有走歪；具体合同与验收证据见链接文档。
@@ -34,7 +34,7 @@
 
 - 合同：设计与威胁模型在 `docs/design.md`，线协议在 `docs/protocol.md`；Go 的 `proto` 是字节参考，跨语言用黄金向量约束。
 - 验证：复用四模块 vet/test、独立模块构建和 CLI e2e；安全切片独立复核，发现用具体回归关闭。移动端沿用各自检查，不能以 CLI 结果代替移动端验收。
-- 协作：切片收敛后本地提交，推送单独确认，历史保持线性；Workcells 全局停用期间直接开发、验证与记录，不依赖其命令或守护进程。
+- 协作：切片收敛后本地提交，推送单独确认，历史保持线性；本轮 K1 直接开发、验证与记录，不依赖 Workcells 的命令或守护进程。
 - 知识：规格、交接和自查留在仓库；地图只提供治理入口，协调消息只传引用与证据，不传值。
 
 ## 5. 核心机制与命令
@@ -68,4 +68,4 @@
 
 - 架构 / 合同：[设计](docs/design.md)、[线协议](docs/protocol.md)、[iOS 交互](docs/ios-ui.md)
 - 命令 / 库：[CLI](cli/README.md)、[本地库](cli/local/README.md)
-- 改造 / 证据：[交接](docs/handoff.md)、[K1 计划](docs/k1.md)、[K1 自查](docs/k1-self-check.md)、[迁移回归](cli/local/migration_test.go)、[CLI e2e](cli/e2e/)
+- 改造 / 证据：[交接](docs/handoff.md)、[K1 计划](docs/k1.md)、[K1 自查](docs/k1-self-check.md)、[注入证据](docs/k1-injection-evidence.md)、[迁移回归](cli/local/migration_test.go)、[CLI e2e](cli/e2e/)
