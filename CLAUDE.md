@@ -105,7 +105,7 @@ scripts/dev/android-build.sh testDebugUnitTest   # golden-vector gate (design §
 scripts/dev/android-build.sh lintDebug           # must report 0 errors
 ```
 
-The script points `JAVA_HOME` at Homebrew's OpenJDK 17 — Gradle 8.9 cannot run on Android Studio's bundled JBR 25 — and `ANDROID_HOME` at `~/Library/Android/sdk`. `CryptoVectorsTest` asserts the transcripts, the §3.13 pairing MAC, the AEAD blob and both HPKE KEMs byte-for-byte against `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`; a Kotlin failure means the code drifted, never the fixture. Running the app still needs a real phone (SMS broadcasts are not delivered on a simulator), so the pairing → seal → upload loop has not been watched end to end here.
+The script points `JAVA_HOME` at Homebrew's OpenJDK 21 — Gradle 8.9 supports Java ≤ 22 and rejects Android Studio's bundled JBR 25 — and `ANDROID_HOME` at `~/Library/Android/sdk`. `CryptoVectorsTest` asserts the transcripts, the §3.13 pairing MAC, the AEAD blob and both HPKE KEMs byte-for-byte against `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`; a Kotlin failure means the code drifted, never the fixture. Running the app still needs a real phone (SMS broadcasts are not delivered on a simulator), so the pairing → seal → upload loop has not been watched end to end here.
 
 ## Architecture
 
