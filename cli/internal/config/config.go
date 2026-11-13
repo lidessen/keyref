@@ -30,11 +30,17 @@ const EnvHome = "KEYREF_HOME"
 // serverFile holds the origin inside the data directory.
 const serverFile = "server.conf"
 
+// lockFile is the `keyref lock` flag. It lives in the data directory,
+// never in the sync cache: a local source must not depend on any sync
+// file (design v0.10 §17.8).
+const lockFile = "locked"
+
 // Paths bundles the resolved CLI locations.
 type Paths struct {
 	Dir        string // 0700 data directory
 	ServerFile string // origin config file (0600)
 	CacheFile  string // cache.sqlite path (0600, handled by store)
+	LockFile   string // `keyref lock` flag (0600)
 }
 
 // Resolve returns the data-directory layout, creating the directory
@@ -58,6 +64,7 @@ func Resolve() (Paths, error) {
 		Dir:        dir,
 		ServerFile: filepath.Join(dir, serverFile),
 		CacheFile:  filepath.Join(dir, "cache.sqlite"),
+		LockFile:   filepath.Join(dir, lockFile),
 	}, nil
 }
 

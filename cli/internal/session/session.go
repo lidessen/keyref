@@ -24,12 +24,7 @@ const (
 	KVExpiresAt = "session_expires_at"
 	KVDeviceID  = "device_id"
 	KVVaultID   = "vault_id"
-	KVLocked    = "locked"
 )
-
-// ErrLocked reports the persisted lock flag (`keyref lock`): the CLI
-// refuses to use the keyring to unwrap anything until `keyref unlock`.
-var ErrLocked = errors.New("session: locked")
 
 // ErrNotPaired reports a missing device id (never paired or unpaired).
 var ErrNotPaired = errors.New("session: device not paired")

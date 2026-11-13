@@ -68,6 +68,29 @@ func Key(ks keyring.SecretStore, vaultPath string, lookup func(string) (string, 
 	return key, nil
 }
 
+// KeySource reports where an existing vault's master key comes from,
+// without returning any key material: EnvMaster when the environment
+// provides it, "keyring" when the OS keyring holds the vault's entry,
+// ErrKey when neither does. `keyref status` reports this so a headless
+// installation can tell why a key is (not) available (design v0.10
+// §17.8).
+func KeySource(ks keyring.SecretStore, vaultPath string, lookup func(string) (string, bool)) (string, error) {
+	if _, present := lookup(EnvMaster); present {
+		return EnvMaster, nil
+	}
+	id, err := local.ReadStoreID(vaultPath)
+	if err != nil {
+		return "", fmt.Errorf("%w: could not read the vault's store id", ErrKey)
+	}
+	if _, err := ks.Get(keyringService, keyringPrefix+id); err != nil {
+		if errors.Is(err, keyring.ErrNotFound) {
+			return "", fmt.Errorf("%w: no keyring entry for this vault", ErrKey)
+		}
+		return "", fmt.Errorf("could not read the OS keyring: %w", err)
+	}
+	return "keyring", nil
+}
+
 // Create provisions a new local vault at spec.Path. A fresh master key
 // is generated — or taken from KEYREF_LOCAL_MASTER, which is never
 // copied into the keyring — the vault file is created exclusively, and

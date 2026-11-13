@@ -117,7 +117,7 @@ func openLocal(spec source.Spec) (*local.Store, error) {
 	if err := checkPrivateDir(spec.Path); err != nil {
 		return nil, err
 	}
-	if locked(mustStore()) {
+	if locked(mustPaths()) {
 		return nil, errLocalLocked
 	}
 	key, err := localvault.Key(secretStore(), spec.Path, os.LookupEnv)
@@ -183,8 +183,12 @@ func cmdSource(args []string) int {
 	case "add":
 		fs := flag.NewFlagSet("source add", flag.ContinueOnError)
 		path := fs.String("path", "", "absolute path of the new local vault")
+		prepareHelp(fs, args[1:])
 		rest, err := parseArgs(fs, args[1:])
-		if err != nil || len(rest) != 1 {
+		if err != nil {
+			return parseExit(err)
+		}
+		if len(rest) != 1 {
 			return fatalf(2, "usage: keyref source add NAME [--path /absolute/vault.db]")
 		}
 		spec, err := source.Add(p, rest[0], *path)
@@ -213,8 +217,9 @@ func cmdSource(args []string) int {
 func cmdInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	sourceName := fs.String("source", "", "source to operate on")
+	prepareHelp(fs, args)
 	if _, err := parseArgs(fs, args); err != nil {
-		return fatalf(2, "usage: keyref init [--source NAME]")
+		return parseExit(err)
 	}
 	spec, err := resolveSource(*sourceName)
 	if err != nil {
@@ -246,8 +251,12 @@ func cmdInit(args []string) int {
 func cmdSet(args []string) int {
 	fs := flag.NewFlagSet("set", flag.ContinueOnError)
 	sourceName := fs.String("source", "", "source to operate on")
+	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
-	if err != nil || len(rest) != 1 {
+	if err != nil {
+		return parseExit(err)
+	}
+	if len(rest) != 1 {
 		return fatalf(2, "usage: keyref set <ref> [--source NAME]  (the secret is read from stdin)")
 	}
 	spec, err := resolveSource(*sourceName)
@@ -277,8 +286,12 @@ func cmdSet(args []string) int {
 func cmdDelete(args []string) int {
 	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
 	sourceName := fs.String("source", "", "source to operate on")
+	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
-	if err != nil || len(rest) != 1 {
+	if err != nil {
+		return parseExit(err)
+	}
+	if len(rest) != 1 {
 		return fatalf(2, "usage: keyref delete <ref> [--source NAME]")
 	}
 	spec, err := resolveSource(*sourceName)

@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/lidessen/keyref/cli/internal/cache"
 )
 
 // mcpRoundTrip drives serveMCP with one JSON request line and decodes
@@ -42,6 +45,11 @@ func TestMCPInitializeAndToolsList(t *testing.T) {
 	info, _ := result["serverInfo"].(map[string]any)
 	if info["name"] != "keyref" {
 		t.Fatalf("serverInfo: %+v", info)
+	}
+	// design v0.10 §17.8: the MCP version is the same value as
+	// `keyref --version`.
+	if info["version"] != version {
+		t.Fatalf("serverInfo version = %v, want %q", info["version"], version)
 	}
 
 	resp, _ = mcpRoundTrip(t, srv, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
@@ -95,41 +103,58 @@ func TestMCPProtocolErrors(t *testing.T) {
 	}
 }
 
-// mcpTestEnv wires a temp KEYREF_HOME (unpaired store) so the tool
+// mcpTestEnv wires a temp KEYREF_HOME with no paired vault so the tool
 // layer can run without the e2e harness.
-func mcpTestEnv(t *testing.T) {
+func mcpTestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("KEYREF_HOME", dir)
 	t.Setenv("KEYREF_KEYRING_DIR", filepath.Join(dir, "keyring"))
 	t.Setenv("KEYREF_SERVER", "http://127.0.0.1:1") // nothing listens; tools must not hang
+	return dir
 }
 
+// mcpPairedEnv creates the cache.sqlite that `keyref pair` would leave
+// behind, so tool-call paths past the pairing check can be exercised.
+func mcpPairedEnv(t *testing.T) string {
+	t.Helper()
+	dir := mcpTestEnv(t)
+	st, err := cache.Open(dir)
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close cache: %v", err)
+	}
+	return dir
+}
+
+// TestMCPToolListUnpaired pins issue #7: a tool call on a data
+// directory with no paired vault is a result, and it does not create a
+// cache.sqlite.
 func TestMCPToolListUnpaired(t *testing.T) {
-	mcpTestEnv(t)
+	dir := mcpTestEnv(t)
 	srv := &mcpServer{}
 	resp, _ := mcpRoundTrip(t, srv, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list","arguments":{}}}`)
 	if resp.Error != nil {
 		t.Fatalf("tools/call must map failures to results, not JSON-RPC errors: %+v", resp)
 	}
 	result := resp.Result.(map[string]any)
-	if result["isError"] == true {
-		// An empty-but-unpaired vault still lists (no items visible).
-		t.Fatalf("list on an unpaired store should succeed with an empty set: %+v", result)
+	if result["isError"] != true {
+		t.Fatalf("list on an unpaired install must be an error result: %+v", result)
 	}
 	content, _ := result["content"].([]any)
 	text, _ := content[0].(map[string]any)["text"].(string)
-	var entries []map[string]any
-	if err := json.Unmarshal([]byte(text), &entries); err != nil || entries == nil {
-		t.Fatalf("list result is not a JSON array: %q", text)
+	if !strings.Contains(text, "not paired") || !strings.Contains(text, "exit_code: 1") {
+		t.Fatalf("unpaired list result: %q", text)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("expected an empty list: %q", text)
+	if _, err := os.Stat(filepath.Join(dir, "cache.sqlite")); !os.IsNotExist(err) {
+		t.Fatalf("an MCP tool call created cache.sqlite on a local-only installation")
 	}
 }
 
 func TestMCPToolGetUnknownRef(t *testing.T) {
-	mcpTestEnv(t)
+	mcpPairedEnv(t)
 	srv := &mcpServer{}
 	resp, _ := mcpRoundTrip(t, srv, `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get","arguments":{"ref":"nope"}}}`)
 	result := resp.Result.(map[string]any)
@@ -157,13 +182,13 @@ func TestMCPToolExecUnpairedMapsExitCode(t *testing.T) {
 	}
 	content := result["content"].([]any)
 	text := content[0].(map[string]any)["text"].(string)
-	if !strings.Contains(text, "exit_code: 1") {
-		t.Fatalf("exec failure must carry an exit code: %q", text)
+	if !strings.Contains(text, "exit_code: 1") || !strings.Contains(text, "not paired") {
+		t.Fatalf("unpaired exec must carry the reason and an exit code: %q", text)
 	}
 }
 
 func TestMCPToolExecBadArguments(t *testing.T) {
-	mcpTestEnv(t)
+	mcpPairedEnv(t)
 	srv := &mcpServer{}
 	// Empty argv.
 	resp, _ := mcpRoundTrip(t, srv, `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"exec","arguments":{"argv":[]}}}`)

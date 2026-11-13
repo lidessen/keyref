@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/lidessen/keyref/cli/internal/approval"
+	"github.com/lidessen/keyref/cli/internal/atomicfile"
 	"github.com/lidessen/keyref/cli/internal/audit"
 	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/client"
@@ -27,6 +28,7 @@ import (
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/exitcode"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
+	"github.com/lidessen/keyref/cli/internal/localvault"
 	"github.com/lidessen/keyref/cli/internal/meta"
 	"github.com/lidessen/keyref/cli/internal/pair"
 	"github.com/lidessen/keyref/cli/internal/secret"
@@ -34,6 +36,11 @@ import (
 	"github.com/lidessen/keyref/cli/internal/source"
 	"github.com/lidessen/keyref/cli/internal/syncing"
 )
+
+// version is the CLI version printed by `keyref --version` and reported
+// as the MCP serverInfo version. Release builds override it with
+// -ldflags "-X main.version=..."; an unversioned build reports "dev".
+var version = "dev"
 
 func main() {
 	// Rows skipped by the v2 F verification surface on stderr without
@@ -109,13 +116,16 @@ func dispatch(cmd string, args []string) int {
 	case "status":
 		return cmdStatus(args)
 	case "lock":
-		return cmdLock()
+		return cmdLock(args)
 	case "unlock":
-		return cmdUnlock()
+		return cmdUnlock(args)
 	case "exec":
 		return cmdExec(args)
 	case "mcp":
 		return cmdMCP(args)
+	case "version", "-v", "--version":
+		fmt.Println("keyref", version)
+		return 0
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 		return 0
@@ -150,6 +160,7 @@ commands:
   mcp                     serve list/get/exec over stdio as MCP JSON-RPC
   decider run             auto-approve SMS consumptions inside the owner's
                             delegation policy (design v0.8 §14.8)
+  version                 print the version (also --version)
 
 sources:
   local                   the standalone offline vault (the default)
@@ -233,14 +244,27 @@ func newClient(st *cache.Store, id *device.Identity) *client.Client {
 	return cl
 }
 
-func locked(st *cache.Store) bool {
-	v, ok, err := st.GetKV(session.KVLocked)
-	if err != nil {
-		// Fail closed: an unreadable lock state must not open every
-		// unwrap path (review 2026-11).
+func locked(p config.Paths) bool {
+	_, err := os.Stat(p.LockFile)
+	if err == nil {
 		return true
 	}
-	return ok && string(v) == "1"
+	// Fail closed: anything but a clean "flag file missing" keeps the
+	// unwrap paths closed (review 2026-11).
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// existingStore opens the paired vault's cache without creating it.
+// Read-only commands (list, get, status) must not grow a cache.sqlite
+// (design v0.10 §17.8, issue #7); a data directory without one is not
+// paired.
+func existingStore(p config.Paths) (*cache.Store, error) {
+	if _, err := os.Stat(p.CacheFile); errors.Is(err, os.ErrNotExist) {
+		return nil, errNotPaired
+	} else if err != nil {
+		return nil, err
+	}
+	return cache.Open(p.Dir)
 }
 
 // ---- server ----
@@ -268,8 +292,9 @@ func cmdPair(args []string) int {
 	name := fs.String("name", defaultDeviceName(), "device label shown on iOS")
 	printPayload := fs.Bool("print-payload", false, "also print the raw QR payload (debug/e2e)")
 	kind := fs.String("kind", "cli", "device kind announced in the QR: cli | decider")
+	prepareHelp(fs, args)
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return parseExit(err)
 	}
 	if *kind != "cli" && *kind != "decider" {
 		return fatalf(2, "--kind must be cli or decider")
@@ -366,8 +391,9 @@ func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	format := fs.String("format", "text", "text | json")
 	sourceName := fs.String("source", "", "source to operate on")
+	prepareHelp(fs, args)
 	if _, err := parseArgs(fs, args); err != nil {
-		return 2
+		return parseExit(err)
 	}
 	spec, err := resolveSource(*sourceName)
 	if err != nil {
@@ -376,8 +402,15 @@ func cmdList(args []string) int {
 	if spec.Kind == source.KindLocal {
 		return fatalf(2, "local sources store refs one-way (HMAC), so they cannot be listed; use keyref get <ref>")
 	}
-	st := mustStore()
-	if locked(st) {
+	st, err := existingStore(mustPaths())
+	if errors.Is(err, errNotPaired) {
+		return fatalf(1, "not paired; run keyref pair first")
+	}
+	if err != nil {
+		return fatalf(1, "%v", err)
+	}
+	defer st.Close()
+	if locked(mustPaths()) {
 		return fatalf(exitcode.SessionLocked, "session is locked; run keyref unlock")
 	}
 	id := mustIdentity()
@@ -407,8 +440,12 @@ func cmdGet(args []string) int {
 	format := fs.String("format", "text", "text | json")
 	reveal := fs.Bool("reveal", false, "print the raw secret bytes (local sources only)")
 	sourceName := fs.String("source", "", "source to operate on")
+	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
-	if err != nil || len(rest) != 1 {
+	if err != nil {
+		return parseExit(err)
+	}
+	if len(rest) != 1 {
 		return fatalf(2, "usage: keyref get <ref> [--format json] [--reveal] [--source NAME]")
 	}
 	ref := rest[0]
@@ -422,8 +459,15 @@ func cmdGet(args []string) int {
 	if *reveal {
 		return fatalf(2, "--reveal is not available on the paired vault: the CLI never prints a synced secret")
 	}
-	st := mustStore()
-	if locked(st) {
+	st, err := existingStore(mustPaths())
+	if errors.Is(err, errNotPaired) {
+		return fatalf(1, "not paired; run keyref pair first")
+	}
+	if err != nil {
+		return fatalf(1, "%v", err)
+	}
+	defer st.Close()
+	if locked(mustPaths()) {
 		return fatalf(exitcode.SessionLocked, "session is locked; run keyref unlock")
 	}
 	id := mustIdentity()
@@ -466,11 +510,91 @@ func truncate(s string, n int) string {
 // ---- status ----
 
 func cmdStatus(args []string) int {
-	st := mustStore()
-	if spec, err := resolveSource(""); err == nil {
-		fmt.Printf("source: %s\n", spec.Name)
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	all := fs.Bool("all", false, "report every configured source")
+	prepareHelp(fs, args)
+	if _, err := parseArgs(fs, args); err != nil {
+		return parseExit(err)
 	}
-	fmt.Printf("server: %s\n", config.Origin(mustPaths()))
+	p := mustPaths()
+	var specs []source.Spec
+	if *all {
+		cfg, err := source.Load(p)
+		if err != nil {
+			return fatalf(1, "%v", err)
+		}
+		specs = cfg.Specs()
+	} else {
+		spec, err := resolveSource("")
+		if err != nil {
+			return fatalf(1, "%v", err)
+		}
+		specs = []source.Spec{spec}
+	}
+	code := 0
+	for i, spec := range specs {
+		if i > 0 {
+			fmt.Println()
+		}
+		if c := statusSource(p, spec); c != 0 {
+			code = c
+		}
+	}
+	return code
+}
+
+// statusSource reports one source (design v0.10 §17.8). Status is
+// read-only: it never creates a file it does not find — in particular no
+// cache.sqlite on a local-only installation.
+func statusSource(p config.Paths, spec source.Spec) int {
+	fmt.Printf("source: %s (%s)\n", spec.Name, spec.Kind)
+	if spec.Kind == source.KindLocal {
+		return statusLocal(p, spec)
+	}
+	return statusSync(p)
+}
+
+// statusLocal reports the vault file, where the master key comes from,
+// and the lock flag. A missing key is a state to report, not a command
+// failure.
+func statusLocal(p config.Paths, spec source.Spec) int {
+	switch _, err := os.Stat(spec.Path); {
+	case errors.Is(err, os.ErrNotExist):
+		fmt.Printf("vault: %s (not created yet; run keyref init --source %s)\n", spec.Path, spec.Name)
+		fmt.Println("key: none")
+	case err != nil:
+		return fatalf(1, "%v", err)
+	default:
+		fmt.Printf("vault: %s (exists)\n", spec.Path)
+		src, err := localvault.KeySource(secretStore(), spec.Path, os.LookupEnv)
+		switch {
+		case err == nil:
+			fmt.Printf("key: %s\n", src)
+		case errors.Is(err, localvault.ErrKey):
+			fmt.Printf("key: missing (no keyring entry for this vault; set %s)\n", localvault.EnvMaster)
+		default:
+			fmt.Printf("key: unavailable (%v)\n", err)
+		}
+	}
+	fmt.Printf("locked: %s\n", yesNo(locked(p)))
+	return 0
+}
+
+// statusSync reports the server, pairing, session and grant expiry of
+// the paired vault. Without a cache it reports "not paired" instead of
+// creating one.
+func statusSync(p config.Paths) int {
+	fmt.Printf("server: %s\n", config.Origin(p))
+	st, err := existingStore(p)
+	if errors.Is(err, errNotPaired) {
+		fmt.Println("pairing: not paired")
+		fmt.Printf("session: %s\n", lockWord(locked(p)))
+		return 0
+	}
+	if err != nil {
+		return fatalf(1, "%v", err)
+	}
+	defer st.Close()
 	if vault, ok, _ := st.GetKV(session.KVVaultID); ok && len(vault) > 0 {
 		fmt.Printf("pairing: vault %s\n", string(vault))
 	} else {
@@ -481,11 +605,7 @@ func cmdStatus(args []string) int {
 			fmt.Printf("last sync: %s\n", time.UnixMilli(ms).Format(time.RFC3339))
 		}
 	}
-	if locked(st) {
-		fmt.Println("session: locked")
-	} else {
-		fmt.Println("session: unlocked")
-	}
+	fmt.Printf("session: %s\n", lockWord(locked(p)))
 	grants, err := st.Grants()
 	if err != nil {
 		return fatalf(1, "%v", err)
@@ -510,6 +630,20 @@ func cmdStatus(args []string) int {
 	return 0
 }
 
+func lockWord(locked bool) string {
+	if locked {
+		return "locked"
+	}
+	return "unlocked"
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
 func shortID(id string) string {
 	if len(id) <= 10 {
 		return id
@@ -519,18 +653,39 @@ func shortID(id string) string {
 
 // ---- lock / unlock ----
 
-func cmdLock() int {
-	st := mustStore()
-	if err := st.SetKV(session.KVLocked, []byte("1")); err != nil {
+func cmdLock(args []string) int {
+	fs := flag.NewFlagSet("lock", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(fs.Output(), "usage: keyref lock\n") }
+	prepareHelp(fs, args)
+	rest, err := parseArgs(fs, args)
+	if err != nil {
+		return parseExit(err)
+	}
+	if len(rest) != 0 {
+		return fatalf(2, "usage: keyref lock")
+	}
+	// The flag is a plain file in the data directory, not a row in the
+	// sync cache: a local source must not depend on sync state (design
+	// v0.10 §17.8, issue #7).
+	if err := atomicfile.Write(mustPaths().LockFile, []byte("1\n")); err != nil {
 		return fatalf(1, "%v", err)
 	}
 	fmt.Fprintln(os.Stderr, "locked: item keys will not be unwrapped until keyref unlock")
 	return 0
 }
 
-func cmdUnlock() int {
-	st := mustStore()
-	if err := st.SetKV(session.KVLocked, []byte("0")); err != nil {
+func cmdUnlock(args []string) int {
+	fs := flag.NewFlagSet("unlock", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(fs.Output(), "usage: keyref unlock\n") }
+	prepareHelp(fs, args)
+	rest, err := parseArgs(fs, args)
+	if err != nil {
+		return parseExit(err)
+	}
+	if len(rest) != 0 {
+		return fatalf(2, "usage: keyref unlock")
+	}
+	if err := os.Remove(mustPaths().LockFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fatalf(1, "%v", err)
 	}
 	fmt.Fprintln(os.Stderr, "unlocked")
@@ -558,8 +713,9 @@ func cmdExec(args []string) int {
 	fs.Var(&replies, "reply", "REGEX=REF type REF into the pty input when REGEX matches the pre-redaction output (needs --pty, approval item, allowCommands)")
 	timeoutSecs := fs.Int64("timeout", 120, "approval wait timeout in seconds (approval items)")
 	sourceName := fs.String("source", "", "source to operate on")
+	prepareHelp(fs, args)
 	if err := fs.Parse(args); err != nil {
-		return 2
+		return parseExit(err)
 	}
 	argv := fs.Args()
 	if len(argv) > 0 && argv[0] == "--" {
@@ -716,7 +872,7 @@ func runExecCore(opts execOptions) int {
 	if !paired {
 		return fatalf(1, "not paired; run keyref pair first")
 	}
-	if locked(st) {
+	if locked(mustPaths()) {
 		fmt.Fprintln(opts.Stderr, "keyref: session is locked; run keyref unlock")
 		return auditAttempt(exitcode.SessionLocked, "locked", nil)
 	}
@@ -1304,7 +1460,15 @@ func (m *multiFlag) Set(v string) error {
 // start without a review API: the design makes the review mandatory and
 // forbids a "nothing could check, so approve" branch.
 func cmdDecider(args []string) int {
-	if len(args) == 0 || args[0] != "run" {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: keyref decider run --review-api <url> [--once] [--interval 3s]")
+		return 2
+	}
+	if args[0] == "-h" || args[0] == "--help" {
+		fmt.Fprintln(os.Stdout, "usage: keyref decider run --review-api <url> [--once] [--interval 3s]")
+		return 0
+	}
+	if args[0] != "run" {
 		fmt.Fprintln(os.Stderr, "usage: keyref decider run --review-api <url> [--once] [--interval 3s]")
 		return 2
 	}
@@ -1312,8 +1476,9 @@ func cmdDecider(args []string) int {
 	reviewAPI := fs.String("review-api", "", "decision API URL (mandatory)")
 	once := fs.Bool("once", false, "run one poll cycle and exit")
 	interval := fs.Duration("interval", 3*time.Second, "poll interval (>= 2s, the server's polling floor)")
+	prepareHelp(fs, args[1:])
 	if err := fs.Parse(args[1:]); err != nil {
-		return 2
+		return parseExit(err)
 	}
 	if *reviewAPI == "" {
 		fmt.Fprintln(os.Stderr, "keyref: --review-api is required: the review gate cannot be disabled (design §14.8)")

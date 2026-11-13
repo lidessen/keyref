@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -176,14 +178,14 @@ func (s *mcpServer) dispatch(method string, params json.RawMessage) (any, *mcpEr
 			ProtocolVersion string `json:"protocolVersion"`
 		}
 		_ = json.Unmarshal(params, &p)
-		version := p.ProtocolVersion
-		if version == "" {
-			version = mcpProtocolVersion
+		protoVersion := p.ProtocolVersion
+		if protoVersion == "" {
+			protoVersion = mcpProtocolVersion
 		}
 		return map[string]any{
-			"protocolVersion": version,
+			"protocolVersion": protoVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "keyref", "version": "phase2"},
+			"serverInfo":      map[string]any{"name": "keyref", "version": version},
 			"instructions":    refNotSecret,
 		}, nil
 	case "notifications/initialized", "initialized":
@@ -259,11 +261,24 @@ func (s *mcpServer) toolsCall(params json.RawMessage) (result any, rpcErr *mcpEr
 	}
 }
 
+// errMCPNotPaired is what a tool call reports for a data directory with
+// no paired vault. MCP serves the paired vault only (§17.5's local mode
+// is not implemented), and it must not grow a cache.sqlite for a
+// local-only installation (issue #7).
+var errMCPNotPaired = errors.New("not paired; run keyref pair first")
+
 // ensureInit lazily opens the store and loads the device identity once
-// per MCP session.
+// per MCP session. It never creates the cache file: a tool call on an
+// unpaired installation is a result, not a new file on disk.
 func (s *mcpServer) ensureInit() error {
 	if s.init {
 		return nil
+	}
+	p := mustPaths()
+	if _, err := os.Stat(p.CacheFile); errors.Is(err, os.ErrNotExist) {
+		return errMCPNotPaired
+	} else if err != nil {
+		return err
 	}
 	st := mustStore()
 	id := mustIdentity()
@@ -279,7 +294,7 @@ func (s *mcpServer) toolList() (any, *mcpError) {
 	if err := s.ensureInit(); err != nil {
 		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
 	}
-	if locked(s.st) {
+	if locked(mustPaths()) {
 		return textResult("keyref: session is locked; run keyref unlock\nexit_code: 12", true), nil
 	}
 	entries, err := meta.Items(s.st, s.id)
@@ -311,7 +326,7 @@ func (s *mcpServer) toolGet(args json.RawMessage) (any, *mcpError) {
 	if err := dec.Decode(&p); err != nil || p.Ref == "" {
 		return textResult("keyref: get requires {\"ref\": \"...\"}\nexit_code: 2", true), nil
 	}
-	if locked(s.st) {
+	if locked(mustPaths()) {
 		return textResult("keyref: session is locked; run keyref unlock\nexit_code: 12", true), nil
 	}
 	e, err := meta.Lookup(s.st, s.id, p.Ref)
@@ -384,11 +399,16 @@ func approvalTimeoutFromSeconds(secs float64) time.Duration {
 // cmdMCP is the `keyref mcp` entry point. stdout is the JSON-RPC
 // channel; the CLI's own notices stay on stderr.
 func cmdMCP(args []string) int {
-	for _, a := range args {
-		if a == "-h" || a == "--help" {
-			fmt.Fprint(os.Stdout, "usage: keyref mcp\n\nServe the vault over stdio as an MCP JSON-RPC 2.0 server\n(tools: list, get, exec — pass refs, never secrets).\n")
-			return 0
-		}
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), "usage: keyref mcp\n\nServe the vault over stdio as an MCP JSON-RPC 2.0 server\n(tools: list, get, exec — pass refs, never secrets).\n")
+	}
+	prepareHelp(fs, args)
+	rest, err := parseArgs(fs, args)
+	if err != nil {
+		return parseExit(err)
+	}
+	if len(rest) != 0 {
 		return fatalf(2, "usage: keyref mcp")
 	}
 	exec.DisableCoreDumps()

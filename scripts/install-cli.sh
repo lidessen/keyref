@@ -15,7 +15,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "==> building keyref CLI"
-go build -C "$ROOT/cli" -trimpath -o "$TMP/keyref" ./cmd/keyref
+# `keyref --version` and the MCP serverInfo share this value. A source
+# checkout without tags reports the commit hash.
+VERSION="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)"
+go build -C "$ROOT/cli" -trimpath -ldflags "-X main.version=$VERSION" -o "$TMP/keyref" ./cmd/keyref
 
 echo "==> installing to $BIN_DIR/keyref"
 mkdir -p "$BIN_DIR"

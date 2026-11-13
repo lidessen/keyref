@@ -161,6 +161,34 @@ func TestMissingKeyIsAnError(t *testing.T) {
 	}
 }
 
+// TestKeySourceReportsWhereTheKeyLives pins `keyref status`'s view of
+// the master key (design v0.10 §17.8). It never reveals key material.
+func TestKeySourceReportsWhereTheKeyLives(t *testing.T) {
+	path, key := newVault(t)
+	id := mustID(t, path)
+
+	encoded, _ := envKey(t)
+	if src, err := KeySource(newFakeKeyring(), path, constLookup(encoded)); err != nil || src != EnvMaster {
+		t.Fatalf("environment source = %q, %v", src, err)
+	}
+
+	ks := newFakeKeyring()
+	ks.entries["keyref/"+keyringPrefix+id] = base64.StdEncoding.EncodeToString(key)
+	if src, err := KeySource(ks, path, noEnv); err != nil || src != "keyring" {
+		t.Fatalf("keyring source = %q, %v", src, err)
+	}
+
+	if _, err := KeySource(newFakeKeyring(), path, noEnv); !errors.Is(err, ErrKey) {
+		t.Fatalf("missing key source = %v", err)
+	}
+
+	// A vault that does not exist cannot have a key source either.
+	spec := newSpec(t)
+	if _, err := KeySource(ks, spec.Path, noEnv); !errors.Is(err, ErrKey) {
+		t.Fatalf("missing vault source = %v", err)
+	}
+}
+
 func TestCreateBindsTheKeyToTheStoreID(t *testing.T) {
 	spec := newSpec(t)
 	ks := newFakeKeyring()
