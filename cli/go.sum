@@ -20,6 +20,8 @@ github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/lidessen/keyref/proto v0.0.0-20261028164217-13ead31f2d53 h1:90GvAqTSw8ffGLEJO8KJXnZwQHZDdyXYL1azIw/woc0=
 github.com/lidessen/keyref/proto v0.0.0-20261028164217-13ead31f2d53/go.mod h1:byrtLNAUGVmQemrS1tz6qoKCoA4tAs7ntIK9ZyULm74=
+github.com/lidessen/keyref/proto v0.0.0-20261113110209-c610494cd11e h1:QvhwaRc5x81pr6wZpZEZneXQRUH1JzwV4fY5rVIYbPI=
+github.com/lidessen/keyref/proto v0.0.0-20261113110209-c610494cd11e/go.mod h1:byrtLNAUGVmQemrS1tz6qoKCoA4tAs7ntIK9ZyULm74=
 github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=
 github.com/mattn/go-isatty v0.0.24/go.mod h1:nMCL3Zebbrt45jsMDgnfIwz6ydEQApk5oEI3HqDio6A=
 github.com/ncruces/go-strftime v1.1.0 h1:vtPmPWMkb539RGV9WpWT9EwJGvrOCKvMNI4obWL47Hk=

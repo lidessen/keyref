@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/awnumar/memguard v0.23.0
-	github.com/lidessen/keyref/proto v0.0.0-20261028164217-13ead31f2d53
+	github.com/lidessen/keyref/proto v0.0.0-20261113110209-c610494cd11e
 	github.com/zalando/go-keyring v0.2.8
 	modernc.org/sqlite v1.61.0
 )
