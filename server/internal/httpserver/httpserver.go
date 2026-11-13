@@ -145,4 +145,7 @@ func cleanup(ctx context.Context, st *store.Store) {
 	if err := st.DeleteChangesOlderThan(ctx, before); err != nil {
 		log.Printf("httpserver: change-log cleanup: %v", err)
 	}
+	if err := st.DeleteExpiredPairSessions(ctx, time.Now().Add(-time.Hour).UnixMilli()); err != nil {
+		log.Printf("httpserver: pair-session cleanup: %v", err)
+	}
 }

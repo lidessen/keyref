@@ -63,7 +63,7 @@ func (s *Server) handlePostMessages(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.EnforceQuotas {
 		plan := quotas.EffectivePlan(ac.vault, nowMs)
 		if limits := s.quota.LimitsFor(plan); limits.MessagesPending != nil {
-			active, err := s.st.CountActiveMessagesByDevice(r.Context(), ac.vault.ID, ac.device.ID)
+			active, err := s.st.CountActiveMessagesByDevice(r.Context(), ac.vault.ID, ac.device.ID, nowMs)
 			if err != nil {
 				writeError(w, "internal")
 				return

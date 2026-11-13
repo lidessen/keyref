@@ -112,11 +112,12 @@ func (s *Store) DeleteExpiredMessages(ctx context.Context, vaultID string, now i
 
 // CountActiveMessagesByDevice counts a source device's active rows for
 // the per-device pending ceiling (design §14.7; hosted only).
-func (s *Store) CountActiveMessagesByDevice(ctx context.Context, vaultID, deviceID string) (int64, error) {
+// Rows already past expires_at do not count.
+func (s *Store) CountActiveMessagesByDevice(ctx context.Context, vaultID, deviceID string, now int64) (int64, error) {
 	var n int64
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM messages WHERE vault_id = ? AND source_device_id = ? AND status = ?`,
-		vaultID, deviceID, wire.MessageStatusActive).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM messages WHERE vault_id = ? AND source_device_id = ? AND status = ? AND expires_at > ?`,
+		vaultID, deviceID, wire.MessageStatusActive, now).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count active messages: %w", err)
 	}
 	return n, nil
