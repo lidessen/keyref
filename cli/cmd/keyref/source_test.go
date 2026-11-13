@@ -64,7 +64,7 @@ func TestResolveSourceFailsClosedOnUnreadableCache(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "cache.sqlite"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolveSource(""); err == nil {
+	if _, err := resolveSource(mustPaths(), ""); err == nil {
 		t.Fatal("resolveSource accepted an unreadable sync cache")
 	}
 	if _, err := os.Stat(source.Path(mustPaths())); !errors.Is(err, os.ErrNotExist) {

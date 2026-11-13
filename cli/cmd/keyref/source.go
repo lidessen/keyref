@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/lidessen/keyref/cli/internal/cache"
+	"github.com/lidessen/keyref/cli/internal/config"
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/exitcode"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
@@ -25,17 +26,22 @@ import (
 const maxLocalSecretBytes = 1 << 20
 
 // secretStore is the OS keyring, or the directory implementation the
-// tests and e2e runs point at.
+// tests and e2e runs point at. The MCP layer uses secretStoreOrError:
+// a tool call reports failures as results, never through a panic.
 func secretStore() keyring.SecretStore {
-	if dir := os.Getenv("KEYREF_KEYRING_DIR"); dir != "" {
-		ks, err := keyring.NewDirStore(dir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "keyref:", err)
-			panic(fatalExit{1})
-		}
-		return ks
+	ks, err := secretStoreOrError()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "keyref:", err)
+		panic(fatalExit{1})
 	}
-	return keyring.OSKeyring{}
+	return ks
+}
+
+func secretStoreOrError() (keyring.SecretStore, error) {
+	if dir := os.Getenv("KEYREF_KEYRING_DIR"); dir != "" {
+		return keyring.NewDirStore(dir)
+	}
+	return keyring.OSKeyring{}, nil
 }
 
 // resolveSource applies --source, KEYREF_SOURCE and the configured
@@ -43,8 +49,7 @@ func secretStore() keyring.SecretStore {
 // data directory: a vault paired before sources existed keeps the
 // paired vault, so upgrading never moves existing commands onto an
 // empty local vault.
-func resolveSource(override string) (source.Spec, error) {
-	p := mustPaths()
+func resolveSource(p config.Paths, override string) (source.Spec, error) {
 	if _, err := os.Stat(source.Path(p)); errors.Is(err, os.ErrNotExist) {
 		paired := false
 		// Only look for a paired vault when its cache exists: a
@@ -110,14 +115,14 @@ func localOpenError(err error) int {
 
 // openLocal opens a local source's vault. The master key is wiped as
 // soon as the backend has derived its own keys from it.
-func openLocal(spec source.Spec) (*local.Store, error) {
+func openLocal(p config.Paths, spec source.Spec) (*local.Store, error) {
 	if _, err := os.Stat(spec.Path); errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("local source %q has no vault yet; run `keyref init --source %s`", spec.Name, spec.Name)
 	}
 	if err := checkPrivateDir(spec.Path); err != nil {
 		return nil, err
 	}
-	if locked(mustPaths()) {
+	if locked(p) {
 		return nil, errLocalLocked
 	}
 	key, err := localvault.Key(secretStore(), spec.Path, os.LookupEnv)
@@ -165,7 +170,7 @@ func cmdSource(args []string) int {
 		return 0
 	case "default":
 		if len(args) == 1 {
-			spec, err := resolveSource("")
+			spec, err := resolveSource(p, "")
 			if err != nil {
 				return fatalf(1, "%v", err)
 			}
@@ -221,7 +226,8 @@ func cmdInit(args []string) int {
 	if _, err := parseArgs(fs, args); err != nil {
 		return parseExit(err)
 	}
-	spec, err := resolveSource(*sourceName)
+	p := mustPaths()
+	spec, err := resolveSource(p, *sourceName)
 	if err != nil {
 		return fatalf(1, "%v", err)
 	}
@@ -259,14 +265,15 @@ func cmdSet(args []string) int {
 	if len(rest) != 1 {
 		return fatalf(2, "usage: keyref set <ref> [--source NAME]  (the secret is read from stdin)")
 	}
-	spec, err := resolveSource(*sourceName)
+	p := mustPaths()
+	spec, err := resolveSource(p, *sourceName)
 	if err != nil {
 		return fatalf(1, "%v", err)
 	}
 	if spec.Kind != source.KindLocal {
 		return fatalf(2, "the paired vault is read-only for the CLI; create or edit items on iOS")
 	}
-	vault, err := openLocal(spec)
+	vault, err := openLocal(p, spec)
 	if err != nil {
 		return localOpenError(err)
 	}
@@ -294,14 +301,15 @@ func cmdDelete(args []string) int {
 	if len(rest) != 1 {
 		return fatalf(2, "usage: keyref delete <ref> [--source NAME]")
 	}
-	spec, err := resolveSource(*sourceName)
+	p := mustPaths()
+	spec, err := resolveSource(p, *sourceName)
 	if err != nil {
 		return fatalf(1, "%v", err)
 	}
 	if spec.Kind != source.KindLocal {
 		return fatalf(2, "the paired vault is read-only for the CLI; delete items on iOS")
 	}
-	vault, err := openLocal(spec)
+	vault, err := openLocal(p, spec)
 	if err != nil {
 		return localOpenError(err)
 	}
@@ -319,11 +327,11 @@ func cmdDelete(args []string) int {
 // runLocalGet shows one local entry. Without --reveal it prints a mask
 // computed locally, never the value; --reveal writes the raw secret
 // bytes to stdout and nothing else.
-func runLocalGet(spec source.Spec, ref, format string, reveal bool) int {
+func runLocalGet(p config.Paths, spec source.Spec, ref, format string, reveal bool) int {
 	if reveal && format == "json" {
 		return fatalf(2, "--reveal writes raw bytes and cannot be combined with --format json")
 	}
-	vault, err := openLocal(spec)
+	vault, err := openLocal(p, spec)
 	if err != nil {
 		return localOpenError(err)
 	}
@@ -420,11 +428,11 @@ func localMeta(ref string) *itemcrypt.Meta {
 // policy checks before spawn, same injection, same redactor — but with
 // no server, no grants, no approval round and no remote audit. Values
 // are decrypted only after the policy checks pass.
-func runLocalExec(opts execOptions, spec source.Spec) int {
+func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 	if opts.LoginRef != "" {
 		return fatalf(exitcode.PolicyRejection, "--stdin-login reads a synced item's username and value; it is not available on a local source")
 	}
-	vault, err := openLocal(spec)
+	vault, err := openLocal(p, spec)
 	if err != nil {
 		return localOpenError(err)
 	}

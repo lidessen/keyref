@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/lidessen/keyref/cli/internal/cache"
+	"github.com/lidessen/keyref/cli/internal/pair"
+	"github.com/lidessen/keyref/cli/internal/session"
 )
 
 // mcpRoundTrip drives serveMCP with one JSON request line and decodes
@@ -207,6 +209,42 @@ func TestMCPToolExecBadArguments(t *testing.T) {
 	text = resp.Result.(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text, "exit_code: 2") || !strings.Contains(text, "unknown tool") {
 		t.Fatalf("unknown tool must be an error result: %q", text)
+	}
+}
+
+// TestMCPExecValidationErrorReachesTheResult pins issue #3: a message
+// produced by the shared exec core while serving a tool call is part of
+// the tool result, not the process stderr the MCP client never sees.
+func TestMCPExecValidationErrorReachesTheResult(t *testing.T) {
+	dir := mcpTestEnv(t)
+	st, err := cache.Open(dir)
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	// Enough pairing state for the exec core to reach its argument
+	// validation: a vault id and a pinned owner key.
+	if err := st.SetKV(session.KVVaultID, []byte("vault-test")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetKV(pair.KVOwnerSignPub, []byte("owner-test")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &mcpServer{}
+	resp, _ := mcpRoundTrip(t, srv, `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"exec","arguments":{"argv":["/usr/bin/true"],"env":{"":"some-ref"}}}}`)
+	result := resp.Result.(map[string]any)
+	if result["isError"] != true {
+		t.Fatalf("invalid env spec must be an error result: %+v", result)
+	}
+	text := result["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "--env expects NAME=REF") {
+		t.Fatalf("the reason is missing from the tool result: %q", text)
+	}
+	if !strings.Contains(text, "exit_code: 10") {
+		t.Fatalf("the policy exit code is missing from the tool result: %q", text)
 	}
 }
 

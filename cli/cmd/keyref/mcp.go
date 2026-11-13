@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/lidessen/keyref/cli/internal/approval"
 	"github.com/lidessen/keyref/cli/internal/cache"
+	"github.com/lidessen/keyref/cli/internal/config"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/meta"
@@ -274,14 +276,29 @@ func (s *mcpServer) ensureInit() error {
 	if s.init {
 		return nil
 	}
-	p := mustPaths()
+	p, err := config.Resolve()
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(p.CacheFile); errors.Is(err, os.ErrNotExist) {
 		return errMCPNotPaired
 	} else if err != nil {
 		return err
 	}
-	st := mustStore()
-	id := mustIdentity()
+	st, err := cache.Open(p.Dir)
+	if err != nil {
+		return err
+	}
+	ks, err := secretStoreOrError()
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
+	id, err := device.LoadOrCreate(ks)
+	if err != nil {
+		_ = st.Close()
+		return err
+	}
 	s.st = st
 	s.id = id
 	s.init = true
@@ -355,9 +372,16 @@ func (s *mcpServer) toolExec(args json.RawMessage) (any, *mcpError) {
 	if len(a.Argv) == 0 {
 		return textResult("keyref: exec requires a non-empty argv\nexit_code: 2", true), nil
 	}
-	envs := make([]string, 0, len(a.Env))
-	for name, ref := range a.Env {
-		envs = append(envs, name+"="+ref)
+	// Sorted, so a request with two invalid entries reports the same
+	// error every time (issue #3).
+	names := make([]string, 0, len(a.Env))
+	for name := range a.Env {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	envs := make([]string, 0, len(names))
+	for _, name := range names {
+		envs = append(envs, name+"="+a.Env[name])
 	}
 	timeout := approvalTimeoutFromSeconds(a.Timeout)
 	var out, errBuf bytes.Buffer

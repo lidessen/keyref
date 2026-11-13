@@ -202,8 +202,19 @@ exec flags:
 
 // ---- shared wiring ----
 
+// fatalf writes a keyref error line to stderr and returns the exit
+// code of a CLI command.
 func fatalf(code int, format string, args ...any) int {
-	fmt.Fprintf(os.Stderr, "keyref: "+format+"\n", args...)
+	return fatalfTo(os.Stderr, code, format, args...)
+}
+
+// fatalfTo writes a keyref error line to w and returns the exit code.
+// The exec core uses it with the writer of the caller's choice: the CLI
+// passes os.Stderr, the MCP exec tool passes the buffer that becomes the
+// tool result — the client never sees the server's stderr (design v0.10
+// §17.5, issue #3).
+func fatalfTo(w io.Writer, code int, format string, args ...any) int {
+	fmt.Fprintf(w, "keyref: "+format+"\n", args...)
 	return code
 }
 
@@ -237,8 +248,8 @@ func mustIdentity() *device.Identity {
 }
 
 // newClient builds the API client with a lazily refreshing token.
-func newClient(st *cache.Store, id *device.Identity) *client.Client {
-	cl := client.New(config.Origin(mustPaths()), nil)
+func newClient(p config.Paths, st *cache.Store, id *device.Identity) *client.Client {
+	cl := client.New(config.Origin(p), nil)
 	mgr := session.New(st, cl, id)
 	cl.SetTokenSource(mgr.TokenSource())
 	return cl
@@ -301,7 +312,8 @@ func cmdPair(args []string) int {
 	}
 	st := mustStore()
 	id := mustIdentity()
-	cl := client.New(config.Origin(mustPaths()), nil)
+	p := mustPaths()
+	cl := client.New(config.Origin(p), nil)
 	err := pair.Run(st, cl, id, pair.Options{
 		Name:         *name,
 		Kind:         *kind,
@@ -314,7 +326,7 @@ func cmdPair(args []string) int {
 	// Pairing means this CLI is now backed by the iOS vault: make it
 	// the default source, which is also what the commands did before
 	// sources existed. `keyref source default local` switches back.
-	if err := source.SetDefault(mustPaths(), source.SyncName); err != nil {
+	if err := source.SetDefault(p, source.SyncName); err != nil {
 		fmt.Fprintf(os.Stderr, "keyref: paired, but could not set the default source: %v\n", err)
 	}
 	return 0
@@ -338,7 +350,8 @@ func defaultDeviceName() string {
 func cmdSession(args []string) int {
 	st := mustStore()
 	id := mustIdentity()
-	cl := client.New(config.Origin(mustPaths()), nil)
+	p := mustPaths()
+	cl := client.New(config.Origin(p), nil)
 	mgr := session.New(st, cl, id)
 	cl.SetTokenSource(mgr.TokenSource())
 	if _, err := mgr.DeviceID(); err != nil {
@@ -364,7 +377,8 @@ func cmdSession(args []string) int {
 func cmdSync(args []string) int {
 	st := mustStore()
 	id := mustIdentity()
-	cl := newClient(st, id)
+	p := mustPaths()
+	cl := newClient(p, st, id)
 	mgr := session.New(st, cl, id)
 	deviceID, err := mgr.DeviceID()
 	if err != nil {
@@ -395,14 +409,15 @@ func cmdList(args []string) int {
 	if _, err := parseArgs(fs, args); err != nil {
 		return parseExit(err)
 	}
-	spec, err := resolveSource(*sourceName)
+	p := mustPaths()
+	spec, err := resolveSource(p, *sourceName)
 	if err != nil {
 		return fatalf(1, "%v", err)
 	}
 	if spec.Kind == source.KindLocal {
 		return fatalf(2, "local sources store refs one-way (HMAC), so they cannot be listed; use keyref get <ref>")
 	}
-	st, err := existingStore(mustPaths())
+	st, err := existingStore(p)
 	if errors.Is(err, errNotPaired) {
 		return fatalf(1, "not paired; run keyref pair first")
 	}
@@ -410,13 +425,13 @@ func cmdList(args []string) int {
 		return fatalf(1, "%v", err)
 	}
 	defer st.Close()
-	if locked(mustPaths()) {
+	if locked(p) {
 		return fatalf(exitcode.SessionLocked, "session is locked; run keyref unlock")
 	}
 	id := mustIdentity()
 	entries, err := meta.Items(st, id)
 	if err != nil {
-		return unwrapOrGeneric(err)
+		return unwrapOrGeneric(os.Stderr, err)
 	}
 	if *format == "json" {
 		out := make([]meta.Entry, len(entries))
@@ -449,17 +464,18 @@ func cmdGet(args []string) int {
 		return fatalf(2, "usage: keyref get <ref> [--format json] [--reveal] [--source NAME]")
 	}
 	ref := rest[0]
-	spec, err := resolveSource(*sourceName)
+	p := mustPaths()
+	spec, err := resolveSource(p, *sourceName)
 	if err != nil {
 		return fatalf(1, "%v", err)
 	}
 	if spec.Kind == source.KindLocal {
-		return runLocalGet(spec, ref, *format, *reveal)
+		return runLocalGet(p, spec, ref, *format, *reveal)
 	}
 	if *reveal {
 		return fatalf(2, "--reveal is not available on the paired vault: the CLI never prints a synced secret")
 	}
-	st, err := existingStore(mustPaths())
+	st, err := existingStore(p)
 	if errors.Is(err, errNotPaired) {
 		return fatalf(1, "not paired; run keyref pair first")
 	}
@@ -467,7 +483,7 @@ func cmdGet(args []string) int {
 		return fatalf(1, "%v", err)
 	}
 	defer st.Close()
-	if locked(mustPaths()) {
+	if locked(p) {
 		return fatalf(exitcode.SessionLocked, "session is locked; run keyref unlock")
 	}
 	id := mustIdentity()
@@ -478,7 +494,7 @@ func cmdGet(args []string) int {
 			// never enumerates other refs (design.md §12.2).
 			return fatalf(exitcode.UnknownRef, "unknown ref %q", ref)
 		}
-		return unwrapOrGeneric(err)
+		return unwrapOrGeneric(os.Stderr, err)
 	}
 	if *format == "json" {
 		enc := json.NewEncoder(os.Stdout)
@@ -493,11 +509,13 @@ func cmdGet(args []string) int {
 	return 0
 }
 
-func unwrapOrGeneric(err error) int {
+// unwrapOrGeneric maps an unwrap failure to its exit code, writing the
+// message to w (the caller's writer, not the process stderr: issue #3).
+func unwrapOrGeneric(w io.Writer, err error) int {
 	if errors.Is(err, itemcrypt.ErrBadGrantSignature) {
-		return fatalf(exitcode.UnwrapFailed, "%v", err)
+		return fatalfTo(w, exitcode.UnwrapFailed, "%v", err)
 	}
-	return fatalf(1, "%v", err)
+	return fatalfTo(w, 1, "%v", err)
 }
 
 func truncate(s string, n int) string {
@@ -525,7 +543,7 @@ func cmdStatus(args []string) int {
 		}
 		specs = cfg.Specs()
 	} else {
-		spec, err := resolveSource("")
+		spec, err := resolveSource(p, "")
 		if err != nil {
 			return fatalf(1, "%v", err)
 		}
@@ -781,24 +799,47 @@ type execOptions struct {
 // runExecCore executes one exec end to end: audit wiring, meta
 // resolution, policy checks (inside exec.Run), lazy secret resolution —
 // standard grants or, for approval items, the per-exec approval flow —
-// and the redacted run.
+// and the redacted run. Every message goes to opts.Stderr: the CLI
+// passes os.Stderr, the MCP exec tool passes the result buffer (issue
+// #3), so nothing here writes to the process stderr directly.
 func runExecCore(opts execOptions) int {
-	spec, err := resolveSource(opts.Source)
+	p, err := config.Resolve()
 	if err != nil {
-		return fatalf(1, "%v", err)
+		return fatalfTo(opts.Stderr, 1, "%v", err)
+	}
+	spec, err := resolveSource(p, opts.Source)
+	if err != nil {
+		return fatalfTo(opts.Stderr, 1, "%v", err)
 	}
 	if spec.Kind == source.KindLocal {
-		return runLocalExec(opts, spec)
+		return runLocalExec(p, opts, spec)
 	}
-	st := mustStore()
-	id := mustIdentity()
+	// The paired vault needs its cache; an unpaired installation gets
+	// "not paired", and exec never creates the file on its own (issue
+	// #7: only pair and the sync commands write the cache).
+	st, err := existingStore(p)
+	if errors.Is(err, errNotPaired) {
+		return fatalfTo(opts.Stderr, 1, "not paired; run keyref pair first")
+	}
+	if err != nil {
+		return fatalfTo(opts.Stderr, 1, "%v", err)
+	}
+	defer st.Close()
+	ks, err := secretStoreOrError()
+	if err != nil {
+		return fatalfTo(opts.Stderr, 1, "%v", err)
+	}
+	id, err := device.LoadOrCreate(ks)
+	if err != nil {
+		return fatalfTo(opts.Stderr, 1, "%v", err)
+	}
 
 	// Audit wiring FIRST so that every rejection below produces an
 	// encrypted audit event (design.md §7.7: every attempt is
 	// recorded, including rejected ones). The stored directory was
 	// signature-verified on ingest; re-verify before extracting owner
 	// recipients (defense in depth, design.md §9.1).
-	cl := newClient(st, id)
+	cl := newClient(p, st, id)
 	var auditRecips []audit.OwnerRecipient
 	var dirDevices []audit.DeviceRecord
 	var reporterRaw []byte
@@ -870,7 +911,7 @@ func runExecCore(opts execOptions) int {
 	}
 
 	if !paired {
-		return fatalf(1, "not paired; run keyref pair first")
+		return fatalfTo(opts.Stderr, 1, "not paired; run keyref pair first")
 	}
 	if locked(mustPaths()) {
 		fmt.Fprintln(opts.Stderr, "keyref: session is locked; run keyref unlock")
@@ -889,14 +930,14 @@ func runExecCore(opts execOptions) int {
 	for _, spec := range opts.EnvRefs {
 		_, ref, err := splitSpec(spec)
 		if err != nil {
-			return auditAttempt(fatalf(10, "--env expects NAME=REF"), "env-spec", nil)
+			return auditAttempt(fatalfTo(opts.Stderr, 10, "--env expects NAME=REF"), "env-spec", nil)
 		}
 		addRef(ref)
 	}
 	for _, spec := range opts.FdRefs {
 		_, ref, err := splitSpec(spec)
 		if err != nil {
-			return auditAttempt(fatalf(10, "--fd expects N=REF"), "fd-spec", nil)
+			return auditAttempt(fatalfTo(opts.Stderr, 10, "--fd expects N=REF"), "fd-spec", nil)
 		}
 		addRef(ref)
 	}
@@ -923,7 +964,7 @@ func runExecCore(opts execOptions) int {
 		if strings.HasPrefix(ref, exec.MessageRefPrefix) {
 			messageID, ok := exec.ParseMessageRef(ref)
 			if !ok {
-				return auditAttempt(fatalf(exitcode.PolicyRejection,
+				return auditAttempt(fatalfTo(opts.Stderr, exitcode.PolicyRejection,
 					"malformed sms ref %q (want sms:<32 hex message id>)", ref), "sms-ref", []string{ref})
 			}
 			refs[ref] = &exec.ResolvedRef{Ref: ref, Message: true}
@@ -936,7 +977,7 @@ func runExecCore(opts execOptions) int {
 				fmt.Fprintf(opts.Stderr, "keyref: unknown ref %q\n", ref)
 				return auditAttempt(exitcode.UnknownRef, "unknown-ref", []string{ref})
 			}
-			return auditAttempt(unwrapOrGeneric(err), "unwrap-meta", []string{ref})
+			return auditAttempt(unwrapOrGeneric(opts.Stderr, err), "unwrap-meta", []string{ref})
 		}
 		refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: m, Paired: true}
 		itemIDs[ref] = itemID
@@ -967,7 +1008,7 @@ func runExecCore(opts execOptions) int {
 			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
 				opts, cwd, resolvedCmd, refs[ref], itemIDs[ref], appr)
 		}
-		return resolveValueFor(st, id, vaultID, ownerPub, refs[ref], itemIDs[ref], ref == opts.LoginRef)
+		return resolveValueFor(opts.Stderr, st, id, vaultID, ownerPub, refs[ref], itemIDs[ref], ref == opts.LoginRef)
 	}
 
 	req := &exec.Request{
@@ -1284,12 +1325,12 @@ func hasUsableUseGrant(st *cache.Store, itemID string) (bool, error) {
 // resolveValueFor decrypts the guarded secret value of one ref using
 // its live use grant. It runs only when the item is not an approval item
 // and a usable grant exists (v2 I). Exit codes follow §7.6: 16 unwrap
-// failure.
-func resolveValueFor(st *cache.Store, id *device.Identity, vaultID string, ownerPub []byte, rr *exec.ResolvedRef, itemID string, login bool) (*secret.Plaintext, int, string) {
+// failure. Messages go to stderr, the exec caller's writer (issue #3).
+func resolveValueFor(stderr io.Writer, st *cache.Store, id *device.Identity, vaultID string, ownerPub []byte, rr *exec.ResolvedRef, itemID string, login bool) (*secret.Plaintext, int, string) {
 	ref := rr.Ref
 	grants, err := st.Grants()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "keyref:", err)
+		fmt.Fprintln(stderr, "keyref:", err)
 		return nil, 1, "internal"
 	}
 	for _, g := range grants {
@@ -1302,22 +1343,22 @@ func resolveValueFor(st *cache.Store, id *device.Identity, vaultID string, owner
 		key, err := itemcrypt.UnwrapGrantKey(vaultID, &g, id.HPKEPrivate, ownerPub)
 		if err != nil {
 			if errors.Is(err, itemcrypt.ErrBadGrantSignature) {
-				fmt.Fprintln(os.Stderr, "keyref:", err)
+				fmt.Fprintln(stderr, "keyref:", err)
 				return nil, exitcode.UnwrapFailed, "unwrap-failed"
 			}
-			fmt.Fprintf(os.Stderr, "keyref: cannot unwrap item key for %s (grant stale or ciphertext damaged)\n", ref)
+			fmt.Fprintf(stderr, "keyref: cannot unwrap item key for %s (grant stale or ciphertext damaged)\n", ref)
 			return nil, exitcode.UnwrapFailed, "unwrap-failed"
 		}
 		it, ok, err := st.GetItem(itemID)
 		if err != nil || !ok {
 			key.Destroy()
-			fmt.Fprintln(os.Stderr, "keyref: item missing from cache; run keyref sync")
+			fmt.Fprintln(stderr, "keyref: item missing from cache; run keyref sync")
 			return nil, 1, "internal"
 		}
 		defer key.Destroy()
-		return decryptExecValue(os.Stderr, key, it.SecretCiphertext, vaultID, itemID, rr, login)
+		return decryptExecValue(stderr, key, it.SecretCiphertext, vaultID, itemID, rr, login)
 	}
-	fmt.Fprintf(os.Stderr, "keyref: no usable item key for %s (the use grant expired or was revoked)\n", ref)
+	fmt.Fprintf(stderr, "keyref: no usable item key for %s (the use grant expired or was revoked)\n", ref)
 	return nil, exitcode.UnwrapFailed, "no-item-key"
 }
 
@@ -1490,6 +1531,7 @@ func cmdDecider(args []string) int {
 
 	st := mustStore()
 	id := mustIdentity()
+	p := mustPaths()
 	vaultRaw, ok, _ := st.GetKV(session.KVVaultID)
 	if !ok || len(vaultRaw) == 0 {
 		return fatalf(1, "not paired; run keyref pair --kind decider first")
@@ -1498,7 +1540,7 @@ func cmdDecider(args []string) int {
 	if err != nil {
 		return fatalf(1, "owner signing key unavailable: %v", err)
 	}
-	cl := newClient(st, id)
+	cl := newClient(p, st, id)
 	mgr := session.New(st, cl, id)
 	deviceID, err := mgr.DeviceID()
 	if err != nil {
