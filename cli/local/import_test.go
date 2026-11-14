@@ -762,12 +762,14 @@ func TestImportContextCancellationAndClosedStore(t *testing.T) {
 func TestImportCancelledWhileWaitingForWriteLock(t *testing.T) {
 	ctx := context.Background()
 	path := pathForTest(t)
-	writer, err := Create(path, keyForTest())
+	master := importValue(t, 32)
+	defer clear(master)
+	writer, err := Create(path, master)
 	if err != nil {
 		t.Fatal("create store failed")
 	}
 	defer writer.Close()
-	contender, err := Open(path, keyForTest())
+	contender, err := Open(path, master)
 	if err != nil {
 		t.Fatal("open store failed")
 	}
@@ -784,18 +786,62 @@ func TestImportCancelledWhileWaitingForWriteLock(t *testing.T) {
 	defer conn.ExecContext(ctx, "ROLLBACK")
 
 	value := importValue(t, 24)
+	defer clear(value)
 	cancelled, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 	statuses, err := contender.Import(cancelled, []ImportItem{{Ref: "entry", Value: value}})
 	if !errors.Is(err, context.DeadlineExceeded) || statuses != nil {
 		t.Fatal("contended import did not stop at its deadline")
 	}
+	if contender.db.Stats().OpenConnections != 0 {
+		t.Fatal("cancelled import did not discard its connection")
+	}
+
+	// The cancelled BEGIN discards its connection. The replacement must
+	// still wait for the existing writer instead of failing immediately.
+	var busyTimeout int
+	if err := contender.db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		t.Fatal("could not inspect replacement connection")
+	}
+	type result struct {
+		statuses []ImportStatus
+		err      error
+	}
+	retryCtx, cancelRetry := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelRetry()
+	started := make(chan struct{})
+	finished := make(chan result, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		close(started)
+		statuses, err := contender.Import(retryCtx, []ImportItem{{Ref: "entry", Value: value}})
+		finished <- result{statuses: statuses, err: err}
+	}()
+	defer func() {
+		cancelRetry()
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		<-done
+	}()
+	<-started
+	select {
+	case <-finished:
+		t.Fatalf("import returned before the writer released its lock (busy_timeout=%d)", busyTimeout)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("replacement connection has unexpected busy_timeout=%d", busyTimeout)
+	}
 	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
 		t.Fatal("could not release writer lock")
 	}
-	statuses, err = contender.Import(ctx, []ImportItem{{Ref: "entry", Value: value}})
-	if err != nil || len(statuses) != 1 || statuses[0] != ImportCreated {
-		t.Fatal("store could not import after the cancelled transaction")
+	select {
+	case got := <-finished:
+		if got.err != nil || len(got.statuses) != 1 || got.statuses[0] != ImportCreated {
+			t.Fatal("store could not import after the writer released its lock")
+		}
+	case <-retryCtx.Done():
+		t.Fatal("import did not finish after the writer released its lock")
 	}
 	requireImportValue(t, contender, "entry", value, "import after cancellation")
 }

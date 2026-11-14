@@ -203,17 +203,16 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		return nil, ErrInvalidStore
 	}
 	// The file must already exist; even Open must never create a replacement if
-	// it disappears between the metadata check and SQLite opening it.
-	u := &url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
+	// it disappears between the metadata check and SQLite opening it. The
+	// driver applies busy_timeout to every physical connection, including a
+	// replacement after a cancelled or otherwise uncertain transaction.
+	u := &url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw&_busy_timeout=5000"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, ErrInvalidStore
 	}
 	db.SetMaxOpenConns(1)
 	fail := func(e error) (*Store, error) { _ = db.Close(); return nil, e }
-	if _, err = db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
-		return fail(ErrInvalidStore)
-	}
 	s := &Store{db: db}
 	wipe := func() { keycrypto.WipeKey(s.key); keycrypto.WipeKey(s.indexKey); keycrypto.WipeKey(s.metaKey) }
 	derive := func() error {
