@@ -19,17 +19,32 @@ func openPty() (master, slave *os.File, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	fd := int(m.Fd())
-	if err := unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
-		m.Close()
-		return nil, nil, fmt.Errorf("pty unlock: %w", err)
-	}
-	// TIOCGPTN writes the pty number through a pointer; IoctlRetInt
-	// passes NULL and fails with EFAULT, so read it as a uint32.
-	n, err := unix.IoctlGetUint32(fd, unix.TIOCGPTN)
+	// Fd changes the descriptor back to blocking mode. Control keeps the
+	// master pollable so the output pump can use an idle read deadline.
+	raw, err := m.SyscallConn()
 	if err != nil {
 		m.Close()
-		return nil, nil, fmt.Errorf("pty number: %w", err)
+		return nil, nil, fmt.Errorf("pty control: %w", err)
+	}
+	var n uint32
+	var ioctlErr error
+	err = raw.Control(func(fd uintptr) {
+		if err := unix.IoctlSetPointerInt(int(fd), unix.TIOCSPTLCK, 0); err != nil {
+			ioctlErr = fmt.Errorf("pty unlock: %w", err)
+			return
+		}
+		// TIOCGPTN writes through a pointer; IoctlRetInt passes NULL.
+		n, ioctlErr = unix.IoctlGetUint32(int(fd), unix.TIOCGPTN)
+		if ioctlErr != nil {
+			ioctlErr = fmt.Errorf("pty number: %w", ioctlErr)
+		}
+	})
+	if err == nil {
+		err = ioctlErr
+	}
+	if err != nil {
+		m.Close()
+		return nil, nil, err
 	}
 	s, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {

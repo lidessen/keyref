@@ -20,21 +20,36 @@ func openPty() (master, slave *os.File, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	fd := int(m.Fd())
-	if err := unix.IoctlSetInt(fd, unix.TIOCPTYGRANT, 0); err != nil {
+	// Fd changes the descriptor back to blocking mode. Control keeps the
+	// master pollable so the output pump can use an idle read deadline.
+	raw, err := m.SyscallConn()
+	if err != nil {
 		m.Close()
-		return nil, nil, fmt.Errorf("pty grant: %w", err)
-	}
-	if err := unix.IoctlSetInt(fd, unix.TIOCPTYUNLK, 0); err != nil {
-		m.Close()
-		return nil, nil, fmt.Errorf("pty unlock: %w", err)
+		return nil, nil, fmt.Errorf("pty control: %w", err)
 	}
 	var nameBuf [128]byte
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd),
-		uintptr(unix.TIOCPTYGNAME), uintptr(unsafe.Pointer(&nameBuf[0])))
-	if errno != 0 {
+	var ioctlErr error
+	err = raw.Control(func(fd uintptr) {
+		if err := unix.IoctlSetInt(int(fd), unix.TIOCPTYGRANT, 0); err != nil {
+			ioctlErr = fmt.Errorf("pty grant: %w", err)
+			return
+		}
+		if err := unix.IoctlSetInt(int(fd), unix.TIOCPTYUNLK, 0); err != nil {
+			ioctlErr = fmt.Errorf("pty unlock: %w", err)
+			return
+		}
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, fd,
+			uintptr(unix.TIOCPTYGNAME), uintptr(unsafe.Pointer(&nameBuf[0])))
+		if errno != 0 {
+			ioctlErr = fmt.Errorf("pty name: %w", errno)
+		}
+	})
+	if err == nil {
+		err = ioctlErr
+	}
+	if err != nil {
 		m.Close()
-		return nil, nil, fmt.Errorf("pty name: %w", errno)
+		return nil, nil, err
 	}
 	name := nameBuf[:]
 	if i := indexByte0(name); i >= 0 {

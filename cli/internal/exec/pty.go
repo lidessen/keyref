@@ -3,6 +3,7 @@
 package exec
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,24 +44,58 @@ func (p *ptySession) typeSecret(ref string) {
 	}
 }
 
+const (
+	ptyDrainTimeout = 2 * time.Second
+	ptyDrainLimit   = 1 << 20
+)
+
+var errPtyDrainLimit = errors.New("pty output drain limit exceeded")
+
 // pump drains master → [reply match on raw bytes] → redactor → caller.
-// It ends when the read side errors (EIO once every slave fd is closed)
-// and reports completion on done.
-func (p *ptySession) pump(done chan<- struct{}) {
-	defer close(done)
+// After the child exits, bound both the drain time and the bytes accepted
+// from a slave still held by another process. Time spent in a slow output
+// sink does not count against the drain deadline.
+func (p *ptySession) pump(childExited <-chan struct{}) error {
 	buf := make([]byte, 4096)
+	var drainDeadline time.Time
+	drainBytes := 0
 	for {
+		if drainDeadline.IsZero() {
+			select {
+			case <-childExited:
+				drainDeadline = time.Now().Add(ptyDrainTimeout)
+			default:
+			}
+		}
+		if !drainDeadline.IsZero() {
+			if err := p.master.SetReadDeadline(drainDeadline); err != nil {
+				return err
+			}
+		}
 		n, err := p.master.Read(buf)
 		if n > 0 {
+			if !drainDeadline.IsZero() {
+				drainBytes += n
+				if drainBytes > ptyDrainLimit {
+					return errPtyDrainLimit
+				}
+			}
 			for _, ref := range p.matcher.Feed(buf[:n]) {
 				p.typeSecret(ref)
 			}
+			writeStart := time.Now()
 			if _, werr := p.red.Write(buf[:n]); werr != nil {
-				return // redactor failure already killed the child
+				return nil // redactor failure already killed the child
+			}
+			if !drainDeadline.IsZero() {
+				drainDeadline = drainDeadline.Add(time.Since(writeStart))
 			}
 		}
 		if err != nil {
-			return
+			if errors.Is(err, io.EOF) || errors.Is(err, syscall.EIO) {
+				return nil // PTY end-of-stream; Linux reports EIO
+			}
+			return err
 		}
 	}
 }
@@ -87,6 +122,8 @@ func ptySysProcAttr() *syscall.SysProcAttr {
 func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map[string][]byte,
 	extra []*os.File, outcome *Outcome, deny func(int, string) (int, *Outcome)) (int, *Outcome) {
 
+	// Record replacements even when the output sink or drain fails.
+	defer func() { outcome.Redactions = stdoutRed.Count() }()
 	master, slave, err := openPty()
 	if err != nil {
 		fmt.Fprintf(req.Stderr, "keyref: cannot start child: pty: %v\n", err)
@@ -112,6 +149,9 @@ func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map
 		fmt.Fprintf(req.Stderr, "keyref: cannot start child: %s\n", redactStartError(secrets, serr))
 		return deny(18, "cannot-start")
 	}
+	// The child owns its copy; keeping the parent's slave open prevents
+	// the master from reaching EOF after the child and its group exit.
+	_ = slave.Close()
 	kill := func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -129,33 +169,31 @@ func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map
 	if req.Stdin != nil {
 		go func() { _, _ = io.Copy(stdinWriter{sess}, req.Stdin) }()
 	}
-	pumpDone := make(chan struct{})
-	go sess.pump(pumpDone)
+	childExited := make(chan struct{})
+	pumpDone := make(chan error, 1)
+	go func() { pumpDone <- sess.pump(childExited) }()
 
 	werr := cmd.Wait()
-	// End the whole session: grandchildren holding the slave would keep
-	// the master readable forever (the child got its own session via
-	// Setsid, so the group id is its pid).
+	// End the child's group, then drain everything already written. An
+	// escaped process may still hold the slave, so wake a pending read if
+	// it stays idle after the child exits.
 	kill()
-	// Unblock the pump before waiting for it: with a grandchild still
-	// holding the slave, p.master.Read would stay blocked even after the
-	// kill. Closing the master makes that pending read return at once
-	// (the fd is pollable; the read fails with "file already closed"),
-	// so pump always terminates and can never outlive this function —
-	// run()'s deferred stdoutRed.Destroy would otherwise race its
-	// in-flight p.red.Write against wiped needle memory.
-	master.Close()
-	select {
-	case <-pumpDone:
-	case <-time.After(2 * time.Second):
-		// Fallback only; on the supported platforms the closed master
-		// always wakes the pump.
+	close(childExited)
+	deadlineErr := master.SetReadDeadline(time.Now().Add(ptyDrainTimeout))
+	if deadlineErr != nil {
+		_ = master.Close()
 	}
-	// Pump is done: no red.Write can be in flight while we flush, and
-	// every byte the child produced has been fed through the redactor.
+	// Even a blocked output sink must finish before the redactor is
+	// flushed or destroyed; closing the master cannot unblock that sink.
+	pumpErr := <-pumpDone
+	_ = master.Close()
 	outcome.ChildExit = childExitCode(werr)
 	if stdoutRed.Failed() {
 		fmt.Fprintln(req.Stderr, "keyref: redaction failed; output discarded")
+		return deny(14, "redaction")
+	}
+	if deadlineErr != nil || pumpErr != nil {
+		fmt.Fprintln(req.Stderr, "keyref: pty output incomplete; output discarded")
 		return deny(14, "redaction")
 	}
 	if ferr := stdoutRed.Flush(); ferr != nil {
@@ -168,7 +206,6 @@ func runPtyChild(req *Request, cmd *osexec.Cmd, stdoutRed *Redactor, secrets map
 		fmt.Fprintf(req.Stderr, "keyref: child wait failed: %v\n", werr)
 		return deny(14, "wait")
 	}
-	outcome.Redactions = stdoutRed.Count()
 	outcome.PolicyState = "allow"
 	return childExit, outcome
 }

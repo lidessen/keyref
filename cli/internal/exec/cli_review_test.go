@@ -5,8 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 	"github.com/lidessen/keyref/cli/internal/secret"
@@ -101,47 +106,191 @@ func TestUnknownRefWithAllowArgvDoesNotPanic(t *testing.T) {
 	}
 }
 
-type failWriter struct{}
+type controlledWriter struct {
+	writes    atomic.Int32
+	leaked    atomic.Bool
+	redacted  atomic.Bool
+	started   chan struct{}
+	startOnce sync.Once
+	release   chan struct{}
+	accept    bool
+	accepted  bytes.Buffer
+}
 
-func (failWriter) Write([]byte) (int, error) { return 0, errors.New("sink closed") }
+func (w *controlledWriter) Write(p []byte) (int, error) {
+	w.writes.Add(1)
+	if bytes.Contains(p, []byte("<redacted:openai-prod>")) {
+		w.redacted.Store(true)
+	}
+	for _, value := range encodingsOf(fxSecret) {
+		if bytes.Contains(p, []byte(value)) {
+			w.leaked.Store(true)
+		}
+	}
+	if w.started != nil {
+		w.startOnce.Do(func() { close(w.started) })
+		<-w.release
+	}
+	if w.accept {
+		return w.accepted.Write(p)
+	}
+	return 0, errors.New("sink closed")
+}
 
-func TestRedactionFailureRecordsRealChildExit(t *testing.T) {
-	req := &Request{
-		EnvRefs:   []string{"K=openai-prod"},
-		Argv:      []string{testBinary(t), "helper", "out-exit7"},
-		ParentEnv: []string{"PATH=" + os.Getenv("PATH")},
-		Refs:      map[string]*ResolvedRef{"openai-prod": mkRef(t, "openai-prod", fxSecret, true, false)},
+func waitForReapedChild(t *testing.T, marker string) {
+	t.Helper()
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal("child did not record its process ID")
 	}
-	var got *Outcome
-	req.OnOutcome = func(o *Outcome) { got = o }
-	var stderr bytes.Buffer
-	req.Stdout, req.Stderr = failWriter{}, &stderr
-	if code := Run(req); code != 14 {
-		t.Fatalf("exit %d stderr %q", code, stderr.String())
+	pid, err := strconv.Atoi(string(data))
+	if err != nil || pid <= 1 {
+		t.Fatal("child recorded an invalid process ID")
 	}
-	if got == nil || got.PolicyState != "deny:redaction" || got.ChildExit != 7 {
-		t.Fatalf("outcome %+v", got)
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil {
+			t.Fatal("could not inspect child status")
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("child did not exit and get reaped")
+		}
 	}
 }
 
-func TestPtyRedactionFailureRecordsChildExit(t *testing.T) {
-	ptyAvailable(t)
-	req := &Request{
-		Pty:       true,
-		EnvRefs:   []string{"K=openai-prod"},
-		Argv:      []string{testBinary(t), "helper", "out-exit7"},
-		ParentEnv: []string{"PATH=" + os.Getenv("PATH")},
-		Refs:      map[string]*ResolvedRef{"openai-prod": mkRef(t, "openai-prod", fxSecret, true, false)},
-	}
-	var got *Outcome
-	req.OnOutcome = func(o *Outcome) { got = o }
-	var stderr bytes.Buffer
-	req.Stdout, req.Stderr = failWriter{}, &stderr
-	if code := Run(req); code != 14 {
-		t.Fatalf("exit %d stderr %q", code, stderr.String())
-	}
-	if got == nil || got.PolicyState != "deny:redaction" || got.ChildExit != 7 {
-		t.Fatalf("outcome %+v", got)
+func TestRedactionFailureChildTermination(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		pty       bool
+		natural   bool
+		slowSink  bool
+		accept    bool
+		childExit int
+	}{
+		{"ordinary-natural", false, true, false, false, 7},
+		{"ordinary-killed", false, false, false, false, 128 + int(syscall.SIGKILL)},
+		{"pty-natural", true, true, false, false, 7},
+		{"pty-killed", true, false, false, false, 128 + int(syscall.SIGKILL)},
+		{"pty-slow-failure", true, true, true, false, 7},
+		{"pty-slow-success", true, true, true, true, 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.pty {
+				ptyAvailable(t)
+			}
+			argv := []string{testBinary(t), "helper", "out-hold"}
+			marker := filepath.Join(t.TempDir(), "child-pid")
+			if tc.natural {
+				argv = []string{testBinary(t), "helper", "out-natural-exit7", marker}
+			}
+			req := &Request{
+				Pty:       tc.pty,
+				EnvRefs:   []string{"K=openai-prod"},
+				Argv:      argv,
+				ParentEnv: []string{"PATH=" + os.Getenv("PATH")},
+				Refs:      map[string]*ResolvedRef{"openai-prod": mkRef(t, "openai-prod", fxSecret, true, false)},
+			}
+			stdout := controlledWriter{accept: tc.accept}
+			var release sync.Once
+			if tc.natural {
+				stdout.started = make(chan struct{})
+				stdout.release = make(chan struct{})
+			}
+			unblock := func() {
+				if stdout.release != nil {
+					release.Do(func() { close(stdout.release) })
+				}
+			}
+			var stderr bytes.Buffer
+			req.Stdout, req.Stderr = &stdout, &stderr
+			var outcome *Outcome
+			outcomeCalls := 0
+			req.OnOutcome = func(o *Outcome) { outcome, outcomeCalls = o, outcomeCalls+1 }
+			type result struct {
+				code    int
+				outcome *Outcome
+				calls   int
+			}
+			done := make(chan result, 1)
+			go func() {
+				code := Run(req)
+				done <- result{code, outcome, outcomeCalls}
+			}()
+			received := false
+			defer func() {
+				unblock()
+				if !received {
+					select {
+					case <-done:
+					case <-time.After(8 * time.Second):
+						t.Error("runner did not finish after releasing the output sink")
+					}
+				}
+			}()
+			if tc.natural {
+				select {
+				case <-stdout.started:
+				case <-done:
+					received = true
+					t.Fatal("runner returned before delivering child output")
+				case <-time.After(8 * time.Second):
+					t.Fatal("child output did not reach the sink")
+				}
+				// The sink cannot fail until Wait has reaped the natural exit.
+				waitForReapedChild(t, marker)
+				if tc.slowSink {
+					select {
+					case <-done:
+						received = true
+						t.Fatal("runner returned while the output sink was blocked")
+					case <-time.After(2300 * time.Millisecond):
+					}
+				}
+				unblock()
+			}
+			var got result
+			select {
+			case got = <-done:
+				received = true
+			case <-time.After(8 * time.Second):
+				t.Fatal("runner did not report redaction failure")
+			}
+			if stdout.writes.Load() == 0 || stdout.leaked.Load() {
+				t.Fatalf("sink writes %d, leaked %t", stdout.writes.Load(), stdout.leaked.Load())
+			}
+			if got.calls != 1 || got.outcome == nil || got.outcome.ChildExit != tc.childExit {
+				t.Fatalf("outcome %+v, calls %d, expected child exit %d", got.outcome, got.calls, tc.childExit)
+			}
+			if !tc.natural && (!stdout.redacted.Load() || got.outcome.Redactions != 1) {
+				t.Fatal("redaction failure did not record the replacement")
+			}
+			if tc.accept {
+				if got.code != 7 || got.outcome.PolicyState != "allow" || !strings.Contains(stdout.accepted.String(), "ready") || stderr.Len() != 0 {
+					t.Fatal("slow output sink did not complete the natural exit")
+				}
+			} else {
+				if got.code != 14 || got.outcome.PolicyState != "deny:redaction" || stdout.writes.Load() != 1 {
+					t.Fatalf("exit %d, outcome %+v, sink writes %d", got.code, got.outcome, stdout.writes.Load())
+				}
+				if !strings.Contains(stderr.String(), "redaction failed") {
+					t.Fatal("redaction failure diagnostic missing")
+				}
+			}
+			for _, value := range encodingsOf(fxSecret) {
+				if strings.Contains(stderr.String(), value) {
+					t.Fatal("redaction failure diagnostic leaked a secret")
+				}
+			}
+		})
 	}
 }
 

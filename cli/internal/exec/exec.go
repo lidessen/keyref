@@ -669,6 +669,8 @@ func run(req *Request) (int, *Outcome) {
 
 	stderrRed := newRedactor(secrets, replacement)
 	defer stderrRed.Destroy()
+	// Record replacements even when the output sink or final flush fails.
+	defer func() { outcome.Redactions = stdoutRed.Count() + stderrRed.Count() }()
 	stderrRed.Attach(req.Stderr)
 	cmd.ExtraFiles = extra
 	cmd.Stdout = stdoutRed
@@ -809,7 +811,6 @@ func run(req *Request) (int, *Outcome) {
 		return deny(14, "wait")
 	}
 
-	outcome.Redactions = stdoutRed.Count() + stderrRed.Count()
 	outcome.PolicyState = "allow"
 	if code := interrupted.Load(); code != 0 {
 		fmt.Fprintln(req.Stderr, "keyref: interrupted; the child was terminated")

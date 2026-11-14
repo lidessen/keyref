@@ -1073,13 +1073,13 @@ type approvalAudit struct {
 }
 
 // approvalResultOf maps the outcome into the audit event's approval
-// field (design.md §7.7): "approved" for allowed runs that went through
-// the flow, the deny reason otherwise.
+// field (design.md §7.7). A redaction failure happens after the child
+// started, so any approval needed to reach it was already granted.
 func approvalResultOf(policyState string, approvalUsed bool) string {
 	switch {
 	case strings.HasPrefix(policyState, "deny:approval-"):
 		return strings.TrimPrefix(policyState, "deny:approval-")
-	case policyState == "allow" && approvalUsed:
+	case approvalUsed && (policyState == "allow" || policyState == "deny:redaction"):
 		return "approved"
 	default:
 		return ""

@@ -1,8 +1,15 @@
 package exec
 
 import (
+	"bytes"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ptyAvailable reports whether this environment can allocate a
@@ -140,5 +147,166 @@ func TestPtySessionEndsWhenChildExits(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "hello-from-pty") || !strings.Contains(stdout, "bye") {
 		t.Fatalf("banner output missing after session end: %q", stdout)
+	}
+}
+
+func TestPtyPumpTimesOutWhenSlaveHeld(t *testing.T) {
+	ptyAvailable(t)
+	master, slave, err := openPty()
+	if err != nil {
+		t.Fatal("could not allocate pty")
+	}
+	defer master.Close()
+	defer slave.Close()
+	matcher, err := newReplyMatcher(nil)
+	if err != nil {
+		t.Fatal("could not create reply matcher")
+	}
+	red := NewRedactor(map[string][]byte{"ref": []byte(fxSecret)})
+	defer red.Destroy()
+	red.Attach(io.Discard)
+	sess := &ptySession{master: master, matcher: matcher, red: red}
+	childExited := make(chan struct{})
+	close(childExited)
+	done := make(chan error, 1)
+	go func() { done <- sess.pump(childExited) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("pump error %v, want a read deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		_ = master.Close()
+		<-done
+		t.Fatal("pump did not stop when a slave remained open")
+	}
+}
+
+func TestPtyPumpBoundsPostExitOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		slow bool
+		want error
+	}{
+		{"continuous", true, os.ErrDeadlineExceeded},
+		{"volume", false, errPtyDrainLimit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal("could not create output pipe")
+			}
+			matcher, err := newReplyMatcher(nil)
+			if err != nil {
+				t.Fatal("could not create reply matcher")
+			}
+			red := NewRedactor(nil)
+			red.Attach(io.Discard)
+			sess := &ptySession{master: reader, matcher: matcher, red: red}
+			childExited := make(chan struct{})
+			close(childExited)
+			done := make(chan error, 1)
+			go func() { done <- sess.pump(childExited) }()
+			stop := make(chan struct{})
+			writerDone := make(chan struct{})
+			go func() {
+				defer close(writerDone)
+				chunk := bytes.Repeat([]byte{'x'}, 16*1024)
+				if tc.slow {
+					chunk = chunk[:1]
+				}
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					if tc.slow {
+						select {
+						case <-ticker.C:
+						case <-stop:
+							return
+						}
+					}
+					if _, err := writer.Write(chunk); err != nil {
+						return
+					}
+				}
+			}()
+			finished := false
+			defer func() {
+				close(stop)
+				_ = writer.Close()
+				_ = reader.Close()
+				<-writerDone
+				if !finished {
+					<-done
+				}
+				red.Destroy()
+			}()
+			select {
+			case err := <-done:
+				finished = true
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("pump error %v, want %v", err, tc.want)
+				}
+			case <-time.After(8 * time.Second):
+				t.Fatal("pump did not bound output after child exit")
+			}
+		})
+	}
+}
+
+func TestPtyHeldSlaveFailsClosed(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the escaped holder does not keep this PTY open on Darwin")
+	}
+	ptyAvailable(t)
+	marker := filepath.Join(t.TempDir(), "release-holder")
+	defer func() {
+		if _, err := os.Stat(marker + ".started"); err != nil {
+			return
+		}
+		if err := os.WriteFile(marker, nil, 0o600); err != nil {
+			t.Error("could not release the pty holder")
+			return
+		}
+		deadline := time.NewTimer(3 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := os.Stat(marker + ".done"); err == nil {
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-deadline.C:
+				t.Error("pty holder did not acknowledge release")
+				return
+			}
+		}
+	}()
+	req := &Request{
+		Pty:     true,
+		EnvRefs: []string{"K=openai-prod"},
+		Argv:    []string{testBinary(t), "helper", "out-escaped-pty", marker},
+		Refs:    map[string]*ResolvedRef{"openai-prod": mkRef(t, "openai-prod", fxSecret, true, false)},
+	}
+	var stdout, stderr bytes.Buffer
+	var outcome *Outcome
+	req.Stdout, req.Stderr = &stdout, &stderr
+	req.OnOutcome = func(o *Outcome) { outcome = o }
+	code := Run(req)
+	if code != 14 || outcome == nil || outcome.ChildExit != 7 || outcome.PolicyState != "deny:redaction" || outcome.Redactions != 1 {
+		t.Fatalf("exit %d, outcome %+v", code, outcome)
+	}
+	if !strings.Contains(stderr.String(), "pty output incomplete") {
+		t.Fatal("incomplete output diagnostic missing")
+	}
+	if !strings.Contains(stdout.String(), "<redacted:openai-prod>") {
+		t.Fatal("output produced before the timeout was not redacted")
+	}
+	for _, value := range encodingsOf(fxSecret) {
+		if strings.Contains(stdout.String(), value) || strings.Contains(stderr.String(), value) {
+			t.Fatal("pty timeout output leaked a secret")
+		}
 	}
 }

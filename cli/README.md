@@ -64,6 +64,8 @@ A local vault stores each row id as an HMAC of the ref, but the ref itself, mask
 
 `exec` on a local source is the same code path as on the paired one: the injection shapes, the redactor and the pre-spawn checks are identical (design §7.3, §7.4). Command policy differs: a local row with an empty `allowCommands` keeps the built-in deny list (a slip guard, not a boundary); a non-empty list written by `keyref set --allow-command` is an exact whitelist; `allowedHosts` parses HTTP(S) URLs in argv and matches the actual hostname, including URLs with userinfo, ports or IPv6 addresses; malformed URLs fail closed without echoing their contents. This is an argument check, not network isolation: it cannot constrain redirects or endpoints loaded from a child's configuration. A paired-vault item must name its commands in `allowCommands` — an empty list allows nothing unless the owner set `commandPolicy = allow-all` on iOS (protocol v2 H). There is no grant, no approval round and no remote audit on a local source.
 
+For both sources, `--pty` drains the terminal output after the child exits. The drain uses a two-second read deadline and accepts at most 1 MiB after draining begins; time spent writing redacted output does not count against the deadline. If the terminal cannot be fully drained, Keyref returns exit code 14 and discards remaining buffered output. Redacted output already delivered to the caller cannot be recalled.
+
 ### Importing selected environment variables
 
 ```sh

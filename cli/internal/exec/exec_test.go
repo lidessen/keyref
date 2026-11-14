@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	osexec "os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 	"github.com/lidessen/keyref/cli/internal/secret"
@@ -50,9 +54,52 @@ func helperMain(args []string) {
 		fmt.Printf("ARGV=%s\n", strings.Join(args[1:], ","))
 	case len(args) > 0 && args[0] == "print-argv0":
 		fmt.Printf("ARGV0=%s\n", os.Args[0])
-	case len(args) > 0 && args[0] == "out-exit7":
-		fmt.Println("some output")
+	case len(args) == 2 && args[0] == "out-natural-exit7":
+		if err := os.WriteFile(args[1], []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			os.Exit(44)
+		}
+		fmt.Print("ready\n")
 		os.Exit(7)
+	case len(args) > 0 && args[0] == "out-hold":
+		// The test expects redaction failure to kill this process first.
+		fmt.Print(os.Getenv("K"))
+		time.Sleep(5 * time.Second)
+		os.Exit(43)
+	case len(args) == 2 && args[0] == "out-escaped-pty":
+		bin, err := os.Executable()
+		if err != nil {
+			os.Exit(45)
+		}
+		holder := osexec.Command(bin, "helper", "hold-pty", args[1])
+		holder.Stdin, holder.Stdout, holder.Stderr = os.Stdin, os.Stdout, os.Stderr
+		holder.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := holder.Start(); err != nil {
+			os.Exit(46)
+		}
+		if err := os.WriteFile(args[1]+".started", nil, 0o600); err != nil {
+			_ = holder.Process.Kill()
+			_, _ = holder.Process.Wait()
+			os.Exit(47)
+		}
+		fmt.Printf("ready:%s\n", os.Getenv("K"))
+		os.Exit(7)
+	case len(args) == 2 && args[0] == "hold-pty":
+		// The test releases this holder; the deadline is a cleanup backstop.
+		deadline := time.NewTimer(15 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := os.Stat(args[1]); err == nil {
+				_ = os.WriteFile(args[1]+".done", nil, 0o600)
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-deadline.C:
+				return
+			}
+		}
 	case len(args) > 0 && args[0] == "exit42":
 		os.Exit(42)
 	case len(args) > 0 && args[0] == "prompt":
