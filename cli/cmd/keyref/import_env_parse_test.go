@@ -63,6 +63,41 @@ func TestImportEnvParseSelectedValues(t *testing.T) {
 	}
 }
 
+func TestImportEnvLineEndings(t *testing.T) {
+	value := rand.Text()
+	mappings, err := parseImportEnvMappings([]string{"TOKEN=token"})
+	if err != nil {
+		t.Fatal("valid mapping was rejected")
+	}
+	for _, tc := range []struct {
+		name   string
+		input  string
+		wantOK bool
+	}{
+		{"lf", "TOKEN=" + value + "\n", true},
+		{"crlf", "TOKEN=" + value + "\r\n", true},
+		{"no final newline", "TOKEN=" + value, true},
+		{"bare final carriage return", "TOKEN=" + value + "\r", false},
+		{"unselected bare final carriage return", "TOKEN=" + value + "\nOTHER='literal'\r", false},
+		{"double carriage return", "TOKEN=" + value + "\r\r\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(tc.input)
+			defer secret.Wipe(data)
+			parsed, err := parseImportEnv(data, mappings)
+			if tc.wantOK {
+				if err != nil || !parsed.complete || !bytes.Equal(parsed.entries[0].value, []byte(value)) {
+					t.Fatal("valid line ending did not preserve the selected value")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "INVALID_SYNTAX") || parsed.complete {
+				t.Fatal("bare carriage return was not rejected safely")
+			}
+		})
+	}
+}
+
 func TestImportEnvRejectsUnsafeOrAmbiguousInput(t *testing.T) {
 	value := rand.Text()
 	cases := []struct {

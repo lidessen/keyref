@@ -83,6 +83,56 @@ func helperMain(args []string) {
 		}
 		fmt.Printf("ready:%s\n", os.Getenv("K"))
 		os.Exit(7)
+	case len(args) == 2 && args[0] == "out-escaped-pty-reply":
+		bin, err := os.Executable()
+		if err != nil {
+			os.Exit(45)
+		}
+		holder := osexec.Command(bin, "helper", "hold-pty-reply", args[1], strconv.Itoa(os.Getpid()))
+		holder.Stdin, holder.Stdout, holder.Stderr = os.Stdin, os.Stdout, os.Stderr
+		holder.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := holder.Start(); err != nil {
+			os.Exit(46)
+		}
+		if err := os.WriteFile(args[1]+".started", nil, 0o600); err != nil {
+			_ = holder.Process.Kill()
+			_, _ = holder.Process.Wait()
+			os.Exit(47)
+		}
+		fmt.Printf("ready:%s\n", os.Getenv("K"))
+		os.Exit(7)
+	case len(args) == 3 && args[0] == "hold-pty-reply":
+		// Wait for the original child to exit before emitting the prompt.
+		// A release marker and a watchdog ensure the detached process exits
+		// even if the runner under test gets stuck.
+		parent, err := strconv.Atoi(args[2])
+		if err != nil {
+			return
+		}
+		deadline := time.NewTimer(18 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		prompted := false
+		defer func() { _ = os.WriteFile(args[1]+".done", nil, 0o600) }()
+		for {
+			if _, err := os.Stat(args[1]); err == nil {
+				return
+			}
+			if !prompted && os.Getppid() != parent {
+				_, err := fmt.Fprint(os.Stdout, "Password:")
+				if err != nil {
+					return
+				}
+				_ = os.WriteFile(args[1]+".prompt", nil, 0o600)
+				prompted = true
+			}
+			select {
+			case <-ticker.C:
+			case <-deadline.C:
+				return
+			}
+		}
 	case len(args) == 2 && args[0] == "hold-pty":
 		// The test releases this holder; the deadline is a cleanup backstop.
 		deadline := time.NewTimer(15 * time.Second)

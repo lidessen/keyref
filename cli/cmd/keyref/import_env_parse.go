@@ -135,11 +135,11 @@ func parseImportEnv(data []byte, mappings []importEnvMapping) (parsedImportEnv, 
 		line := data
 		if end := bytes.IndexByte(data, '\n'); end >= 0 {
 			line, data = data[:end], data[end+1:]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
 		} else {
 			data = nil
-		}
-		if len(line) > 0 && line[len(line)-1] == '\r' {
-			line = line[:len(line)-1]
 		}
 		if bytes.IndexByte(line, 0) >= 0 || bytes.IndexByte(line, '\r') >= 0 {
 			fail(lineNo, "INVALID_SYNTAX")

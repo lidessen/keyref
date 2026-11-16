@@ -74,6 +74,71 @@ func TestImportEnvOutputCollisions(t *testing.T) {
 	}
 }
 
+func TestImportEnvPreReadDiagnosticIsFixed(t *testing.T) {
+	// The command rejects missing mappings before it reads the file. Its
+	// fixed diagnostic can therefore coincide with a value in that file.
+	value := strings.Join([]string{"INVALID", "MAPPING", "COUNT"}, "_")
+	path := filepath.Join(t.TempDir(), "synthetic.env")
+	if err := os.WriteFile(path, []byte("TOKEN="+value+"\n"), 0o600); err != nil {
+		t.Fatal("could not write synthetic input")
+	}
+	_, _, env := localHome(t)
+	r := localRun(t, env, "", "import-env", "--file", path)
+	if r.code != 2 || r.stdout != "" || r.stderr != "keyref: import-env: "+value+"\n" {
+		t.Fatalf("pre-read diagnostic changed: exit %d", r.code)
+	}
+}
+
+func TestImportEnvRejectsBareFinalCarriageReturn(t *testing.T) {
+	original, replacement, unselected := rand.Text(), rand.Text(), rand.Text()
+	master := make([]byte, 32)
+	if _, err := rand.Read(master); err != nil {
+		t.Fatal("could not generate a synthetic master key")
+	}
+	defer clear(master)
+	home, keyringDir, _ := localHome(t)
+	env := localEnv(home, keyringDir, "KEYREF_LOCAL_MASTER="+base64.StdEncoding.EncodeToString(master))
+	if r := localRun(t, env, "", "init", "--source", "local"); r.code != 0 {
+		t.Fatalf("synthetic vault initialization failed: exit %d", r.code)
+	}
+	path := filepath.Join(t.TempDir(), "synthetic.env")
+	args := []string{"import-env", "--source", "local", "--file", path, "--map", "TOKEN=token"}
+	if err := os.WriteFile(path, []byte("TOKEN="+original+"\r\n"), 0o600); err != nil {
+		t.Fatal("could not write synthetic input")
+	}
+	seed := localRun(t, env, "", args...)
+	assertProviderValueAbsent(t, original, seed.stdout, seed.stderr)
+	if seed.code != 0 || seed.stdout != "TOKEN\ttoken\tcreated\n" || seed.stderr != "" {
+		t.Fatalf("CRLF import failed: exit %d", seed.code)
+	}
+	vaultPath := filepath.Join(home, "local.db")
+	before, writesBefore := importEnvSnapshot(t, vaultPath)
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"selected", "TOKEN=" + replacement + "\r"},
+		{"unselected", "TOKEN=" + replacement + "\nOTHER=" + unselected + "\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
+				t.Fatal("could not write synthetic input")
+			}
+			r := localRun(t, env, "", args...)
+			for _, value := range []string{original, replacement, unselected} {
+				assertProviderValueAbsent(t, value, r.stdout, r.stderr)
+			}
+			if r.code != 2 || r.stdout != "" || r.stderr != "" {
+				t.Fatalf("bare carriage return was not rejected safely: exit %d", r.code)
+			}
+			after, writesAfter := importEnvSnapshot(t, vaultPath)
+			if writesBefore != writesAfter || !equalImportEnvSnapshots(before, after) {
+				t.Fatal("rejected import changed the vault")
+			}
+		})
+	}
+}
+
 func TestImportEnvKeyringErrorDoesNotExposePath(t *testing.T) {
 	value := rand.Text()
 	master := make([]byte, 32)
