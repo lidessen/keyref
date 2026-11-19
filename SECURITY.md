@@ -2,10 +2,11 @@
 
 ## 支持范围
 
-- `server/`（keyref-server）
+- `server/`（keyref-server，支持自部署）
 - `cli/`（keyref CLI）
-- `ios/`（KeyrefCore / KeyrefUI）
 - `proto/` 与 `docs/protocol.md` 定义的线协议
+
+原生 iOS app 与 Android 采集端已于 2026-11-19 从仓库移除；owner app 计划以 WebView 壳形式重做，相关威胁模型仍以 `docs/design.md` 为准。
 
 ## 如何报告漏洞
 
@@ -20,7 +21,7 @@ design.md §4.2（B1–B8）声明为「接受边界」的场合不在漏洞之�
 
 - 运行 CLI 的主机被完全控制（root、调试器、`LD_PRELOAD` 注入 keyref 本身）；
 - agent 的 harness 另有通用 shell 且能观察同机进程；
-- 恢复码或已解锁手机本身泄露。
+- 恢复码或已解锁的 owner 设备本身泄露。
 
 其中任何一条若你有**超出设计声明**的新攻击面（例如：满足 §4.3 集成约束的前提下仍能泄密），仍然欢迎按上面的渠道私下报告。
 

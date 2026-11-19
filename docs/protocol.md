@@ -90,7 +90,7 @@
 
 ### 2.1 go.work：四模块共用，不做 vendoring
 
-拍板：根 `go.work` 连接四个模块（cli、proto、server 与 tools/vectordump——生成 iOS 跨语言金向量的开发工具，不参与线上字节），共享誊本与密码学代码放独立模块 `proto/`。理由：服务器与 CLI 都要构造/重建誊本并验签（§3），`internal/` 跨模块不可见，复制代码会让两侧誊本漂移；vendoring 冻结依赖、拖慢修补，且 go.work 已是 2026 年多模块仓库的标准做法。Docker 构建以仓库根为 context，`go.work` 在 WORKDIR 内自动生效。
+拍板：根 `go.work` 连接四个模块（cli、proto、server 与 tools/vectordump——生成跨语言金向量的开发工具，不参与线上字节），共享誊本与密码学代码放独立模块 `proto/`。理由：服务器与 CLI 都要构造/重建誊本并验签（§3），`internal/` 跨模块不可见，复制代码会让两侧誊本漂移；vendoring 冻结依赖、拖慢修补，且 go.work 已是 2026 年多模块仓库的标准做法。Docker 构建以仓库根为 context，`go.work` 在 WORKDIR 内自动生效。
 
 ```
 // /go.work
@@ -386,7 +386,7 @@ pairing_mac = HMAC-SHA256(key = c,
 - owner 在 `pair/complete` 时计算并提交（§6.17 必填字段 `pairing_mac`）；服务器不透明保存、经 §6.18 原样返回。
 - 被配对设备用自己的 `c`、自己的 kind 和自己重建的誊本重算 MAC，**常数时间**比较；不一致就中止配对——在钉 owner 公钥、写入任何本地状态之前。
 - 理由：§3.4 的签名只证明「这份誊本自洽」。服务器知道登记的设备公钥与 nonce，可以自造一把 owner key、自签一份自洽誊本，把「完成配对」冒充成另一个 owner——采集端会因此把短信封给服务器选的公钥。`c` 只在二维码里，服务器拿不到，MAC 是它伪造不了的唯一凭证。
-- 签发方与验证方共用同一个实现（Go `proto/wire/pair_confirm.go`、Swift `KeyrefCore/Wire/Transcript.swift`）；`vectors.json` 的 `pair_confirm_mac` 是跨语言闸门。
+- 签发方与验证方必须共用同一份字节定义：Go 实现在 `proto/wire/pair_confirm.go`，其他语言的 owner 实现必须与它逐字节一致；`tools/vectordump/testdata/vectors.json` 的 `pair_confirm_mac` 是跨语言闸门。
 
 ---
 

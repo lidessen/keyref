@@ -1,6 +1,6 @@
 # keyref 设计文档
 
-状态：草案 v0.10。本文是规格，不是实现记录。仓库里的 `ios/`、`cli/`、`server/` 已有 Phase 1/2 的非 iOS 实现与 iOS app。
+状态：草案 v0.10。本文是规格，不是实现记录。仓库里的 `cli/` 与 `server/` 有 Go 实现；原生 iOS app 与 Android 采集端已于 2026-11-19 移除，owner app 计划以 WebView 壳重做，本文对 owner 模型的描述仍是该工作的规格依据。
 
 日期：2026-11-13。
 

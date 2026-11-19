@@ -4,9 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What keyref is
 
-keyref is a secret manager for humans plus a secret broker for AI agents. A human owns the vault on iOS; an agent uses the `keyref` CLI to *use* secrets. The agent writes a stable reference (`openai-prod`), never the secret. The CLI injects the real value into a child process and redacts it back out of stdout/stderr, so plaintext never reaches the model's context.
+keyref is a secret manager for humans plus a secret broker for AI agents. A human owns the vault; an agent uses the `keyref` CLI to *use* secrets. The agent writes a stable reference (`openai-prod`), never the secret. The CLI injects the real value into a child process and redacts it back out of stdout/stderr, so plaintext never reaches the model's context.
 
-The trust boundary is the whole design: the server stores ciphertext only and cannot decrypt anything; the master key (VMK) lives in the iOS Secure Enclave; the CLI only ever holds per-item keys for items it was granted.
+The trust boundary is the whole design: the server stores ciphertext only and cannot decrypt anything; the human-owned client holds the root key; the CLI only ever holds per-item keys for items it was granted.
+
+## Status (2026-11-19)
+
+- **Active:** the standalone `lib` module (local vault + exec engine) and the `keyref` CLI. Stabilising the `local` source is the current priority.
+- **Frozen:** the paired/sync path. The server stays buildable and self-hostable, but gets no new sync-protocol features.
+- **Deferred:** the human-facing app and approvals. The native iOS app and the Android SMS collector were removed from this repository; the app is planned as a WebView shell over a web UI. The design and protocol docs still describe the intended owner model and are the spec of record for that work.
+- **Next target:** self-hosted remote read/write — deploy `keyref-server`, point the CLI at it (`--server` / `KEYREF_SERVER`), sign in with GitHub, and read/write credentials without an owner app or approvals. The key-custody model for that path is not settled yet and must be decided before implementing it.
 
 ## Repository layout
 
@@ -14,16 +21,14 @@ The trust boundary is the whole design: the server stores ciphertext only and ca
 | --- | --- |
 | `docs/design.md` | The full spec (Chinese) — threat model, architecture, crypto, exec semantics, roadmap |
 | `docs/protocol.md` | The wire contract — endpoints, request/response shapes, exact transcript byte layouts |
-| `docs/ios-ui.md` | iOS interaction spec — information architecture, per-screen states and final copy |
+| `docs/ios-ui.md` | Interaction spec for the deferred app: information architecture, per-screen states and final copy |
 | `proto/` | Shared Go module: `crypto/` (HPKE, AEAD, HKDF, keys) and `wire/` (transcripts, entity ids, signatures) |
-| `server/` | `keyref-server`: ciphertext sync API, Go + embedded SQLite |
+| `server/` | `keyref-server`: ciphertext sync API, Go + embedded SQLite (frozen; self-hostable) |
 | `cli/` | The `keyref` CLI (Go) — the agent-facing entry point |
-| `ios/` | SwiftUI app: `Sources/KeyrefCore` (UI-free) + `Sources/KeyrefUI` (all views) |
 | `tools/vectordump/` | Generates the cross-language golden vectors from Go (the reference implementation) |
-| `android/` | Kotlin SMS-collector device (`kind = source`) |
-| `scripts/` | Local dev scripts (server, CLI install, docker, iOS build/test) |
+| `scripts/` | Local dev scripts (server, CLI install, docker) |
 
-`go.work` joins four modules — `cli`, `server`, `proto`, `tools/vectordump`. There is no vendoring and no root Go module, so `go build ./...` at the repo root fails; always target a module (`go build -C cli ./...`).
+`go.work` joins four modules — `cli`, `server`, `proto`, `tools/vectordump`. There is no vendoring and no root Go module, so `go build ./...` at the repo root fails; always target a module (`go build -C cli ./...`). A fifth module for the standalone library is planned per design §17.7 and is not created yet.
 
 ## Build, test, run
 
@@ -41,50 +46,19 @@ go test -C cli ./internal/exec -run TestRunEnvInjectionIsRedacted -v
 go test -C server ./internal/api -run TestFullFlowSelfHosted -v
 ```
 
-**End-to-end** (builds the real CLI and server binaries and drives them against each other; every file carries the `e2e` build tag):
+**End-to-end** (builds the real CLI and server binaries and drives them against each other; every file carries the `e2e` build tag). The e2e suite still exercises the frozen sync protocol through a software owner:
 
 ```sh
 go test -C cli -tags=e2e ./e2e
 go test -C cli -tags=e2e ./e2e -run TestStdinLoginApprovalFlow -v
 ```
 
-**Cross-language vectors** — Go is the reference for every byte-level format. After changing anything in `proto/` or the protocol, regenerate the fixture the iOS suite asserts against:
+**Golden vectors** — Go is the reference for every byte-level format. Two fixtures exist:
 
-```sh
-go run ./tools/vectordump -out ios/Tests/KeyrefCoreTests/Fixtures/vectors.json
-```
-
-The Android `crypto/Envelope.kt` (BouncyCastle HPKE) must match Go's circl and CryptoKit byte-for-byte; the vectors are the admission gate for that.
+- `proto/crypto/testdata/vectors.json` is consumed by `proto` unit tests; it pins transcripts, AAD, info and digests.
+- `tools/vectordump/testdata/vectors.json` is the cross-language fixture generated by `go run ./tools/vectordump -out <file>`. It has no consumer in-tree right now; it is kept as the admission gate for the deferred app (any non-Go owner implementation must match it byte-for-byte).
 
 ECDSA signatures are randomized, so a regenerated fixture never diffs clean — only the `signature_hex` / `owner_signature_hex` lines change. Every other byte (public keys, transcripts, AEAD blobs, HPKE envelopes, info/AAD strings) must be identical to the committed file. If anything else moves, the protocol drifted.
-
-**iOS** (macOS only):
-
-```sh
-scripts/dev/xcodebuild.sh -project ios/Keyref.xcodeproj -scheme Keyref \
-  -destination 'platform=iOS Simulator,name=iPhone 17' build
-scripts/dev/xcodebuild.sh -project ios/Keyref.xcodeproj -scheme Keyref \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test
-scripts/dev/xcodebuild.sh -project ios/Keyref.xcodeproj -scheme Keyref \
-  -destination 'platform=iOS Simulator,name=iPhone 17' \
-  -only-testing:KeyrefCoreTests/CryptoTests test      # single test target/class
-```
-
-`scripts/dev/xcodebuild.sh` only sets `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` and execs `xcodebuild`. It is mandatory on this machine: `xcode-select` points at CommandLineTools, which has no `xcodebuild` and no iOS SDK. Package-only work (KeyrefCore/KeyrefUI, no app shell) also builds and tests on macOS:
-
-```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build --package-path ios
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test  --package-path ios
-```
-
-**Simulator UI end-to-end** — starts a real quota-enforcing `keyref-server` on `127.0.0.1:18080` and drives the actual app UI through it:
-
-```sh
-scripts/dev/ui-test.sh                          # whole flow
-scripts/dev/ui-test.sh KeyrefUIAutomationTests/KeyrefFlowUITests/SomeTest
-```
-
-Port 18080 must be free; it lives in a separate `KeyrefUIAutomation` scheme so it does not slow the default gate.
 
 **Local development:**
 
@@ -92,32 +66,21 @@ Port 18080 must be free; it lives in a separate `KeyrefUIAutomation` scheme so i
 scripts/run-server.sh              # dev server on 127.0.0.1:8080, plain HTTP, no quotas
 scripts/install-cli.sh             # install `keyref` to /usr/local/bin (KEYREF_BIN_DIR to override)
 scripts/docker-up.sh / scripts/docker-down.sh
-KEYREF_SERVER=http://127.0.0.1:8080 keyref pair
 ```
 
 Server environment: `KEYREF_DATA`, `KEYREF_LISTEN`, `KEYREF_ENFORCE_QUOTAS=1` (hosted behaviour: quotas on, PoW required), `KEYREF_DOMAIN` (ACME/HTTPS), `KEYREF_ACME_EMAIL`. CLI: `KEYREF_SERVER` (origin override), `KEYREF_KEYRING_DIR`.
 
-**Android** builds and tests on this machine through the committed Gradle wrapper (Gradle 9.9.1, AGP 9.5.1 with built-in Kotlin 2.4.21, compileSdk 37):
-
-```sh
-scripts/dev/android-build.sh assembleDebug       # debug APK
-scripts/dev/android-build.sh testDebugUnitTest   # golden-vector gate (design §9.2)
-scripts/dev/android-build.sh lintDebug           # must report 0 errors
-```
-
-The script prefers Android Studio's bundled JDK 25 for `JAVA_HOME` — Gradle 9.9.1 runs on Java 17–27 — and falls back to Homebrew's OpenJDK 21 when Studio is not installed; `ANDROID_HOME` defaults to `~/Library/Android/sdk`. `CryptoVectorsTest` asserts the transcripts, the §3.13 pairing MAC, the AEAD blob and both HPKE KEMs byte-for-byte against `ios/Tests/KeyrefCoreTests/Fixtures/vectors.json`; a Kotlin failure means the code drifted, never the fixture. Running the app still needs a real phone (SMS broadcasts are not delivered on a simulator), so the pairing → seal → upload loop has not been watched end to end here.
-
 ## Architecture
 
-### The three roles
+### Roles
 
-- **iOS app (owner)** — holds the VMK in a Secure Enclave P-256 key, encrypts item metadata and secrets, signs ciphertext and pairing records, and approves sensitive `exec` requests behind Face ID. The CLI can never write to the vault.
-- **CLI (agent side)** — pairs via QR, syncs only what it was granted, unwraps item keys locally, spawns children directly (never through a shell), injects secrets via env / stdin / extra fd / pty, and redacts every byte stream it captures.
-- **Server** — stores ciphertext, grants and audit envelopes. It validates envelope *shape*, signature presence, device validity, size and quota. It never decrypts, and it never sees names or `ref` values.
+- **Owner (deferred)** — the human-facing client holds the vault root key, encrypts item metadata and secrets, signs ciphertext and pairing records, and approves sensitive `exec` requests. The native app that did this was removed on 2026-11-19; design and protocol still specify the model.
+- **CLI (agent side)** — reads the configured source, checks policy, unwraps item keys or decrypts locally, spawns children directly (never through a shell), injects secrets via env / stdin / extra fd / pty, and redacts every byte stream it captures.
+- **Server (frozen)** — stores ciphertext, grants and audit envelopes. It validates envelope *shape*, signature presence, device validity, size and quota. It never decrypts, and it never sees names or `ref` values.
 
 ### Sources
 
-The CLI has one command surface over two backends, called **sources** (`cli/internal/source`): `local`, an offline SQLite vault that is the default, and `sync`, the paired iOS vault, which the CLI may read but never write. Selection is `--source` → `KEYREF_SOURCE` → the configured default in `<data dir>/sources.json` → `local`. A data directory that already held a paired vault before sources existed migrates to `sync`, so upgrading does not move existing commands onto an empty vault; `keyref pair` also sets `sync` as the default.
+The CLI has one command surface over two backends, called **sources** (`cli/internal/source`): `local`, an offline SQLite vault that is the default, and `sync`, the paired owner vault, which the CLI may read but never write. Selection is `--source` → `KEYREF_SOURCE` → the configured default in `<data dir>/sources.json` → `local`. A data directory that already held a paired vault before sources existed migrates to `sync`, so upgrading does not move existing commands onto an empty vault; `keyref pair` also sets `sync` as the default. With the owner app deferred, `sync` is frozen: it still works in tests through a software owner, but it is not a supported end-user path right now.
 
 A local source's master key lives in the OS keyring (`cli/internal/localvault`), with `KEYREF_LOCAL_MASTER` (32 random bytes, standard base64) overriding it for headless use — an environment-provided key is never copied into the keyring. Local refs are stored one-way (the row id is an HMAC of the ref); the ref, mask, size, description and policy live in a separately encrypted meta blob, so `list` and `get` read meta without decrypting the secret. `keyref exec` on a local source reuses `exec.Run` unchanged: same injection shapes, same redactor, with per-row metas and no grants, approvals or audit. Command policy differs by source: a local row with an empty `allowCommands` keeps the built-in deny list (a slip guard, not a security boundary); a non-empty list written by `keyref set --allow-command` is an exact whitelist; a paired item must name its commands and gets nothing otherwise, unless its owner set `commandPolicy = allow-all` (protocol v2 H).
 
@@ -125,21 +88,13 @@ A local source's master key lives in the OS keyring (`cli/internal/localvault`),
 
 `proto/wire` is the single source of truth for byte formats used by both the server and the CLI, so transcripts cannot drift between the two sides. Transcripts are **write-only byte strings**: a signer assembles them in the fixed field order, and a verifier *rebuilds* the same bytes and checks the signature over them. Never parse a transcript by splitting on NUL — ciphertexts and public keys contain `0x00`.
 
-### Crypto layering
+### Crypto layering (design of record; owner path deferred)
 
-VMK (Secure Enclave) wraps item keys → item keys encrypt metadata and secret separately → the secret blob is encrypted separately from the meta blob, so `list`/`get` can show masked values without touching the secret. Approval-sensitive items (`sensitivity = approval`) never give the CLI a long-lived item key: each `exec` gets a one-time HPKE wrap, delivered after the owner approves, bound to `approval_id` + `item_id` + a digest of the request transcript.
-
-### SMS collection (design v0.8)
-
-Android `kind = source` devices read the phone's SMS, encrypt each captured code at receipt time (envelope addressed to the active owner plus any delegated decider) and upload via a WorkManager queue. Only `source` can write messages; only the owner and an explicitly delegated decider can read them; messages expire after 24 h; agents consume them as `sms:<message_id>` only through an approval-gated `exec`. A decider's delegation can only *narrow* the owner's scope, never widen it, and its decision API re-check is mandatory.
+VMK (human-owned root key) wraps item keys → item keys encrypt metadata and secret separately → the secret blob is encrypted separately from the meta blob, so `list`/`get` can show masked values without touching the secret. Approval-sensitive items (`sensitivity = approval`) never give the CLI a long-lived item key: each `exec` gets a one-time HPKE wrap, delivered after the owner approves, bound to `approval_id` + `item_id` + a digest of the request transcript. The local source is a simpler, independent instance of the same idea: one master key in the OS keyring derives separate index, meta and value keys.
 
 ### Execution path
 
 `keyref exec` resolves argv0 through PATH, symlinks and shebang interpreters (bounded hops), checks the item's own `allowCommands`/`allowedHosts`/`allowArgv` policy, and only then spawns. On the paired vault an item with an empty `allowCommands` allows no command at all (exit 10) unless the owner set `commandPolicy = allow-all`; the built-in deny-shell list (`sh`, `env`, `echo`, `cat`, `base64`, `python`, …) applies to local rows with an empty `allowCommands` only and is a slip guard, never a boundary. All validation happens *before* the spawn — a rejected command never starts a child. The approval round runs when the meta says `sensitivity = approval` **or** this device holds no usable `use` grant (protocol v2 I); what the decision delivers follows the row (secret value for a row without `secret_ciphertext`, one-time item key otherwise). Output is redacted in multiple encodings; the exit-code table is pinned in `cli/internal/exitcode` (10 policy, 11 unknown ref, 12 locked, 13 approval denied, 14 redaction failed, 15 injection invalid, 16 unwrap failed, 17 revoked, 18 cannot start).
-
-### iOS app structure
-
-`KeyrefCore` is deliberately UI-free (crypto, API client, sync engine, vault/approval flows, second-device pairing) so it can be unit-tested on macOS. `KeyrefUI` holds every view plus a `Backend/` protocol with a `LiveBackend` and a `MemoryBackend`, which is how the UI tests run without a network or Keychain.
 
 ## Invariants that must not regress
 
@@ -161,20 +116,15 @@ These come from `docs/design.md` §16 — read that section before changing secu
 
 ## Language and output conventions
 
-- The READMEs are **English**; the specs in `docs/` (design.md, protocol.md, ios-ui.md) and the iOS UI copy are **Simplified Chinese**. The copy quoted in `docs/ios-ui.md` is final and must not be reworded as a side effect of a change.
+- The READMEs are **English**; the specs in `docs/` (design.md, protocol.md, ios-ui.md) are **Simplified Chinese**. The copy quoted in `docs/ios-ui.md` is final for the deferred app and must not be reworded as a side effect of a change.
 - The CLI's machine-readable output is **English** (agent-facing).
 - Identifiers, `ref` values, algorithm names, API paths and field names stay English in every language.
-
-## iOS visual direction
-
-The UI follows the "cool editorial" direction settled on 2026-11-01 and specified in `docs/ios-ui.md` §3.8 plus `ios/README.md`: flat near-white (light) / near-black (dark) pages, hairline rules as the only separator, **no cards, no gradients, no shadows, no icon tiles**, monospace for all metadata, amber used only as a tiny signal mark, and the plaintext/recovery-code slab as the single opposite-colour block. Draw flat; use `glassEffect` for genuinely floating custom controls rather than hand-drawn translucency.
+- New comments, docstrings, help text, error messages and assertion messages are **English**, even where older comments in the same file are Chinese.
 
 ## Gotchas
 
-- SourceKit/LSP diagnostics in this workspace are **noise** — the editor's LSP runs against the CommandLineTools toolchain and cannot resolve the module graph ("Cannot find 'X' in scope", "SwiftUIMacros not found"). `swift build --package-path ios` and `scripts/dev/xcodebuild.sh` are the authoritative checks. Plain `xcrun --sdk iphonesimulator` fails the same way.
-- The iOS simulator shares the host network namespace, so the UI test hardcodes `http://127.0.0.1:18080`.
 - Approval polling has a hard 2-second server-side floor and does **not** count against the daily request quota.
 - `keyref exec --stdin-login` is mutually exclusive with `--stdin`/`--pty`, and the same item cannot be used in two injection positions at once.
 - The CLI zeroes guarded buffers on every exit path via `secret.Purge()`; that is why fatal errors unwind through a panic instead of calling `os.Exit` directly.
 - `out/` and `.build/` are local scratch output and are gitignored — don't commit them.
-- After editing `ios/Sources/KeyrefCore`, `xcodebuild` may compile `KeyrefUI` against a **stale KeyrefCore package product** and report signature errors in the *caller* ("Extra argument 'vaultID' in call", "type 'X' has no member 'y'"). Sometimes the next build picks up the new package product; when a re-run fails the same way, run `xcodebuild … clean` for the scheme (or delete the project's DerivedData directory) and build again. `swift build --package-path ios` always reads the sources directly, so use it to tell a real compile error from staleness.
+- The standalone `lib` module (design §17.7) does not exist yet: the local vault is `cli/local`, the exec engine is `cli/internal/exec`. Do not document an import path that does not build.
