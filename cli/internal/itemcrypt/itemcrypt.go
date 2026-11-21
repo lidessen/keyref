@@ -24,7 +24,7 @@ import (
 	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 // ErrBadGrantSignature reports that a grant row did not verify under the

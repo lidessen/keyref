@@ -20,11 +20,12 @@ The agent writes the stable reference `openai-prod`, not the secret itself. `key
 | [docs/design.md](docs/design.md) | The full design (Chinese) |
 | [docs/protocol.md](docs/protocol.md) | The wire contract: endpoints, request/response examples, exact transcript byte layout |
 | [PROJECT-MAP.md](PROJECT-MAP.md) | Project map (Chinese): goals, boundaries, mechanisms, risks and health |
+| [lib/](lib/) | Standalone Go module for embedding: the offline encrypted store and the exec engine (policy, injection, redaction) |
 | [server/](server/) | Ciphertext sync service, Go + SQLite; self-hostable. Frozen: no new sync-protocol features |
 | [cli/](cli/) | The `keyref` CLI for agents, Go (same language as the server since v0.4). One command surface over both credential sources |
 | [scripts/](scripts/) | Local development scripts: install the CLI, run a dev server, docker compose |
 
-`go vet` + `go test` for server / cli / proto / tools, plus the CLI end-to-end tests (a software owner drives create vault, pair, sync and exec against a real running server) are the CI gate ([.github/workflows/ci.yml](.github/workflows/ci.yml)). The native iOS app and the Android SMS collector were removed on 2026-11-19; the app is planned as a WebView shell over a web UI.
+`go vet` + `go test` for server / cli / lib / proto / tools, plus the CLI end-to-end tests (a software owner drives create vault, pair, sync and exec against a real running server) are the CI gate ([.github/workflows/ci.yml](.github/workflows/ci.yml)). The native iOS app and the Android SMS collector were removed on 2026-11-19; the app is planned as a WebView shell over a web UI.
 
 ## Local development
 

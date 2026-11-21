@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 func TestImportEnvMappings(t *testing.T) {

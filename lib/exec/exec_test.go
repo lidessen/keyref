@@ -12,8 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 // The fixture secret: every assertion below greps for it and its
@@ -199,9 +198,10 @@ func mkRefJSON(t *testing.T, ref, doc string, injectable, allowArgv bool) *Resol
 		t.Fatal(err)
 	}
 	return &ResolvedRef{
-		Ref:   ref,
-		Meta:  &itemcrypt.Meta{Ref: ref, Injectable: injectable, Policy: itemcrypt.MetaPolicy{AllowArgv: allowArgv}},
-		Value: pt,
+		Ref:        ref,
+		Policy:     Policy{AllowArgv: allowArgv},
+		Injectable: injectable,
+		Value:      pt,
 	}
 }
 

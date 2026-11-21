@@ -9,42 +9,42 @@ import (
 	"testing"
 
 	"github.com/lidessen/keyref/cli/internal/config"
-	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/local"
+	"github.com/lidessen/keyref/lib/exec"
+	"github.com/lidessen/keyref/lib/local"
 )
 
 // A local row without its own allowCommands keeps the built-in deny
 // list; a row that names commands gets exactly that whitelist, and argv
 // injection is never consented to.
-func TestLocalMetaPolicy(t *testing.T) {
-	meta := localItemMeta(&local.Meta{Ref: "my-ref"})
-	if !meta.Injectable {
+func TestLocalExecPolicy(t *testing.T) {
+	ref := localExecRef(&local.Meta{Ref: "my-ref"})
+	if !ref.Injectable {
 		t.Fatal("local entries must be injectable")
 	}
-	if meta.Policy.AllowArgv {
+	if ref.Policy.AllowArgv {
 		t.Fatal("a local entry must not allow argv injection")
 	}
-	if meta.Policy.Sensitivity != "standard" {
-		t.Fatalf("sensitivity = %q", meta.Policy.Sensitivity)
+	if ref.Policy.Sensitivity != "standard" {
+		t.Fatalf("sensitivity = %q", ref.Policy.Sensitivity)
 	}
-	if !exec.ItemAllowsCommand("curl", meta.Policy, false) {
+	if !exec.ItemAllowsCommand("curl", ref.Policy) {
 		t.Fatal("an ordinary command should be allowed under deny-shells")
 	}
-	if exec.ItemAllowsCommand("sh", meta.Policy, false) {
+	if exec.ItemAllowsCommand("sh", ref.Policy) {
 		t.Fatal("sh must stay denied for a local entry without allowCommands")
 	}
-	named := localItemMeta(&local.Meta{
+	named := localExecRef(&local.Meta{
 		Ref: "my-ref",
 		Policy: local.Policy{
 			AllowCommands: []string{"cat"},
 			AllowedHosts:  []string{"api.openai.com"},
 		},
 	})
-	if !exec.ItemAllowsCommand("cat", named.Policy, false) {
+	if !exec.ItemAllowsCommand("cat", named.Policy) {
 		t.Fatal("a named allowCommands entry must whitelist that command")
 	}
-	if exec.ItemAllowsCommand("curl", named.Policy, false) {
+	if exec.ItemAllowsCommand("curl", named.Policy) {
 		t.Fatal("a non-empty allowCommands list must allow nothing else")
 	}
 	if len(named.Policy.AllowedHosts) != 1 || named.Policy.AllowedHosts[0] != "api.openai.com" {

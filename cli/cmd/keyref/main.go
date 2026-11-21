@@ -25,16 +25,16 @@ import (
 	"github.com/lidessen/keyref/cli/internal/config"
 	"github.com/lidessen/keyref/cli/internal/decider"
 	"github.com/lidessen/keyref/cli/internal/device"
-	"github.com/lidessen/keyref/cli/internal/exec"
-	"github.com/lidessen/keyref/cli/internal/exitcode"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 	"github.com/lidessen/keyref/cli/internal/localvault"
 	"github.com/lidessen/keyref/cli/internal/meta"
 	"github.com/lidessen/keyref/cli/internal/pair"
-	"github.com/lidessen/keyref/cli/internal/secret"
 	"github.com/lidessen/keyref/cli/internal/session"
 	"github.com/lidessen/keyref/cli/internal/source"
 	"github.com/lidessen/keyref/cli/internal/syncing"
+	"github.com/lidessen/keyref/lib/exec"
+	"github.com/lidessen/keyref/lib/exitcode"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 // version is the CLI version printed by `keyref --version` and reported
@@ -807,6 +807,14 @@ type execOptions struct {
 	// Source selects the credential source; empty means the configured
 	// default (local, unless a paired vault predates sources).
 	Source string
+	// Paths and Spec pin the data directory and the resolved source of
+	// a session that selected them once at startup (design §17.5: the
+	// MCP server). Both are nil for the CLI, which resolves per
+	// invocation; when Spec is set it wins over Source, so a session can
+	// never be moved to another vault by a later change to
+	// sources.json.
+	Paths  *config.Paths
+	Spec   *source.Spec
 	Stdout io.Writer
 	Stderr io.Writer
 	Stdin  io.Reader
@@ -819,13 +827,25 @@ type execOptions struct {
 // passes os.Stderr, the MCP exec tool passes the result buffer (issue
 // #3), so nothing here writes to the process stderr directly.
 func runExecCore(opts execOptions) int {
-	p, err := config.Resolve()
-	if err != nil {
-		return fatalfTo(opts.Stderr, 1, "%v", err)
+	p := config.Paths{}
+	if opts.Paths != nil {
+		p = *opts.Paths
+	} else {
+		var err error
+		p, err = config.Resolve()
+		if err != nil {
+			return fatalfTo(opts.Stderr, 1, "%v", err)
+		}
 	}
-	spec, err := resolveSource(p, opts.Source)
-	if err != nil {
-		return fatalfTo(opts.Stderr, 1, "%v", err)
+	spec := source.Spec{}
+	if opts.Spec != nil {
+		spec = *opts.Spec
+	} else {
+		var err error
+		spec, err = resolveSource(p, opts.Source)
+		if err != nil {
+			return fatalfTo(opts.Stderr, 1, "%v", err)
+		}
 	}
 	if spec.Kind == source.KindLocal {
 		return runLocalExec(p, opts, spec)
@@ -946,14 +966,14 @@ func runExecCore(opts execOptions) int {
 	for _, spec := range opts.EnvRefs {
 		_, ref, err := splitSpec(spec)
 		if err != nil {
-			return auditAttempt(fatalfTo(opts.Stderr, 10, "--env expects NAME=REF"), "env-spec", nil)
+			return auditAttempt(fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--env expects NAME=REF"), "env-spec", nil)
 		}
 		addRef(ref)
 	}
 	for _, spec := range opts.FdRefs {
 		_, ref, err := splitSpec(spec)
 		if err != nil {
-			return auditAttempt(fatalfTo(opts.Stderr, 10, "--fd expects N=REF"), "fd-spec", nil)
+			return auditAttempt(fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--fd expects N=REF"), "fd-spec", nil)
 		}
 		addRef(ref)
 	}
@@ -995,7 +1015,7 @@ func runExecCore(opts execOptions) int {
 			}
 			return auditAttempt(unwrapOrGeneric(opts.Stderr, err), "unwrap-meta", []string{ref})
 		}
-		refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: m, Paired: true}
+		refs[ref] = &exec.ResolvedRef{Ref: ref, Policy: syncExecPolicy(m.Policy), Injectable: m.Injectable}
 		itemIDs[ref] = itemID
 	}
 
@@ -1014,13 +1034,12 @@ func runExecCore(opts execOptions) int {
 			return resolveMessageViaApproval(vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
 				opts, cwd, resolvedCmd, rr, messageIDs[ref], appr)
 		}
-		m := refs[ref].Meta
 		granted, err := hasUsableUseGrant(st, itemIDs[ref])
 		if err != nil {
 			fmt.Fprintln(opts.Stderr, "keyref:", err)
 			return nil, 1, "internal"
 		}
-		if m.Policy.Sensitivity == "approval" || !granted {
+		if refs[ref].Policy.Sensitivity == "approval" || !granted {
 			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
 				opts, cwd, resolvedCmd, refs[ref], itemIDs[ref], appr)
 		}
@@ -1162,7 +1181,7 @@ func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Id
 		base := approvalBaseOptions(vaultID, deviceID, id, cl, auditRecips, dirDevices, refreshDevices,
 			opts, cwd, resolved, rr.Ref, replySpecs)
 		base.ItemID = itemID
-		base.Hosts = rr.Meta.Policy.AllowedHosts
+		base.Hosts = rr.Policy.AllowedHosts
 		value, code, state := approval.RequestSecret(base, &appr.decisionDeviceID)
 		if value == nil {
 			return nil, code, state
@@ -1176,7 +1195,7 @@ func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Id
 	base := approvalBaseOptions(vaultID, deviceID, id, cl, auditRecips, dirDevices, refreshDevices,
 		opts, cwd, resolved, displayRef, replySpecs)
 	base.ItemID = itemID
-	base.Hosts = rr.Meta.Policy.AllowedHosts
+	base.Hosts = rr.Policy.AllowedHosts
 	key, code, state := approval.RequestItemKey(base, &appr.decisionDeviceID)
 	if key == nil {
 		return nil, code, state
@@ -1376,6 +1395,21 @@ func resolveValueFor(stderr io.Writer, st *cache.Store, id *device.Identity, vau
 	}
 	fmt.Fprintf(stderr, "keyref: no usable item key for %s (the use grant expired or was revoked)\n", ref)
 	return nil, exitcode.UnwrapFailed, "no-item-key"
+}
+
+// syncExecPolicy maps a synced item's meta policy onto the exec
+// engine's own policy type. Synced items require an explicit
+// allowCommands list: an empty list allows no command at all
+// (protocol v2 §H). The engine does not import itemcrypt.
+func syncExecPolicy(p itemcrypt.MetaPolicy) exec.Policy {
+	return exec.Policy{
+		Sensitivity:      p.Sensitivity,
+		AllowCommands:    p.AllowCommands,
+		AllowedHosts:     p.AllowedHosts,
+		AllowArgv:        p.AllowArgv,
+		CommandPolicy:    p.CommandPolicy,
+		RequireAllowList: true,
+	}
 }
 
 // metaByRef finds the cached item whose decrypted meta carries ref. One

@@ -11,7 +11,7 @@ import (
 
 	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/local"
+	"github.com/lidessen/keyref/lib/local"
 )
 
 type fakeKeyring struct {

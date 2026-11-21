@@ -11,9 +11,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 )
+
+// Policy is the engine's own per-item execution policy. It carries no
+// source or vault types: each adapter translates its metadata into this
+// shape before calling Run.
+type Policy struct {
+	// Sensitivity is "approval" when the item requires an approval
+	// round; any other value leaves it to the caller's grant rules.
+	Sensitivity string
+	// AllowCommands is the exact-name whitelist. An empty list means
+	// "source default": the built-in deny list, unless RequireAllowList
+	// is set.
+	AllowCommands []string
+	// AllowedHosts restricts the hostnames that may appear in argv.
+	AllowedHosts []string
+	// AllowArgv permits argv placeholders when the caller also passes
+	// --allow-argv.
+	AllowArgv bool
+	// CommandPolicy is "allow-all" when the owner disabled shell
+	// refusal. It only matters together with RequireAllowList.
+	CommandPolicy string
+	// RequireAllowList marks a source where an empty AllowCommands list
+	// allows no command at all (the paired vault, protocol v2 §H). The
+	// built-in deny list is only a slip guard and is not offered as
+	// protection on those items. Local sources leave it false.
+	RequireAllowList bool
+}
 
 // PolicyError is a policy rejection → exit code 10 (design.md §7.6).
 type PolicyError struct{ Reason string }
@@ -91,7 +115,7 @@ const CommandPolicyAllowAll = "allow-all"
 //   - On a local source an empty list keeps the built-in deny list; a
 //     non-empty list is the per-item whitelist written with
 //     `keyref set --allow-command`.
-func ItemAllowsCommand(base string, policy itemcrypt.MetaPolicy, paired bool) bool {
+func ItemAllowsCommand(base string, policy Policy) bool {
 	if len(policy.AllowCommands) > 0 {
 		for _, w := range policy.AllowCommands {
 			if strings.EqualFold(w, base) {
@@ -100,7 +124,7 @@ func ItemAllowsCommand(base string, policy itemcrypt.MetaPolicy, paired bool) bo
 		}
 		return false
 	}
-	if paired {
+	if policy.RequireAllowList {
 		return policy.CommandPolicy == CommandPolicyAllowAll
 	}
 	name := strings.ToLower(base)
@@ -109,7 +133,7 @@ func ItemAllowsCommand(base string, policy itemcrypt.MetaPolicy, paired bool) bo
 
 // commandDenial explains why one layer may not run for one item. ref is
 // empty when the caller names no item (CheckCommand).
-func commandDenial(ref, layer string, policy itemcrypt.MetaPolicy, paired bool) error {
+func commandDenial(ref, layer string, policy Policy) error {
 	item := "the item"
 	if ref != "" {
 		item = "item " + ref
@@ -118,7 +142,7 @@ func commandDenial(ref, layer string, policy itemcrypt.MetaPolicy, paired bool) 
 	case len(policy.AllowCommands) > 0:
 		return &PolicyError{Reason: fmt.Sprintf(
 			"command %q is not in %s's allowCommands whitelist", layer, item)}
-	case paired:
+	case policy.RequireAllowList:
 		return &PolicyError{Reason: fmt.Sprintf(
 			"%s allows no commands: an empty allowCommands list allows nothing on the paired vault; set the commands it may run on iOS", item)}
 	default:
@@ -145,14 +169,14 @@ func stripVersionSuffix(name string) string {
 // effective policy across multiple simultaneously injected items is the
 // intersection, never the union: a permissive item never unlocks
 // another item's secret.
-func CheckCommand(argv []string, searchPath string, policy itemcrypt.MetaPolicy, paired bool) (*ResolvedCommand, error) {
+func CheckCommand(argv []string, searchPath string, policy Policy) (*ResolvedCommand, error) {
 	rc, err := ResolveCommand(argv, searchPath)
 	if err != nil {
 		return nil, err
 	}
 	for _, layer := range rc.Layers {
-		if !ItemAllowsCommand(layer, policy, paired) {
-			return nil, commandDenial("", layer, policy, paired)
+		if !ItemAllowsCommand(layer, policy) {
+			return nil, commandDenial("", layer, policy)
 		}
 	}
 	return rc, nil

@@ -88,9 +88,9 @@
 
 ## 2. 模块、依赖与目录
 
-### 2.1 go.work：四模块共用，不做 vendoring
+### 2.1 go.work：五模块共用，不做 vendoring
 
-拍板：根 `go.work` 连接四个模块（cli、proto、server 与 tools/vectordump——生成跨语言金向量的开发工具，不参与线上字节），共享誊本与密码学代码放独立模块 `proto/`。理由：服务器与 CLI 都要构造/重建誊本并验签（§3），`internal/` 跨模块不可见，复制代码会让两侧誊本漂移；vendoring 冻结依赖、拖慢修补，且 go.work 已是 2026 年多模块仓库的标准做法。Docker 构建以仓库根为 context，`go.work` 在 WORKDIR 内自动生效。
+拍板：根 `go.work` 连接五个模块（cli、lib、proto、server 与 tools/vectordump——生成跨语言金向量的开发工具，不参与线上字节），共享誊本与密码学代码放独立模块 `proto/`，面向嵌入的本地库与执行引擎放独立模块 `lib/`。理由：服务器与 CLI 都要构造/重建誊本并验签（§3），`internal/` 跨模块不可见，复制代码会让两侧誊本漂移；vendoring 冻结依赖、拖慢修补，且 go.work 已是 2026 年多模块仓库的标准做法。Docker 构建以仓库根为 context，`go.work` 在 WORKDIR 内自动生效。
 
 ```
 // /go.work
@@ -98,13 +98,14 @@ go 1.26.0
 
 use (
 	./cli
+	./lib
 	./proto
 	./server
 	./tools/vectordump
 )
 ```
 
-模块路径为 `github.com/lidessen/keyref/{proto,server,cli,tools/vectordump}`（已由各 go.mod 落地，见第 13 节假设）。
+模块路径为 `github.com/lidessen/keyref/{proto,server,cli,lib,tools/vectordump}`（已由各 go.mod 落地，见第 13 节假设）。
 
 ### 2.2 proto/（共享协议模块）
 
@@ -132,14 +133,11 @@ cli/internal/audit/         // 封箱并上传 exec 审计事件（§6.23）
 cli/internal/client/        // 同步 API 的薄 HTTP 客户端
 cli/internal/config/        // origin 配置（0700 目录）、KEYREF_SERVER 覆盖
 cli/internal/device/        // 设备身份：X25519 HPKE 密钥 + 签名密钥的生成与保管
-cli/internal/exec/          // spawn（os/exec + SysProcAttr）、策略与 shebang、注入、脱敏、pty/reply
-cli/internal/exitcode/      // design §7.6 的退出码表
 cli/internal/itemcrypt/     // CLI 侧解密路径：owner 验签 + grant/meta/secret 解密
 cli/internal/keyring/       // SecretStore 接口；go-keyring 实现；e2e 用的目录实现（§11.4）
 cli/internal/meta/          // list/get：只解 meta，输出掩码
 cli/internal/pair/          // 二维码生成、pair/register、pair/status 轮询、钉死 owner 公钥
 cli/internal/qr/            // skip2/go-qrcode 封装；ToSmallString 的 ▀▄█ 半块字符写 stdout
-cli/internal/secret/        // memguard 守护缓冲区、秘密 JSON 无字符串解析
 cli/internal/session/       // 挑战→令牌、token 复用与续期
 cli/internal/cache/         // cache.sqlite（模式 0600，密文缓存 + 已验签 revision）
 cli/internal/syncing/       // 把服务器变更应用到本地缓存（cursor=0 引导、撤销检测）
@@ -147,6 +145,18 @@ cli/internal/testowner/     // 测试与 e2e 用的软件 P-256 owner（§11.2�
 cli/e2e/doc.go              // package e2e；无 build 标签，只有包注释（防 ./... 报 exclude all Go files）
 cli/e2e/*_test.go           // 全部带 //go:build e2e（§11）
 ```
+
+### 2.3.1 lib/
+
+```
+lib/go.mod                  // module github.com/lidessen/keyref/lib
+lib/local/                  // 离线加密库：Create/Open/Put/Import/Use/Stat/List/Delete
+lib/exec/                   // 执行引擎：策略与 shebang、注入、脱敏、pty/reply；策略类型 exec.Policy
+lib/secret/                 // memguard 守护缓冲区、秘密 JSON 无字符串解析
+lib/exitcode/               // design §7.6 的退出码表
+```
+
+`lib` 不 import `cli`（含 `cli/internal/*`）；source 适配层留在 `cli/cmd/keyref`。
 
 ### 2.4 server/
 

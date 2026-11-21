@@ -34,7 +34,8 @@ import (
 	"github.com/lidessen/keyref/cli/internal/client"
 	"github.com/lidessen/keyref/cli/internal/device"
 	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/exitcode"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 // PollInterval is the polling floor of design §5/§8.3: requests faster
@@ -339,7 +340,7 @@ func run(opts *Options, unwrap unwrapFunc, decisionDevice *string) (*Result, int
 		switch client.Code(err) {
 		case "quota_exceeded":
 			fmt.Fprintln(opts.Stderr, "keyref: approval queue is full (10 pending); try again later")
-			return nil, 13, "approval-queue-full"
+			return nil, exitcode.ApprovalDenied, "approval-queue-full"
 		case "not_found":
 			// The subject is gone: for an item that is an unknown ref
 			// (§7.6), for a message it is "unknown, expired or already
@@ -349,12 +350,12 @@ func run(opts *Options, unwrap unwrapFunc, decisionDevice *string) (*Result, int
 			} else {
 				fmt.Fprintf(opts.Stderr, "keyref: unknown ref %q\n", opts.Ref)
 			}
-			return nil, 11, "unknown-ref"
+			return nil, exitcode.UnknownRef, "unknown-ref"
 		case "approval_not_pending":
 			// One live approval per message (§14.3): another consumption
 			// of the same message is in flight.
 			fmt.Fprintln(opts.Stderr, "keyref: another consumption of this message is already pending")
-			return nil, 13, "approval-busy"
+			return nil, exitcode.ApprovalDenied, "approval-busy"
 		}
 		fmt.Fprintln(opts.Stderr, "keyref: cannot submit approval request")
 		return nil, 1, "approval-submit"
@@ -381,13 +382,13 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 		if !first {
 			if time.Now().Add(PollInterval).After(deadline) {
 				fmt.Fprintln(opts.Stderr, "keyref: approval timed out")
-				return nil, 13, "approval-timeout"
+				return nil, exitcode.ApprovalDenied, "approval-timeout"
 			}
 			time.Sleep(PollInterval)
 		}
 		if time.Now().After(deadline) {
 			fmt.Fprintln(opts.Stderr, "keyref: approval timed out")
-			return nil, 13, "approval-timeout"
+			return nil, exitcode.ApprovalDenied, "approval-timeout"
 		}
 		first = false
 
@@ -398,7 +399,7 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 			}
 			if time.Now().After(deadline) {
 				fmt.Fprintln(opts.Stderr, "keyref: approval timed out")
-				return nil, 13, "approval-timeout"
+				return nil, exitcode.ApprovalDenied, "approval-timeout"
 			}
 			continue // transient network errors retry until the deadline
 		}
@@ -413,14 +414,14 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 			continue
 		case wire.ApprovalStatusDenied:
 			fmt.Fprintln(opts.Stderr, "keyref: approval denied on the phone")
-			return nil, 13, "approval-denied"
+			return nil, exitcode.ApprovalDenied, "approval-denied"
 		case wire.ApprovalStatusExpired:
 			fmt.Fprintln(opts.Stderr, "keyref: approval expired")
-			return nil, 13, "approval-expired"
+			return nil, exitcode.ApprovalDenied, "approval-expired"
 		case wire.ApprovalStatusConsumed:
 			// Someone already picked this wrap up; it cannot be reused.
 			fmt.Fprintln(opts.Stderr, "keyref: approval wrap already consumed")
-			return nil, 13, "approval-consumed"
+			return nil, exitcode.ApprovalDenied, "approval-consumed"
 		case wire.ApprovalStatusApproved:
 			// Before anything is unwrapped: the decision must be signed by
 			// a device the owner's directory lists as active, for this
@@ -428,7 +429,7 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 			// nothing, so an unverified wrap is just server bytes.
 			if err := verifyDecision(opts, approvalID, requestCiphertext, resp); err != nil {
 				fmt.Fprintln(opts.Stderr, "keyref: approval decision is not signed by a trusted device")
-				return nil, 13, "approval-decision-unverified"
+				return nil, exitcode.ApprovalDenied, "approval-decision-unverified"
 			}
 			// The binding subject is the message for an sms: consumption
 			// (protocol §3.7 one-time-message-key) and the item
@@ -441,7 +442,7 @@ func pollAndWait(opts *Options, approvalID string, requestCiphertext, ephPrivate
 				requestCiphertext, resp.OneTimeEnc, resp.OneTimeWrappedKey, ephPrivate)
 			if err != nil {
 				fmt.Fprintln(opts.Stderr, "keyref: one-time wrap did not open (request or subject mismatch)")
-				return nil, 13, "approval-unwrap"
+				return nil, exitcode.ApprovalDenied, "approval-unwrap"
 			}
 			res.DecisionDeviceID = decidedBy
 			return res, 0, ""

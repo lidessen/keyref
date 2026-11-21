@@ -9,14 +9,19 @@ import (
 	"testing"
 
 	osexec "os/exec"
-
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 )
 
 // localPolicy is the synthetic policy a local source gets: no per-item
 // record, the built-in deny list applies (design.md §7.3).
-func localPolicy() itemcrypt.MetaPolicy {
-	return itemcrypt.MetaPolicy{Sensitivity: "standard", CommandPolicy: "deny-shells"}
+func localPolicy() Policy {
+	return Policy{Sensitivity: "standard", CommandPolicy: "deny-shells"}
+}
+
+// requireAllowList marks a policy as coming from a source where an
+// empty allowCommands list allows nothing (the paired vault).
+func requireAllowList(p Policy) Policy {
+	p.RequireAllowList = true
+	return p
 }
 
 // truePath resolves a real, allowed binary for interpreter chains
@@ -46,7 +51,7 @@ func TestDenyListRejectsShellsAndDumps(t *testing.T) {
 	// Use the test binary's own directory structure: resolve real
 	// system tools through PATH.
 	for _, name := range []string{"sh", "echo", "cat", "env", "base64"} {
-		_, err := CheckCommand([]string{name}, os.Getenv("PATH"), localPolicy(), false)
+		_, err := CheckCommand([]string{name}, os.Getenv("PATH"), localPolicy())
 		if !isPolicyErr(err) {
 			t.Fatalf("%s: expected policy rejection, got %v", name, err)
 		}
@@ -56,13 +61,13 @@ func TestDenyListRejectsShellsAndDumps(t *testing.T) {
 func TestAllowCommandsWhitelistOverridesDeny(t *testing.T) {
 	// A whitelisted name overrides the default denial
 	// (design.md §7.3).
-	echoOnly := itemcrypt.MetaPolicy{AllowCommands: []string{"echo"}}
-	_, err := CheckCommand([]string{"echo"}, os.Getenv("PATH"), echoOnly, false)
+	echoOnly := Policy{AllowCommands: []string{"echo"}}
+	_, err := CheckCommand([]string{"echo"}, os.Getenv("PATH"), echoOnly)
 	if err != nil {
 		t.Fatalf("whitelisted echo rejected: %v", err)
 	}
 	// A non-empty whitelist excludes everything else.
-	_, err = CheckCommand([]string{"ls"}, os.Getenv("PATH"), echoOnly, false)
+	_, err = CheckCommand([]string{"ls"}, os.Getenv("PATH"), echoOnly)
 	if !isPolicyErr(err) {
 		t.Fatalf("non-whitelisted ls accepted: %v", err)
 	}
@@ -73,44 +78,44 @@ func TestAllowCommandsWhitelistOverridesDeny(t *testing.T) {
 func TestPairedVaultRequiresExplicitAllowCommands(t *testing.T) {
 	// Empty allowCommands + the default commandPolicy: nothing runs,
 	// including commands the deny list would never have caught.
-	if ItemAllowsCommand("curl", localPolicy(), true) {
+	if ItemAllowsCommand("curl", requireAllowList(localPolicy())) {
 		t.Fatal("paired vault: an empty allowCommands list must allow nothing")
 	}
-	if ItemAllowsCommand("sh", localPolicy(), true) {
+	if ItemAllowsCommand("sh", requireAllowList(localPolicy())) {
 		t.Fatal("paired vault: sh must not pass an empty allowCommands list")
 	}
 	// The refusal names iOS as the place to fix it.
-	_, err := CheckCommand([]string{"true"}, os.Getenv("PATH"), localPolicy(), true)
+	_, err := CheckCommand([]string{"true"}, os.Getenv("PATH"), requireAllowList(localPolicy()))
 	var pe *PolicyError
 	if !errors.As(err, &pe) || !strings.Contains(pe.Reason, "iOS") {
 		t.Fatalf("paired-vault denial must point at iOS: %v", err)
 	}
 
 	// A non-empty list stays an exact whitelist.
-	curlOnly := itemcrypt.MetaPolicy{CommandPolicy: "deny-shells", AllowCommands: []string{"curl"}}
-	if !ItemAllowsCommand("curl", curlOnly, true) || ItemAllowsCommand("sh", curlOnly, true) {
+	curlOnly := requireAllowList(Policy{CommandPolicy: "deny-shells", AllowCommands: []string{"curl"}})
+	if !ItemAllowsCommand("curl", curlOnly) || ItemAllowsCommand("sh", curlOnly) {
 		t.Fatal("paired vault: allowCommands must stay an exact whitelist")
 	}
 
 	// commandPolicy = allow-all is the owner's explicit opt-out: any
 	// command passes an empty list.
-	open := itemcrypt.MetaPolicy{CommandPolicy: CommandPolicyAllowAll}
-	if !ItemAllowsCommand("sh", open, true) {
+	open := requireAllowList(Policy{CommandPolicy: CommandPolicyAllowAll})
+	if !ItemAllowsCommand("sh", open) {
 		t.Fatal("paired vault: commandPolicy=allow-all must allow any command")
 	}
 	// A whitelist still tightens an allow-all item: listing can only
 	// narrow.
-	openButListed := itemcrypt.MetaPolicy{CommandPolicy: CommandPolicyAllowAll, AllowCommands: []string{"curl"}}
-	if ItemAllowsCommand("sh", openButListed, true) {
+	openButListed := requireAllowList(Policy{CommandPolicy: CommandPolicyAllowAll, AllowCommands: []string{"curl"}})
+	if ItemAllowsCommand("sh", openButListed) {
 		t.Fatal("allowCommands must still win over allow-all")
 	}
 	// Unknown or missing commandPolicy values fail closed.
-	if ItemAllowsCommand("curl", itemcrypt.MetaPolicy{}, true) {
+	if ItemAllowsCommand("curl", requireAllowList(Policy{})) {
 		t.Fatal("an empty commandPolicy must keep the paired vault strict")
 	}
 
 	// The local source keeps the built-in deny list.
-	if ItemAllowsCommand("sh", localPolicy(), false) || !ItemAllowsCommand("curl", localPolicy(), false) {
+	if ItemAllowsCommand("sh", localPolicy()) || !ItemAllowsCommand("curl", localPolicy()) {
 		t.Fatal("local source must keep the built-in deny list")
 	}
 }
@@ -118,7 +123,7 @@ func TestPairedVaultRequiresExplicitAllowCommands(t *testing.T) {
 func TestShebangFollowedAndDenied(t *testing.T) {
 	dir := t.TempDir()
 	shScript := writeScript(t, dir, "innocent", "#!/bin/sh\necho hi\n", 0o755)
-	_, err := CheckCommand([]string{shScript}, "", localPolicy(), false)
+	_, err := CheckCommand([]string{shScript}, "", localPolicy())
 	if !isPolicyErr(err) {
 		t.Fatalf("#!/bin/sh script accepted: %v", err)
 	}
@@ -128,7 +133,7 @@ func TestShebangFollowedAndDenied(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/env"); err == nil {
 		if _, err := osexec.LookPath("python3"); err == nil {
 			pyScript := writeScript(t, dir, "pyscript", "#!/usr/bin/env python3\nprint(1)\n", 0o755)
-			_, err := CheckCommand([]string{pyScript}, os.Getenv("PATH"), localPolicy(), false)
+			_, err := CheckCommand([]string{pyScript}, os.Getenv("PATH"), localPolicy())
 			if !isPolicyErr(err) {
 				t.Fatalf("#!/usr/bin/env python3 script accepted: %v", err)
 			}
@@ -140,7 +145,7 @@ func TestShebangFollowedAndDenied(t *testing.T) {
 	ownInterp := writeScript(t, dir, "owninterp", "#!"+truePath(t)+"\n", 0o755)
 	_ = ownInterp
 	benign := writeScript(t, dir, "benign", "#!"+filepath.Join(dir, "owninterp")+"\n", 0o755)
-	if _, err := CheckCommand([]string{benign}, "", localPolicy(), false); err != nil {
+	if _, err := CheckCommand([]string{benign}, "", localPolicy()); err != nil {
 		t.Fatalf("benign script chain rejected: %v", err)
 	}
 }
@@ -159,7 +164,7 @@ func TestSetgidRejected(t *testing.T) {
 	if fi, err := os.Stat(p); err != nil || fi.Mode()&os.ModeSetgid == 0 {
 		t.Skip("platform dropped the setgid bit; nothing to test")
 	}
-	_, err := CheckCommand([]string{p}, "", localPolicy(), false)
+	_, err := CheckCommand([]string{p}, "", localPolicy())
 	if !isStartErr(err) {
 		t.Fatalf("setgid file accepted: %v", err)
 	}
@@ -179,18 +184,18 @@ func ownGroupID(t *testing.T) int {
 }
 
 func TestUnresolvableFailsClosed(t *testing.T) {
-	_, err := CheckCommand([]string{"definitely-not-a-real-binary-xyz"}, os.Getenv("PATH"), localPolicy(), false)
+	_, err := CheckCommand([]string{"definitely-not-a-real-binary-xyz"}, os.Getenv("PATH"), localPolicy())
 	if !isStartErr(err) {
 		t.Fatalf("unresolvable argv0 accepted: %v", err)
 	}
 	dir := t.TempDir()
-	_, err = CheckCommand([]string{filepath.Join(dir, "missing")}, "", localPolicy(), false)
+	_, err = CheckCommand([]string{filepath.Join(dir, "missing")}, "", localPolicy())
 	if !isStartErr(err) {
 		t.Fatalf("missing path accepted: %v", err)
 	}
 	// Non-executable files are rejected too.
 	p := writeScript(t, dir, "noexec", "#!"+truePath(t)+"\n", 0o644)
-	_, err = CheckCommand([]string{p}, "", localPolicy(), false)
+	_, err = CheckCommand([]string{p}, "", localPolicy())
 	if !isStartErr(err) {
 		t.Fatalf("non-executable accepted: %v", err)
 	}
@@ -203,7 +208,7 @@ func TestSymlinkDisguiseResolved(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CheckCommand([]string{link}, "", localPolicy(), false); err != nil {
+	if _, err := CheckCommand([]string{link}, "", localPolicy()); err != nil {
 		t.Fatalf("symlinked benign tool rejected: %v", err)
 	}
 	// A symlink named innocently but pointing at a denied binary is
@@ -212,7 +217,7 @@ func TestSymlinkDisguiseResolved(t *testing.T) {
 	if err := os.Symlink("/bin/sh", shLink); err != nil {
 		t.Skip("/bin/sh not present")
 	}
-	_, err := CheckCommand([]string{shLink}, "", localPolicy(), false)
+	_, err := CheckCommand([]string{shLink}, "", localPolicy())
 	if !isPolicyErr(err) {
 		t.Fatalf("disguised sh accepted: %v", err)
 	}
@@ -221,7 +226,7 @@ func TestSymlinkDisguiseResolved(t *testing.T) {
 func TestPATHSearchMatchesExecvp(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "pathsearched", "#!"+truePath(t)+"\n", 0o755)
-	if _, err := CheckCommand([]string{"pathsearched"}, dir, localPolicy(), false); err != nil {
+	if _, err := CheckCommand([]string{"pathsearched"}, dir, localPolicy()); err != nil {
 		t.Fatalf("PATH search failed: %v", err)
 	}
 }

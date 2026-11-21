@@ -1,6 +1,6 @@
 # Local store library
 
-`github.com/lidessen/keyref/cli/local` provides an independent, offline store
+`github.com/lidessen/keyref/lib/local` provides an independent, offline store
 for applications embedding Keyref. It is separate from the synchronized vault:
 it needs no pairing or server, and does not implement owner approval, grants,
 remote audit, sync or the owner-side `LOCAL` item type.
@@ -76,10 +76,44 @@ against another process with the same filesystem authority changing that path
 between checks. If initialization fails after creating the file, the incomplete
 file is left for inspection; the library will not silently overwrite it.
 
-The package is in the Go `cli` module, which pins its `proto` dependency.
-Applications use `github.com/lidessen/keyref/cli/local` directly (`Open` /
-`Create`); `cli/internal/localvault` resolves the master key from the OS
-keyring or `KEYREF_LOCAL_MASTER`. No other backend ships today.
+The package lives in the standalone `github.com/lidessen/keyref/lib` module and
+must never import `cli/`. This package depends only on
+`github.com/lidessen/keyref/proto` and the pure-Go SQLite driver; the module as
+a whole additionally carries the execution engine's `memguard` and `x/sys`
+(pty), but none of the CLI's keyring, D-Bus, QR or HTTP dependencies.
+Applications use `github.com/lidessen/keyref/lib/local` directly
+(`Create` / `Open`); `cli/internal/localvault` resolves the master key from the
+OS keyring or `KEYREF_LOCAL_MASTER`. No other backend ships today. The
+repository is public, so no `GOPRIVATE` setting is needed to fetch it; a
+consumer outside this workspace normally pulls it through a `replace` directive
+or a pinned version.
 
-The Keyref repository is private. Consumers need authorized Git access and should
-set `GOPRIVATE=github.com/lidessen/keyref` when resolving its modules.
+## Errors
+
+Failures are distinguishable without parsing messages (design §17.7); check them
+with `errors.Is`:
+
+| Error | Meaning |
+| --- | --- |
+| `ErrStoreNotFound` | no vault file at that path |
+| `ErrStoreExists` | something is already at the path where a new vault was to be created |
+| `ErrInsecurePermissions` | the vault's directory is not mode 0700, or the vault file is not mode 0600 |
+| `ErrInvalidKey` | the master key does not open this vault — reported while opening, before any row is read |
+| `ErrInvalidRef` | a ref outside the design §6.1 grammar |
+| `ErrInvalidValueSize` | a value of 0 bytes or more than 1 MiB |
+| `ErrNotFound` | no such entry, including a ref that could never have one |
+| `ErrWriteLimit` | the vault's 2³²−1 write budget is spent; every written row is kept |
+| `ErrCorruptStore` | the file's contents do not read as a vault: a missing or malformed metadata row, ciphertext or meta that does not decrypt or validate, or a stored value outside the format's limits |
+| `ErrMetaTooLarge` | a sealed meta blob over the 64 KiB bound |
+| `ErrClosed` | the store is closed |
+| `ErrInvalidStore` | a path that cannot hold a vault, an argument rejected outright (an entry policy with an empty or NUL member, an import batch over its limits) and database failures with nothing better to say |
+
+`Error()` returns that fixed text and never includes database or filesystem
+error text, which can carry SQL text and parameter values; the underlying cause
+stays reachable through `Unwrap` for a caller whose own audience can take it. A
+cancelled or expired `context` comes back unchanged and is never reported as a
+vault error.
+
+A wrong key and damaged contents are separate failures: the key is verified
+against the vault's check blob while opening, so an `ErrCorruptStore` after a
+successful open is the row, not the caller's key.

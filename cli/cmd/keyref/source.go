@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -14,16 +15,15 @@ import (
 
 	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/config"
-	"github.com/lidessen/keyref/cli/internal/exec"
-	"github.com/lidessen/keyref/cli/internal/exitcode"
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
 	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/localvault"
 	"github.com/lidessen/keyref/cli/internal/meta"
-	"github.com/lidessen/keyref/cli/internal/secret"
 	"github.com/lidessen/keyref/cli/internal/session"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/local"
+	"github.com/lidessen/keyref/lib/exec"
+	"github.com/lidessen/keyref/lib/exitcode"
+	"github.com/lidessen/keyref/lib/local"
+	"github.com/lidessen/keyref/lib/secret"
 	"golang.org/x/term"
 )
 
@@ -121,13 +121,21 @@ func checkPrivateDir(path string) error {
 // 2026-11: local sources used to ignore the flag).
 var errLocalLocked = errors.New("the session is locked; run `keyref unlock`")
 
-// localOpenError turns an openLocal failure into an exit code: a lock
-// is exit 12, everything else is a generic failure.
-func localOpenError(err error) int {
+// localOpenCode is the exit code for an openLocal failure: a lock is
+// exit 12, everything else is a generic failure (design §17.8).
+func localOpenCode(err error) int {
 	if errors.Is(err, errLocalLocked) {
-		return fatalf(exitcode.SessionLocked, "%v", err)
+		return exitcode.SessionLocked
 	}
-	return fatalf(1, "%v", err)
+	return 1
+}
+
+// localOpenError reports an openLocal failure on the process stderr and
+// returns its exit code. Command paths use it; the MCP tool layer calls
+// localOpenCode instead, because an MCP client never sees stderr
+// (design §17.5).
+func localOpenError(err error) int {
+	return fatalf(localOpenCode(err), "%v", err)
 }
 
 // openLocal opens a local source's vault. The master key is wiped as
@@ -152,11 +160,23 @@ func openLocal(p config.Paths, spec source.Spec) (*local.Store, error) {
 	}
 	defer secret.Wipe(key)
 	vault, err := localvault.Open(spec, key)
-	if errors.Is(err, local.ErrInvalidKey) {
-		return nil, fmt.Errorf("the master key does not match local source %q", spec.Name)
-	}
 	if err != nil {
-		return nil, fmt.Errorf("could not open local source %q: %w", spec.Name, err)
+		// The library's classification decides the wording (design
+		// §17.7): an embedder and the CLI say the same thing about the
+		// same failure.
+		switch {
+		case errors.Is(err, local.ErrInvalidKey):
+			return nil, fmt.Errorf("the master key does not match local source %q", spec.Name)
+		case errors.Is(err, local.ErrStoreNotFound):
+			// The vault disappeared between the check above and the open.
+			return nil, fmt.Errorf("local source %q has no vault yet; run `keyref init --source %s`", spec.Name, spec.Name)
+		case errors.Is(err, local.ErrInsecurePermissions):
+			// The directory was checked above; this is the vault file's
+			// own mode.
+			return nil, fmt.Errorf("the vault file of local source %q must be private (mode 0600)", spec.Name)
+		default:
+			return nil, fmt.Errorf("could not open local source %q: %w", spec.Name, err)
+		}
 	}
 	return vault, nil
 }
@@ -366,6 +386,45 @@ func cmdDelete(args []string) int {
 	return 0
 }
 
+// confirmReveal asks for confirmation on the controlling terminal
+// before printing a secret (design §17.4). It never reads stdin and
+// never writes stdout, so `keyref get ref --reveal | pbcopy` keeps
+// working; without a controlling terminal it refuses. There is no flag
+// or environment variable that skips it.
+func confirmReveal(ref string) error {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("--reveal needs a controlling terminal to confirm: %v", err)
+	}
+	defer tty.Close()
+	if _, err := fmt.Fprintf(tty, "print the raw value of %q? [y/N] ", ref); err != nil {
+		return fmt.Errorf("could not write the confirmation prompt: %v", err)
+	}
+	answer, err := readConfirmLine(tty)
+	if err != nil {
+		return fmt.Errorf("could not read the confirmation: %v", err)
+	}
+	if !confirmed(answer) {
+		return errors.New("reveal cancelled: no confirmation on the controlling terminal")
+	}
+	return nil
+}
+
+// confirmed accepts only an explicit yes; everything else refuses.
+func confirmed(answer string) bool {
+	return answer == "y" || answer == "yes"
+}
+
+// readConfirmLine accepts a line ending in LF or CRLF and treats every
+// other answer as refusal.
+func readConfirmLine(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return strings.ToLower(strings.TrimSpace(line)), nil
+}
+
 // runLocalGet shows one local entry from its encrypted meta. Without
 // --reveal it never decrypts the secret; --reveal writes the raw secret
 // bytes to stdout and nothing else.
@@ -381,7 +440,12 @@ func runLocalGet(p config.Paths, spec source.Spec, ref, format string, reveal bo
 	if reveal {
 		// Deliberate, explicitly requested plaintext path. It exists
 		// for local sources only: the paired vault has no reveal at
-		// all (design.md §16).
+		// all (design.md §16). The confirmation runs on the controlling
+		// terminal, never on stdin/stdout, so piping the value still
+		// works and an agent without a terminal is refused (§17.4).
+		if err := confirmReveal(ref); err != nil {
+			return fatalf(exitcode.PolicyRejection, "%v", err)
+		}
 		err := vault.Use(context.Background(), ref, func(value []byte) error {
 			_, err := os.Stdout.Write(value)
 			return err
@@ -524,16 +588,16 @@ func checkSecretSize(value []byte) ([]byte, error) {
 
 // ---- exec on a local source ----
 
-// localItemMeta maps a local row onto the exec meta the shared engine
-// consumes. A row that names its own allowCommands gets exactly that
-// whitelist; without one the built-in deny list applies. argv injection
-// stays off: nothing in a local vault records consent to putting a
-// secret in process arguments.
-func localItemMeta(m *local.Meta) *itemcrypt.Meta {
-	return &itemcrypt.Meta{
-		V: 1, Ref: m.Ref, Name: m.Ref, Description: m.Description,
-		Type: "local", Masked: m.Masked, Injectable: true,
-		Policy: itemcrypt.MetaPolicy{
+// localExecRef maps a local row onto the exec engine's own policy. A
+// row that names its own allowCommands gets exactly that whitelist;
+// without one the built-in deny list applies. argv injection stays off:
+// nothing in a local vault records consent to putting a secret in
+// process arguments.
+func localExecRef(m *local.Meta) *exec.ResolvedRef {
+	return &exec.ResolvedRef{
+		Ref:        m.Ref,
+		Injectable: true,
+		Policy: exec.Policy{
 			Sensitivity:   "standard",
 			CommandPolicy: "deny-shells",
 			AllowCommands: m.Policy.AllowCommands,
@@ -552,7 +616,10 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 	}
 	vault, err := openLocal(p, spec)
 	if err != nil {
-		return localOpenError(err)
+		// opts.Stderr is the caller's channel: the CLI passes the
+		// process stderr, the MCP exec tool passes the buffer that
+		// becomes the tool result (design §17.5, issue #3).
+		return fatalfTo(opts.Stderr, localOpenCode(err), "%v", err)
 	}
 	defer vault.Close()
 
@@ -568,11 +635,11 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 		m, err := vault.Stat(context.Background(), ref)
 		switch {
 		case err == nil:
-			req.Refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: localItemMeta(m)}
+			req.Refs[ref] = localExecRef(m)
 		case errors.Is(err, local.ErrNotFound):
-			// An unknown ref still needs a meta for the policy pass;
-			// it resolves to exit 11 before any value is read.
-			req.Refs[ref] = &exec.ResolvedRef{Ref: ref, Meta: localItemMeta(&local.Meta{Ref: ref})}
+			// An unknown ref still needs a policy for the pass; it
+			// resolves to exit 11 before any value is read.
+			req.Refs[ref] = localExecRef(&local.Meta{Ref: ref})
 		default:
 			fmt.Fprintf(opts.Stderr, "keyref: could not read %q: %v\n", ref, err)
 			return 1

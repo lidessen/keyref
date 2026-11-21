@@ -10,7 +10,7 @@ The trust boundary is the whole design: the server stores ciphertext only and ca
 
 ## Status (2026-11-19)
 
-- **Active:** the standalone `lib` module (local vault + exec engine) and the `keyref` CLI. Stabilising the `local` source is the current priority.
+- **Active:** embedding surfaces — the standalone `lib` module is extracted, the CLI's `local` source is stable, `keyref mcp` serves whichever source it pinned at startup, and `lib/local` classifies its failures (design §17.7). The engine imports no CLI code; remaining local debt is K1's audit trail and project-level allowlist, both of which need a design decision beyond §16.
 - **Frozen:** the paired/sync path. The server stays buildable and self-hostable, but gets no new sync-protocol features.
 - **Deferred:** the human-facing app and approvals. The native iOS app and the Android SMS collector were removed from this repository; the app is planned as a WebView shell over a web UI. The design and protocol docs still describe the intended owner model and are the spec of record for that work.
 - **Next target:** self-hosted remote read/write — deploy `keyref-server`, point the CLI at it (`--server` / `KEYREF_SERVER`), sign in with GitHub, and read/write credentials without an owner app or approvals. The key-custody model for that path is not settled yet and must be decided before implementing it.
@@ -23,20 +23,21 @@ The trust boundary is the whole design: the server stores ciphertext only and ca
 | `docs/protocol.md` | The wire contract — endpoints, request/response shapes, exact transcript byte layouts |
 | `docs/ios-ui.md` | Interaction spec for the deferred app: information architecture, per-screen states and final copy |
 | `proto/` | Shared Go module: `crypto/` (HPKE, AEAD, HKDF, keys) and `wire/` (transcripts, entity ids, signatures) |
+| `lib/` | Standalone Go module for embedding: `local/` (offline encrypted store), `exec/` (policy checks, injection, spawn, redaction), `secret/` (guarded buffers), `exitcode/` |
 | `server/` | `keyref-server`: ciphertext sync API, Go + embedded SQLite (frozen; self-hostable) |
 | `cli/` | The `keyref` CLI (Go) — the agent-facing entry point |
 | `tools/vectordump/` | Generates the cross-language golden vectors from Go (the reference implementation) |
 | `scripts/` | Local dev scripts (server, CLI install, docker) |
 
-`go.work` joins four modules — `cli`, `server`, `proto`, `tools/vectordump`. There is no vendoring and no root Go module, so `go build ./...` at the repo root fails; always target a module (`go build -C cli ./...`). A fifth module for the standalone library is planned per design §17.7 and is not created yet.
+`go.work` joins five modules — `cli`, `lib`, `server`, `proto`, `tools/vectordump`. There is no vendoring and no root Go module, so `go build ./...` at the repo root fails; always target a module (`go build -C cli ./...`). `cli/go.mod` carries a `replace` from `github.com/lidessen/keyref/lib` to `../lib` so `GOWORK=off` builds work from a checkout without a published release.
 
 ## Build, test, run
 
 **Go** (CI runs exactly this; see `.github/workflows/ci.yml`):
 
 ```sh
-go vet  -C server ./... && go vet  -C cli ./... && go vet  -C proto ./... && go vet  -C tools/vectordump ./...
-go test -C server ./... && go test -C cli ./... && go test -C proto ./... && go test -C tools/vectordump ./...
+go vet  -C server ./... && go vet  -C cli ./... && go vet  -C lib ./... && go vet  -C proto ./... && go vet  -C tools/vectordump ./...
+go test -C server ./... && go test -C cli ./... && go test -C lib ./... && go test -C proto ./... && go test -C tools/vectordump ./...
 ```
 
 Single test / package:
@@ -92,9 +93,13 @@ A local source's master key lives in the OS keyring (`cli/internal/localvault`),
 
 VMK (human-owned root key) wraps item keys → item keys encrypt metadata and secret separately → the secret blob is encrypted separately from the meta blob, so `list`/`get` can show masked values without touching the secret. Approval-sensitive items (`sensitivity = approval`) never give the CLI a long-lived item key: each `exec` gets a one-time HPKE wrap, delivered after the owner approves, bound to `approval_id` + `item_id` + a digest of the request transcript. The local source is a simpler, independent instance of the same idea: one master key in the OS keyring derives separate index, meta and value keys.
 
+### Standalone library
+
+`lib/` is the embedder-facing module (design §17.7). `lib/local` is the offline encrypted store (`Create`/`Open`/`Put`/`Use`/`Delete`/`List`/`Stat`/`Import`/`Close`); `lib/exec` is the execution engine (`Run`, `Redactor`, `CheckCommand`, `CollectRefs`). The engine knows no sources: adapters translate their metadata into `exec.Policy` and set `RequireAllowList` for sources (like the paired vault) where an empty `allowCommands` list allows nothing. `lib/secret` holds the guarded buffers, and `lib/exitcode` pins §7.6. The CLI's source-specific code (`cli/internal/itemcrypt`, `localvault`, `source`, `syncing`, …) stays in the `cli` module.
+
 ### Execution path
 
-`keyref exec` resolves argv0 through PATH, symlinks and shebang interpreters (bounded hops), checks the item's own `allowCommands`/`allowedHosts`/`allowArgv` policy, and only then spawns. On the paired vault an item with an empty `allowCommands` allows no command at all (exit 10) unless the owner set `commandPolicy = allow-all`; the built-in deny-shell list (`sh`, `env`, `echo`, `cat`, `base64`, `python`, …) applies to local rows with an empty `allowCommands` only and is a slip guard, never a boundary. All validation happens *before* the spawn — a rejected command never starts a child. The approval round runs when the meta says `sensitivity = approval` **or** this device holds no usable `use` grant (protocol v2 I); what the decision delivers follows the row (secret value for a row without `secret_ciphertext`, one-time item key otherwise). Output is redacted in multiple encodings; the exit-code table is pinned in `cli/internal/exitcode` (10 policy, 11 unknown ref, 12 locked, 13 approval denied, 14 redaction failed, 15 injection invalid, 16 unwrap failed, 17 revoked, 18 cannot start).
+`keyref exec` resolves argv0 through PATH, symlinks and shebang interpreters (bounded hops), checks the item's own `allowCommands`/`allowedHosts`/`allowArgv` policy, and only then spawns. On the paired vault an item with an empty `allowCommands` allows no command at all (exit 10) unless the owner set `commandPolicy = allow-all`; the built-in deny-shell list (`sh`, `env`, `echo`, `cat`, `base64`, `python`, …) applies to local rows with an empty `allowCommands` only and is a slip guard, never a boundary. All validation happens *before* the spawn — a rejected command never starts a child. The approval round runs when the meta says `sensitivity = approval` **or** this device holds no usable `use` grant (protocol v2 I); what the decision delivers follows the row (secret value for a row without `secret_ciphertext`, one-time item key otherwise). Output is redacted in multiple encodings; the exit-code table is pinned in `lib/exitcode` (10 policy, 11 unknown ref, 12 locked, 13 approval denied, 14 redaction failed, 15 injection invalid, 16 unwrap failed, 17 revoked, 18 cannot start).
 
 ## Invariants that must not regress
 
@@ -102,7 +107,7 @@ These come from `docs/design.md` §16 — read that section before changing secu
 
 - The server, its logs, its error responses and its analytics never contain decrypted secrets, item names or `ref` values.
 - `list` and `get` never decrypt the secret; they show the `masked` value computed at write time.
-- On the paired vault there is no reveal path: no `--reveal`, no env var, no debug flag that prints plaintext. The child process gets the plaintext, the parent stdout never does. A **local** source is the one deliberate exception: `keyref get <ref> --reveal` writes the raw bytes to stdout, and only a local source accepts it.
+- On the paired vault there is no reveal path: no `--reveal`, no env var, no debug flag that prints plaintext. The child process gets the plaintext, the parent stdout never does. A **local** source is the one deliberate exception: `keyref get <ref> --reveal` writes the raw bytes to stdout, and only a local source accepts it. It must be confirmed on the controlling terminal (`/dev/tty`, `y`/`yes`); without one it refuses with exit 10, and there is no flag or env var that skips it.
 - Item keys for `approval` items never enter the CLI keyring or `cache.sqlite`. VMK never enters any `kind = cli` envelope.
 - Grants are empty at pairing completion until a human selects items.
 - Revoking a possibly-leaked CLI rotates the item keys it could reach.
@@ -127,4 +132,4 @@ These come from `docs/design.md` §16 — read that section before changing secu
 - `keyref exec --stdin-login` is mutually exclusive with `--stdin`/`--pty`, and the same item cannot be used in two injection positions at once.
 - The CLI zeroes guarded buffers on every exit path via `secret.Purge()`; that is why fatal errors unwind through a panic instead of calling `os.Exit` directly.
 - `out/` and `.build/` are local scratch output and are gitignored — don't commit them.
-- The standalone `lib` module (design §17.7) does not exist yet: the local vault is `cli/local`, the exec engine is `cli/internal/exec`. Do not document an import path that does not build.
+- `lib/` must not import `cli/` (including `cli/internal/*`). The engine's public API uses `exec.Policy`, not `itemcrypt.MetaPolicy`; adapters live in `cli/`.

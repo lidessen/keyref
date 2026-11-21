@@ -29,16 +29,106 @@ import (
 )
 
 var (
-	ErrNotFound     = errors.New("local secret not found")
-	ErrInvalidKey   = errors.New("invalid local vault key")
+	// ErrNotFound reports a ref with no row in the vault.
+	ErrNotFound = errors.New("local secret not found")
+	// ErrInvalidKey reports a master key that does not open this vault.
+	ErrInvalidKey = errors.New("invalid local vault key")
+	// ErrInvalidStore reports a path that cannot hold a vault (relative
+	// path, not a regular file), an argument the store rejects outright
+	// (an entry policy with an empty or NUL member, an import batch over
+	// its limits) and database failures with nothing better to say.
+	// Failures the caller can act on use the specific errors below.
 	ErrInvalidStore = errors.New("invalid local vault")
-	ErrInvalidRef   = errors.New("invalid ref")
+	// ErrInvalidRef reports a ref outside the design §6.1 grammar.
+	ErrInvalidRef = errors.New("invalid ref")
+	// ErrInvalidValueSize reports a value of 0 bytes or more than 1 MiB.
+	ErrInvalidValueSize = errors.New("invalid local secret size")
+	// ErrMetaTooLarge reports a sealed meta blob over the 64 KiB bound.
 	ErrMetaTooLarge = errors.New("local entry meta is too large")
-	ErrClosed       = errors.New("local vault closed")
+	// ErrClosed reports an operation on a closed store.
+	ErrClosed = errors.New("local vault closed")
+
+	// The classification of design §17.7: an embedder must be able to
+	// tell these apart without parsing messages.
+	//
+	// ErrStoreNotFound reports a vault file that is not there.
+	ErrStoreNotFound = errors.New("local vault not found")
+	// ErrStoreExists reports something already at the vault path when a
+	// new vault was to be created.
+	ErrStoreExists = errors.New("local vault already exists")
+	// ErrInsecurePermissions reports a vault whose directory or file can
+	// be read by other users: the directory must be mode 0700 and the
+	// vault file mode 0600.
+	ErrInsecurePermissions = errors.New("local vault permissions are not private")
+	// ErrWriteLimit reports the 2^32−1 write budget of the metadata row:
+	// the vault accepts no further writes and every written row is kept.
+	ErrWriteLimit = errors.New("local vault write limit reached")
+	// ErrCorruptStore reports a vault file whose contents do not read as
+	// a vault: a missing or malformed metadata row, a secret or meta
+	// blob that does not decrypt or validate, or a stored value outside
+	// the format's limits. A master key that does not match is
+	// ErrInvalidKey, reported while opening and before any row is read.
+	ErrCorruptStore = errors.New("corrupt local vault")
 )
+
+// classified pairs a sentinel with a message that is safe to print and,
+// optionally, the underlying error.
+//
+// Error() returns only the message (or the sentinel's own text when
+// there is none): database and filesystem errors can carry SQL text and
+// parameter values, so the library never surfaces them in its messages —
+// the CLI and the MCP layer print Error() verbatim. Unwrap() exposes
+// both the sentinel and the cause, so errors.Is finds the
+// classification and a caller that knows its own audience can inspect
+// the cause itself (design §17.7: the cause stays reachable through
+// Unwrap, while Error() prints only fixed safe text).
+type classified struct {
+	sentinel error
+	msg      string
+	cause    error
+}
+
+func (e *classified) Error() string {
+	if e.msg == "" {
+		return e.sentinel.Error()
+	}
+	return e.msg
+}
+
+func (e *classified) Unwrap() []error {
+	if e.cause == nil {
+		return []error{e.sentinel}
+	}
+	return []error{e.sentinel, e.cause}
+}
+
+// classify returns the plain sentinel when there is nothing to add,
+// otherwise a classified error.
+func classify(sentinel error, msg string, cause error) error {
+	if msg == "" && cause == nil {
+		return sentinel
+	}
+	return &classified{sentinel: sentinel, msg: msg, cause: cause}
+}
+
+// sqlFailure classifies a database failure. A cancelled or expired
+// context is returned unchanged, never folded into another error
+// (design §17.7); anything else keeps the driver's message out of the
+// text while still exposing it through Unwrap.
+func sqlFailure(ctx context.Context, sentinel error, msg string, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return classify(sentinel, msg, cause)
+}
 
 const maxValue = 1 << 20
 const maxMeta = 64 << 10
+
+// writeCap is the vault's total write budget: the metadata row's counter
+// is a 32-bit value and the last writable state is exactly this many
+// writes.
+const writeCap = int64(4294967295)
 const checkText = "keyref-local-v1"
 
 // Policy is the per-entry execution policy stored in the encrypted
@@ -158,22 +248,28 @@ func ReadStoreID(path string) (string, error) {
 	if path == "" || !filepath.IsAbs(path) {
 		return "", ErrInvalidStore
 	}
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", classify(ErrStoreNotFound, "", err)
+		}
+		return "", classify(ErrInvalidStore, "", err)
+	}
 	u := &url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
-		return "", ErrInvalidStore
+		return "", classify(ErrInvalidStore, "", err)
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	var id string
 	if err := db.QueryRow("SELECT id FROM metadata").Scan(&id); err != nil {
-		return "", ErrInvalidStore
+		return "", classify(ErrCorruptStore, "corrupt local vault: could not read the metadata row", err)
 	}
 	if len(id) != 32 {
-		return "", ErrInvalidStore
+		return "", ErrCorruptStore
 	}
 	if _, err := hex.DecodeString(id); err != nil || strings.ToLower(id) != id {
-		return "", ErrInvalidStore
+		return "", ErrCorruptStore
 	}
 	return id, nil
 }
@@ -186,21 +282,44 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		return nil, ErrInvalidStore
 	}
 	parent, err := os.Lstat(filepath.Dir(path))
-	if err != nil || !parent.IsDir() || parent.Mode().Perm()&0077 != 0 {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, classify(ErrStoreNotFound, "", err)
+	case err != nil:
+		return nil, classify(ErrInvalidStore, "", err)
+	case !parent.IsDir():
 		return nil, ErrInvalidStore
+	case parent.Mode().Perm()&0o077 != 0:
+		return nil, ErrInsecurePermissions
 	}
 	if create {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
-			return nil, ErrInvalidStore
+			if errors.Is(err, os.ErrExist) {
+				// Something is already there. A vault-sized regular file
+				// is "already exists"; anything else (a symlink, a
+				// directory) cannot be one at all.
+				if info, lerr := os.Lstat(path); lerr == nil && !info.Mode().IsRegular() {
+					return nil, classify(ErrInvalidStore, "", err)
+				}
+				return nil, classify(ErrStoreExists, "", err)
+			}
+			return nil, classify(ErrInvalidStore, "", err)
 		}
-		if f.Close() != nil {
-			return nil, ErrInvalidStore
+		if cerr := f.Close(); cerr != nil {
+			return nil, classify(ErrInvalidStore, "", cerr)
 		}
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, classify(ErrStoreNotFound, "", err)
+	case err != nil:
+		return nil, classify(ErrInvalidStore, "", err)
+	case !info.Mode().IsRegular():
 		return nil, ErrInvalidStore
+	case info.Mode().Perm() != 0o600:
+		return nil, ErrInsecurePermissions
 	}
 	// The file must already exist; even Open must never create a replacement if
 	// it disappears between the metadata check and SQLite opening it. The
@@ -209,7 +328,7 @@ func open(path string, key []byte, create bool) (*Store, error) {
 	u := &url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw&_busy_timeout=5000"}
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
-		return nil, ErrInvalidStore
+		return nil, classify(ErrInvalidStore, "", err)
 	}
 	db.SetMaxOpenConns(1)
 	fail := func(e error) (*Store, error) { _ = db.Close(); return nil, e }
@@ -236,21 +355,21 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		id := make([]byte, 16)
 		if _, err = rand.Read(id); err != nil {
 			keycrypto.WipeKey(s.key)
-			return fail(ErrInvalidStore)
+			return fail(classify(ErrInvalidStore, "invalid local vault: could not initialize a new vault", err))
 		}
 		s.id = hex.EncodeToString(id)
 		if derive() != nil {
-			return fail(ErrInvalidStore)
+			return fail(classify(ErrInvalidStore, "invalid local vault: could not derive the vault keys", nil))
 		}
 		blob, e := keycrypto.SealBlob(s.key, []byte(checkText+":"+s.id), []byte(checkText))
 		if e != nil {
 			wipe()
-			return fail(ErrInvalidStore)
+			return fail(classify(ErrInvalidStore, "invalid local vault: could not initialize a new vault", e))
 		}
 		tx, e := db.Begin()
 		if e != nil {
 			wipe()
-			return fail(ErrInvalidStore)
+			return fail(classify(ErrInvalidStore, "invalid local vault: could not initialize a new vault", e))
 		}
 		defer tx.Rollback()
 		if _, e = tx.Exec(`CREATE TABLE metadata (id TEXT NOT NULL, check_blob BLOB NOT NULL, writes INTEGER NOT NULL); CREATE TABLE entries (id TEXT PRIMARY KEY, meta BLOB NOT NULL, blob BLOB NOT NULL);`); e == nil {
@@ -261,23 +380,30 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		}
 		if e != nil {
 			wipe()
-			return fail(ErrInvalidStore)
+			return fail(classify(ErrInvalidStore, "invalid local vault: could not initialize a new vault", e))
 		}
 	} else {
 		var blob []byte
 		var blobLen int64
 		var writes int64
-		if err = db.QueryRow("SELECT substr(id,1,33),substr(check_blob,1,129),length(check_blob),writes FROM metadata").Scan(&s.id, &blob, &blobLen, &writes); err != nil || len(s.id) != 32 || blobLen > 128 || blobLen < 28 || writes < 1 || writes > 4294967295 {
-			return fail(ErrInvalidStore)
+		err = db.QueryRow("SELECT substr(id,1,33),substr(check_blob,1,129),length(check_blob),writes FROM metadata").Scan(&s.id, &blob, &blobLen, &writes)
+		if err != nil {
+			return fail(classify(ErrCorruptStore, "corrupt local vault: could not read the metadata row", err))
+		}
+		if len(s.id) != 32 || blobLen > 128 || blobLen < 28 || writes < 1 || writes > writeCap {
+			return fail(ErrCorruptStore)
 		}
 		if _, err = hex.DecodeString(s.id); err != nil || strings.ToLower(s.id) != s.id {
-			return fail(ErrInvalidStore)
+			return fail(ErrCorruptStore)
 		}
 		if derive() != nil {
-			return fail(ErrInvalidStore)
+			return fail(classify(ErrInvalidStore, "invalid local vault: could not derive the vault keys", nil))
 		}
 		plain, e := keycrypto.OpenBlob(s.key, []byte(checkText+":"+s.id), blob)
 		if e != nil || string(plain) != checkText {
+			// The key checked out against nothing: it does not open this
+			// vault (design §17.7 distinguishes this from damage — a
+			// wrong key never gets past here).
 			keycrypto.WipeKey(plain)
 			wipe()
 			return fail(ErrInvalidKey)
@@ -288,7 +414,7 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		// until Use can backfill accurate meta from an authorized read.
 		if e := ensureMetaColumn(db); e != nil {
 			wipe()
-			return fail(ErrInvalidStore)
+			return fail(classify(ErrCorruptStore, "corrupt local vault: could not migrate the schema", e))
 		}
 	}
 	return s, nil
@@ -351,11 +477,41 @@ func hasMetaColumn(ctx context.Context, db interface {
 
 func (s *Store) entryID(ref string) (string, error) {
 	if ref == "" || len(ref) > 512 || strings.ContainsRune(ref, '\x00') {
-		return "", ErrInvalidStore
+		return "", ErrInvalidRef
 	}
 	h := hmac.New(sha256.New, s.indexKey)
 	_, _ = fmt.Fprintf(h, "keyref-local-ref-v1:%s:%s", s.id, ref)
 	return hex.EncodeToString(h.Sum(nil)[:16]), nil
+}
+
+// rowQuerier is what writeBudgetError needs to re-read the counter: a
+// transaction or the dedicated import connection.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// writeBudgetError classifies a write-counter update that affected no
+// rows. An error from the update itself is a database failure; zero
+// affected rows mean either that the budget is spent or that the
+// metadata row is missing, so it re-reads the counter under the same
+// allowExpr the update used before saying which (design §17.7: a spent
+// write budget and a corrupt vault are different failures). allowExpr
+// is a SQL boolean with the same placeholders as args, both chosen by
+// this package.
+func writeBudgetError(ctx context.Context, q rowQuerier, allowExpr string, args []any, cause error) error {
+	if cause != nil {
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not count the write", cause)
+	}
+	// SQLite yields NOT(...) as 0 or 1, so the scan target is an integer.
+	var blocked int64
+	if err := q.QueryRowContext(ctx, "SELECT NOT ("+allowExpr+") FROM metadata", args...).Scan(&blocked); err != nil {
+		// No metadata row (or no readable counter): the vault is damaged.
+		return sqlFailure(ctx, ErrCorruptStore, "corrupt local vault: could not read the write counter", err)
+	}
+	if blocked != 0 {
+		return ErrWriteLimit
+	}
+	return classify(ErrCorruptStore, "corrupt local vault: the write counter did not move", nil)
 }
 
 // Put atomically creates or replaces a secret at ref and reports whether
@@ -372,7 +528,7 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 		return false, ErrInvalidRef
 	}
 	if len(value) == 0 || len(value) > maxValue {
-		return false, ErrInvalidStore
+		return false, ErrInvalidValueSize
 	}
 	if !(Policy{AllowCommands: opts.AllowCommands, AllowedHosts: opts.AllowedHosts}).valid() {
 		return false, ErrInvalidStore
@@ -402,38 +558,38 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 	}
 	aad, err := keycrypto.SecretAAD(s.id, id)
 	if err != nil {
-		return false, ErrInvalidStore
+		return false, classify(ErrInvalidStore, "", err)
 	}
 	blob, err := keycrypto.SealBlob(s.key, aad, value)
 	if err != nil {
-		return false, ErrInvalidStore
+		return false, classify(ErrInvalidStore, "", err)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		return false, ErrInvalidStore
+		return false, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not start a transaction", err)
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, "UPDATE metadata SET writes=writes+1 WHERE writes < 4294967295")
+	res, err := tx.ExecContext(ctx, "UPDATE metadata SET writes=writes+1 WHERE writes < ?", writeCap)
 	if err != nil {
-		return false, ErrInvalidStore
+		return false, writeBudgetError(ctx, tx, "writes < ?", []any{writeCap}, err)
 	}
 	count, err := res.RowsAffected()
-	if err != nil || count != 1 {
-		return false, ErrInvalidStore
+	if err != nil {
+		return false, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not count the write", err)
+	}
+	if count != 1 {
+		return false, writeBudgetError(ctx, tx, "writes < ?", []any{writeCap}, nil)
 	}
 	var exists int
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?)", id).Scan(&exists); err != nil {
-		return false, ErrInvalidStore
+		return false, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entry", err)
 	}
 	_, err = tx.ExecContext(ctx, "INSERT INTO entries(id,meta,blob) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET meta=excluded.meta, blob=excluded.blob", id, metaBlob, blob)
 	if err == nil {
 		err = tx.Commit()
 	}
 	if err != nil {
-		return false, ErrInvalidStore
+		return false, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not commit the write", err)
 	}
 	return exists == 0, nil
 }
@@ -458,36 +614,39 @@ func (s *Store) sealMeta(id string, m *Meta) ([]byte, error) {
 	return blob, nil
 }
 
-// openMeta decrypts and validates one meta blob.
+// openMeta decrypts and validates one meta blob. Every failure here
+// means the stored meta does not read as a meta this build understands —
+// damage or a format it does not know — so it is ErrCorruptStore, never
+// the caller's ref or key (design §17.7).
 func (s *Store) openMeta(id string, blob []byte) (*Meta, error) {
 	if len(blob) < 28 || len(blob) > maxMeta {
-		return nil, ErrInvalidStore
+		return nil, ErrCorruptStore
 	}
 	aad, err := keycrypto.MetaAAD(s.id, id)
 	if err != nil {
-		return nil, ErrInvalidStore
+		return nil, classify(ErrCorruptStore, "", err)
 	}
 	plain, err := keycrypto.OpenBlob(s.metaKey, aad, blob)
 	if err != nil {
-		return nil, ErrInvalidStore
+		return nil, classify(ErrCorruptStore, "", err)
 	}
 	defer keycrypto.WipeKey(plain)
 	var m Meta
 	dec := json.NewDecoder(bytes.NewReader(plain))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&m); err != nil {
-		return nil, ErrInvalidStore
+		return nil, classify(ErrCorruptStore, "", err)
 	}
 	var extra any
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, ErrInvalidStore
+		return nil, classify(ErrCorruptStore, "", err)
 	}
 	if m.V != 1 || !ValidRef(m.Ref) || m.Bytes < 0 || m.Bytes > maxValue || m.Masked == "" || !m.Policy.valid() {
-		return nil, ErrInvalidStore
+		return nil, ErrCorruptStore
 	}
 	gotID, err := s.entryID(m.Ref)
 	if err != nil || gotID != id {
-		return nil, ErrInvalidStore
+		return nil, ErrCorruptStore
 	}
 	// Put forbids empty values. Zero bytes identifies the incomplete
 	// meta produced by the first meta-capable version for legacy rows.
@@ -509,10 +668,7 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 	}
 	rows, err := s.db.QueryContext(ctx, "SELECT substr(id,1,33), substr(meta,1,?) FROM entries WHERE meta IS NOT NULL", maxMeta+1)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, ErrInvalidStore
+		return nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entries", err)
 	}
 	defer rows.Close()
 	var out []Meta
@@ -520,7 +676,7 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 		var id string
 		var blob []byte
 		if err := rows.Scan(&id, &blob); err != nil {
-			return nil, ErrInvalidStore
+			return nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entries", err)
 		}
 		m, err := s.openMeta(id, blob)
 		if err != nil {
@@ -529,10 +685,7 @@ func (s *Store) List(ctx context.Context) ([]Meta, error) {
 		out = append(out, *m)
 	}
 	if err := rows.Err(); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, ErrInvalidStore
+		return nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entries", err)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ref < out[j].Ref })
 	return out, nil
@@ -549,6 +702,8 @@ func (s *Store) Stat(ctx context.Context, ref string) (*Meta, error) {
 	}
 	id, err := s.entryID(ref)
 	if err != nil {
+		// An invalid ref can have no row at all: reads still hash what
+		// they are given, so it simply misses (design §6.1).
 		return nil, ErrNotFound
 	}
 	var blob []byte
@@ -557,10 +712,7 @@ func (s *Store) Stat(ctx context.Context, ref string) (*Meta, error) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, ErrInvalidStore
+		return nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entry", err)
 	}
 	if blob != nil {
 		return s.openMeta(id, blob)
@@ -604,18 +756,21 @@ func (s *Store) read(ctx context.Context, ref string) ([]byte, error) {
 	if err = s.db.QueryRowContext(ctx, "SELECT substr(blob,1,?),length(blob),substr(meta,1,?) FROM entries WHERE id = ?", maxValue+29, maxMeta+1, id).Scan(&blob, &blobLen, &metaBlob); errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	} else if err != nil {
-		return nil, ErrInvalidStore
+		return nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entry", err)
 	}
 	if blobLen < 28 || blobLen > maxValue+28 {
-		return nil, ErrInvalidStore
+		// The stored ciphertext is outside the format's size bounds.
+		return nil, ErrCorruptStore
 	}
 	aad, err := keycrypto.SecretAAD(s.id, id)
 	if err != nil {
-		return nil, ErrInvalidStore
+		return nil, classify(ErrInvalidStore, "", err)
 	}
 	plain, err := keycrypto.OpenBlob(s.key, aad, blob)
 	if err != nil {
-		return nil, ErrInvalidStore
+		// Opening proved the key against this vault, so a failure here is
+		// the row, not the caller's key (design §17.7).
+		return nil, classify(ErrCorruptStore, "", err)
 	}
 	if err := s.backfillMeta(ctx, ref, id, blob, metaBlob, plain); err != nil {
 		keycrypto.WipeKey(plain)
@@ -650,29 +805,33 @@ func (s *Store) backfillMeta(ctx context.Context, ref, id string, blob, oldMeta,
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ErrInvalidStore
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not start a transaction", err)
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, "UPDATE entries SET meta=? WHERE id=? AND blob=? AND meta IS ?", sealed, id, blob, oldMeta)
 	if err != nil {
-		return ErrInvalidStore
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not backfill the meta", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return ErrInvalidStore
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not backfill the meta", err)
 	}
 	if n == 0 {
 		return nil // another writer won; preserve its row and policy
 	}
-	res, err = tx.ExecContext(ctx, "UPDATE metadata SET writes=writes+1 WHERE writes < 4294967295")
+	res, err = tx.ExecContext(ctx, "UPDATE metadata SET writes=writes+1 WHERE writes < ?", writeCap)
 	if err != nil {
-		return ErrInvalidStore
+		return writeBudgetError(ctx, tx, "writes < ?", []any{writeCap}, err)
 	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return ErrInvalidStore
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not count the write", err)
+	}
+	if affected != 1 {
+		return writeBudgetError(ctx, tx, "writes < ?", []any{writeCap}, nil)
 	}
 	if err := tx.Commit(); err != nil {
-		return ErrInvalidStore
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not commit the meta backfill", err)
 	}
 	return nil
 }
@@ -689,11 +848,11 @@ func (s *Store) Delete(ctx context.Context, ref string) error {
 	}
 	res, err := s.db.ExecContext(ctx, "DELETE FROM entries WHERE id = ?", id)
 	if err != nil {
-		return ErrInvalidStore
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not delete the entry", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return ErrInvalidStore
+		return sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not delete the entry", err)
 	}
 	if n == 0 {
 		return ErrNotFound

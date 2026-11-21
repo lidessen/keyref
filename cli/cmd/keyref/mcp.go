@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,18 +18,21 @@ import (
 	"github.com/lidessen/keyref/cli/internal/cache"
 	"github.com/lidessen/keyref/cli/internal/config"
 	"github.com/lidessen/keyref/cli/internal/device"
-	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/meta"
 	"github.com/lidessen/keyref/cli/internal/source"
+	"github.com/lidessen/keyref/lib/exec"
+	"github.com/lidessen/keyref/lib/local"
 )
 
 // `keyref mcp` serves the vault over stdio as an MCP-compatible JSON-RPC
-// 2.0 server (design.md §7.8, §13 Phase 2). The tool surface is exactly
-// list / get / exec and the exec tool is semantically identical to
-// `keyref exec`: the same runExecCore performs the policy checks, the
-// spawn, the injection and the redaction. Tool arguments carry refs —
+// 2.0 server (design.md §7.8, §13 Phase 2, §17.5). The tool surface is
+// exactly list / get / exec and the exec tool is semantically identical
+// to `keyref exec`: the same runExecCore performs the policy checks, the
+// spawn, the injection and the redaction. The source is selected once at
+// startup and never changes for the session. Tool arguments carry refs —
 // never secret values — and every result returns redacted output plus an
-// exit code; tool-level failures are results with isError, never panics.
+// exit code; tool-level failures are results with isError, never panics
+// and never writes to the process stderr an MCP client cannot see.
 
 // mcpProtocolVersion is the MCP protocol version this server speaks.
 const mcpProtocolVersion = "2024-11-05"
@@ -87,7 +91,7 @@ func mcpTools() []mcpTool {
 	return []mcpTool{
 		{
 			Name: "list",
-			Description: "List the vault items this device is authorized to see: ref, name, description, type, masked value, sensitivity. " +
+			Description: "List the items of the selected source: ref, name, description, type, masked value, sensitivity. " +
 				refNotSecret + " Use a returned ref with get or exec.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
@@ -114,19 +118,29 @@ func mcpTools() []mcpTool {
 	}
 }
 
-// mcpServer holds the lazily initialized store and identity shared by
-// every tool call of one MCP session.
+// mcpServer holds one MCP session: the data directory and the source
+// selected at startup (design §17.5 — the source never changes for the
+// session), plus the lazily initialized sync store and identity.
 type mcpServer struct {
+	p    config.Paths
+	spec source.Spec
 	st   *cache.Store
 	id   *device.Identity
 	init bool
 }
 
 // serveMCP reads newline-delimited JSON-RPC from in and writes responses
-// to out. It returns when the input ends. Every tool call is recovered:
-// a panic becomes an error result, never a crash.
-func serveMCP(in io.Reader, out io.Writer) {
-	srv := &mcpServer{}
+// to out for the source that the command resolved at startup. It returns
+// when the input ends, releasing everything the session holds.
+func serveMCP(in io.Reader, out io.Writer, p config.Paths, spec source.Spec) {
+	srv := &mcpServer{p: p, spec: spec}
+	defer srv.close()
+	srv.serve(in, out)
+}
+
+// serve is the session loop. Every tool call is recovered: a panic
+// becomes an error result, never a crash.
+func (s *mcpServer) serve(in io.Reader, out io.Writer) {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64*1024), 4<<20)
 	w := bufio.NewWriter(out)
@@ -136,7 +150,7 @@ func serveMCP(in io.Reader, out io.Writer) {
 		if len(line) == 0 {
 			continue
 		}
-		resp := srv.handle(line)
+		resp := s.handle(line)
 		if resp == nil {
 			continue // notification: no response
 		}
@@ -147,6 +161,15 @@ func serveMCP(in io.Reader, out io.Writer) {
 		w.Write(b)
 		w.WriteByte('\n')
 		w.Flush()
+	}
+}
+
+// close releases what the session opened. The local vault is opened and
+// closed per tool call; only the sync cache outlives one call.
+func (s *mcpServer) close() {
+	if s.st != nil {
+		_ = s.st.Close()
+		s.st = nil
 	}
 }
 
@@ -264,9 +287,8 @@ func (s *mcpServer) toolsCall(params json.RawMessage) (result any, rpcErr *mcpEr
 }
 
 // errMCPNotPaired is what a tool call reports for a data directory with
-// no paired vault. MCP serves the paired vault only (§17.5's local mode
-// is not implemented), and it must not grow a cache.sqlite for a
-// local-only installation (issue #7).
+// no paired vault when the session's source is the paired one. It must
+// not grow a cache.sqlite for a local-only installation (issue #7).
 var errMCPNotPaired = errors.New("not paired; run keyref pair first")
 
 // ensureInit lazily opens the store and loads the device identity once
@@ -276,16 +298,12 @@ func (s *mcpServer) ensureInit() error {
 	if s.init {
 		return nil
 	}
-	p, err := config.Resolve()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(p.CacheFile); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(s.p.CacheFile); errors.Is(err, os.ErrNotExist) {
 		return errMCPNotPaired
 	} else if err != nil {
 		return err
 	}
-	st, err := cache.Open(p.Dir)
+	st, err := cache.Open(s.p.Dir)
 	if err != nil {
 		return err
 	}
@@ -305,19 +323,48 @@ func (s *mcpServer) ensureInit() error {
 	return nil
 }
 
-// toolList mirrors `keyref list --format json` (same meta layer, no
-// secret decryption).
+// toolList mirrors `keyref list --format json` for the session's
+// source: the same meta layer on both backends, never a secret.
 func (s *mcpServer) toolList() (any, *mcpError) {
+	if s.spec.Kind == source.KindLocal {
+		return s.toolListLocal()
+	}
 	if err := s.ensureInit(); err != nil {
 		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
 	}
-	if locked(mustPaths()) {
+	if locked(s.p) {
 		return textResult("keyref: session is locked; run keyref unlock\nexit_code: 12", true), nil
 	}
 	entries, err := meta.Items(s.st, s.id)
 	if err != nil {
 		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
 	}
+	return encodeEntries(entries)
+}
+
+// toolListLocal lists a local source's encrypted meta. The vault is
+// opened and closed per tool call, so `keyref lock` takes effect inside
+// a running session and the master key is fetched only while needed.
+func (s *mcpServer) toolListLocal() (any, *mcpError) {
+	vault, err := openLocal(s.p, s.spec)
+	if err != nil {
+		return localToolError(err), nil
+	}
+	defer vault.Close()
+	metas, err := vault.List(context.Background())
+	if err != nil {
+		return textResult(fmt.Sprintf("keyref: could not list source %q: %v\nexit_code: 1", s.spec.Name, err), true), nil
+	}
+	entries := make([]meta.Entry, len(metas))
+	for i, m := range metas {
+		entries[i] = localEntry(m)
+	}
+	return encodeEntries(entries)
+}
+
+// encodeEntries renders one list result in the indented JSON shape both
+// sources share (design §17.4, §17.5).
+func encodeEntries(entries []meta.Entry) (any, *mcpError) {
 	if entries == nil {
 		entries = []meta.Entry{}
 	}
@@ -330,11 +377,15 @@ func (s *mcpServer) toolList() (any, *mcpError) {
 	return textResult(buf.String(), false), nil
 }
 
+// localToolError maps an openLocal failure onto a tool result: the same
+// message the CLI prints, with a locked session reported as exit 12
+// (design §17.8) — never as a message on the process stderr.
+func localToolError(err error) mcpCallResult {
+	return textResult(fmt.Sprintf("keyref: %v\nexit_code: %d", err, localOpenCode(err)), true)
+}
+
 // toolGet mirrors `keyref get <ref> --format json`.
 func (s *mcpServer) toolGet(args json.RawMessage) (any, *mcpError) {
-	if err := s.ensureInit(); err != nil {
-		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
-	}
 	var p struct {
 		Ref string `json:"ref"`
 	}
@@ -343,7 +394,13 @@ func (s *mcpServer) toolGet(args json.RawMessage) (any, *mcpError) {
 	if err := dec.Decode(&p); err != nil || p.Ref == "" {
 		return textResult("keyref: get requires {\"ref\": \"...\"}\nexit_code: 2", true), nil
 	}
-	if locked(mustPaths()) {
+	if s.spec.Kind == source.KindLocal {
+		return s.toolGetLocal(p.Ref)
+	}
+	if err := s.ensureInit(); err != nil {
+		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
+	}
+	if locked(s.p) {
 		return textResult("keyref: session is locked; run keyref unlock\nexit_code: 12", true), nil
 	}
 	e, err := meta.Lookup(s.st, s.id, p.Ref)
@@ -352,6 +409,31 @@ func (s *mcpServer) toolGet(args json.RawMessage) (any, *mcpError) {
 		// other refs (design.md §12.2).
 		return textResult(fmt.Sprintf("keyref: unknown ref %q\nexit_code: 11", p.Ref), true), nil
 	}
+	return encodeEntry(e)
+}
+
+// toolGetLocal reads one local row's encrypted meta. Like the CLI it
+// never decrypts the secret, and there is no reveal path at all.
+func (s *mcpServer) toolGetLocal(ref string) (any, *mcpError) {
+	vault, err := openLocal(s.p, s.spec)
+	if err != nil {
+		return localToolError(err), nil
+	}
+	defer vault.Close()
+	m, err := vault.Stat(context.Background(), ref)
+	if errors.Is(err, local.ErrNotFound) {
+		return textResult(fmt.Sprintf("keyref: unknown ref %q\nexit_code: 11", ref), true), nil
+	}
+	if err != nil {
+		return textResult(fmt.Sprintf("keyref: could not read %q: %v\nexit_code: 1", ref, err), true), nil
+	}
+	e := localEntry(*m)
+	return encodeEntry(e)
+}
+
+// encodeEntry renders one get result in the indented JSON shape both
+// sources share.
+func encodeEntry(e any) (any, *mcpError) {
 	b, _ := json.MarshalIndent(e, "", "  ")
 	return textResult(string(b)+"\n", false), nil
 }
@@ -360,9 +442,6 @@ func (s *mcpServer) toolGet(args json.RawMessage) (any, *mcpError) {
 // policy checks, the approval flow, the spawn and the redaction; the
 // MCP result carries the redacted output and the exit code.
 func (s *mcpServer) toolExec(args json.RawMessage) (any, *mcpError) {
-	if err := s.ensureInit(); err != nil {
-		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
-	}
 	var a mcpExecArgs
 	dec := json.NewDecoder(bytes.NewReader(args))
 	dec.DisallowUnknownFields()
@@ -391,10 +470,12 @@ func (s *mcpServer) toolExec(args json.RawMessage) (any, *mcpError) {
 		AllowArgv: a.AllowArgv,
 		Argv:      a.Argv,
 		Timeout:   timeout,
-		// The MCP server is a paired CLI device: all three tools speak
-		// the paired vault, whatever the CLI's default source is
-		// (design.md §7.8).
-		Source: source.SyncName,
+		// The session's source is pinned at startup (design §17.5): the
+		// resolved spec, including its path, decides which vault this
+		// session reads for the rest of its life, so a mid-session
+		// change to sources.json cannot move it to another vault.
+		Paths:  &s.p,
+		Spec:   &s.spec,
 		Stdout: &out,
 		Stderr: &errBuf,
 	})
@@ -421,11 +502,15 @@ func approvalTimeoutFromSeconds(secs float64) time.Duration {
 }
 
 // cmdMCP is the `keyref mcp` entry point. stdout is the JSON-RPC
-// channel; the CLI's own notices stay on stderr.
+// channel; the CLI's own notices stay on stderr. The source is selected
+// here, once, by the same order as every data command (design §17.3):
+// --source, KEYREF_SOURCE, the configured default, then `local`. It is
+// fixed for the whole session (§17.5).
 func cmdMCP(args []string) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	sourceName := fs.String("source", "", "source to serve")
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), "usage: keyref mcp\n\nServe the vault over stdio as an MCP JSON-RPC 2.0 server\n(tools: list, get, exec — pass refs, never secrets).\n")
+		fmt.Fprint(fs.Output(), "usage: keyref mcp [--source NAME]\n\nServe the selected vault over stdio as an MCP JSON-RPC 2.0 server\n(tools: list, get, exec — pass refs, never secrets).\n")
 	}
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
@@ -433,9 +518,14 @@ func cmdMCP(args []string) int {
 		return parseExit(err)
 	}
 	if len(rest) != 0 {
-		return fatalf(2, "usage: keyref mcp")
+		return fatalf(2, "usage: keyref mcp [--source NAME]")
+	}
+	p := mustPaths()
+	spec, err := resolveSource(p, *sourceName)
+	if err != nil {
+		return fatalf(1, "%v", err)
 	}
 	exec.DisableCoreDumps()
-	serveMCP(os.Stdin, os.Stdout)
+	serveMCP(os.Stdin, os.Stdout, p, spec)
 	return 0
 }

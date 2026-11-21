@@ -149,7 +149,7 @@ func TestLocalSourceLifecycle(t *testing.T) {
 	}
 
 	// --reveal is the explicit plaintext path, and it is byte-exact.
-	reveal := localRun(t, env, "", "get", "my-ref", "--reveal")
+	reveal := localRevealRun(t, env, "get", "my-ref", "--reveal")
 	if reveal.code != 0 {
 		t.Fatalf("get --reveal exit %d: %s", reveal.code, reveal.stderr)
 	}
@@ -392,7 +392,7 @@ func TestLocalSourceWithAnEnvironmentKey(t *testing.T) {
 	if run := localRun(t, env, localSecret, "set", "my-ref"); run.code != 0 {
 		t.Fatalf("set exit %d: %s", run.code, run.stderr)
 	}
-	reveal := localRun(t, env, "", "get", "my-ref", "--reveal")
+	reveal := localRevealRun(t, env, "get", "my-ref", "--reveal")
 	if reveal.code != 0 || reveal.stdout != localSecret {
 		t.Fatalf("get --reveal = %q (exit %d): %s", reveal.stdout, reveal.code, reveal.stderr)
 	}
@@ -437,12 +437,12 @@ func TestLocalSourceSelection(t *testing.T) {
 		t.Fatalf("get did not say how to fix it: %q", missing.stderr)
 	}
 	// --source finds it.
-	byFlag := localRun(t, env, "", "get", "my-ref", "--source", "work", "--reveal")
+	byFlag := localRevealRun(t, env, "get", "my-ref", "--source", "work", "--reveal")
 	if byFlag.code != 0 || byFlag.stdout != localSecret {
 		t.Fatalf("get --source work = %q (exit %d): %s", byFlag.stdout, byFlag.code, byFlag.stderr)
 	}
 	// KEYREF_SOURCE finds it too.
-	byEnv := localRun(t, append(env, "KEYREF_SOURCE=work"), "", "get", "my-ref", "--reveal")
+	byEnv := localRevealRun(t, append(env, "KEYREF_SOURCE=work"), "get", "my-ref", "--reveal")
 	if byEnv.code != 0 || byEnv.stdout != localSecret {
 		t.Fatalf("get with KEYREF_SOURCE = %q (exit %d): %s", byEnv.stdout, byEnv.code, byEnv.stderr)
 	}
@@ -450,7 +450,7 @@ func TestLocalSourceSelection(t *testing.T) {
 	if run := localRun(t, env, "", "source", "default", "work"); run.code != 0 {
 		t.Fatalf("source default exit %d: %s", run.code, run.stderr)
 	}
-	byDefault := localRun(t, env, "", "get", "my-ref", "--reveal")
+	byDefault := localRevealRun(t, env, "get", "my-ref", "--reveal")
 	if byDefault.code != 0 || byDefault.stdout != localSecret {
 		t.Fatalf("get on the new default = %q (exit %d): %s", byDefault.stdout, byDefault.code, byDefault.stderr)
 	}
@@ -683,7 +683,7 @@ func TestInitNeverOverwritesAnotherVaultsKey(t *testing.T) {
 	}
 
 	// The first vault still opens with its own key: nothing overwrote it.
-	reveal := localRun(t, env1, "", "get", "my-ref", "--reveal")
+	reveal := localRevealRun(t, env1, "get", "my-ref", "--reveal")
 	if reveal.code != 0 || reveal.stdout != localSecret {
 		t.Fatalf("the first vault lost its key after a second init: %q (exit %d): %s",
 			reveal.stdout, reveal.code, reveal.stderr)

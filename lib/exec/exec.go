@@ -21,30 +21,28 @@ import (
 
 	"github.com/awnumar/memguard"
 
-	"github.com/lidessen/keyref/cli/internal/exitcode"
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/exitcode"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
-// ResolvedRef is one referenced secret: the decrypted meta (policy)
-// plus, once values are resolved, the guarded plaintext. The command
-// layer may supply metas only and let Run resolve values lazily AFTER
-// the policy checks pass — a rejected exec then never decrypts the
-// secret at all (design.md §7.3: all checks happen before spawn).
+// ResolvedRef is one referenced secret: the per-item policy plus, once
+// values are resolved, the guarded plaintext. The command layer may
+// supply policies only and let Run resolve values lazily AFTER the
+// policy checks pass — a rejected exec then never decrypts the secret
+// at all (design.md §7.3: all checks happen before spawn).
+//
+// The engine does not know about sources or vault types: adapters
+// translate their own metadata into Policy before calling Run.
 type ResolvedRef struct {
 	Ref      string
-	Meta     *itemcrypt.Meta
+	Policy   Policy
 	Value    *secret.Plaintext // guarded; destroyed by Run
 	Username *secret.Plaintext // guarded; only resolved for --stdin-login
-	// Paired marks a ref that came from the paired vault (protocol v2
-	// §H): an item with an empty allowCommands list then allows no
-	// command at all, because the built-in deny list is only a slip
-	// guard and is not offered as protection on the paired vault.
-	Paired bool
+	// Injectable marks a ref whose value may be injected at all.
+	Injectable bool
 	// Message marks an sms:<message_id> ref (design v0.8 §14.5). Such a
-	// ref has no item meta and no item policy: its only gate is the
-	// per-consumption approval round, so every item-level check below
-	// skips it.
+	// ref has no item policy: its only gate is the per-consumption
+	// approval round, so every item-level check below skips it.
 	Message bool
 }
 
@@ -262,10 +260,7 @@ func run(req *Request) (int, *Outcome) {
 			// own approval round and nothing else (design v0.8 §14.5).
 			continue
 		}
-		if rr.Meta == nil {
-			return deny(1, "internal")
-		}
-		if !rr.Meta.Injectable {
+		if !rr.Injectable {
 			fmt.Fprintf(req.Stderr, "keyref: item %s is not injectable (enable injection on iOS)\n", r)
 			return deny(15, "not-injectable")
 		}
@@ -290,7 +285,7 @@ func run(req *Request) (int, *Outcome) {
 				// only; they never take the argv path (design §14.5).
 				continue
 			}
-			if !rr.Meta.Policy.AllowArgv {
+			if !rr.Policy.AllowArgv {
 				fmt.Fprintf(req.Stderr, "keyref: item %s does not allow argv injection (policy.allowArgv)\n", ref)
 				return deny(10, "allow-argv-policy")
 			}
@@ -319,11 +314,11 @@ func run(req *Request) (int, *Outcome) {
 			fmt.Fprintln(req.Stderr, "keyref: --reply requires an item ref, not an sms: ref")
 			return deny(10, "reply-message-ref")
 		}
-		if rr.Meta.Policy.Sensitivity != "approval" {
+		if rr.Policy.Sensitivity != "approval" {
 			fmt.Fprintf(req.Stderr, "keyref: --reply requires item %s to have sensitivity=approval\n", rp.Ref)
 			return deny(10, "reply-sensitivity")
 		}
-		if len(req.Argv) > 0 && !allowCommandsContainArgv0(rr.Meta.Policy.AllowCommands, req.Argv[0]) {
+		if len(req.Argv) > 0 && !allowCommandsContainArgv0(rr.Policy.AllowCommands, req.Argv[0]) {
 			fmt.Fprintf(req.Stderr, "keyref: --reply requires item %s allowCommands to contain argv0 explicitly\n", rp.Ref)
 			return deny(10, "reply-allowcommands")
 		}
@@ -394,10 +389,10 @@ func run(req *Request) (int, *Outcome) {
 			continue // no item policy to intersect (design §14.5)
 		}
 		for _, layer := range resolved.Layers {
-			if ItemAllowsCommand(layer, rr.Meta.Policy, rr.Paired) {
+			if ItemAllowsCommand(layer, rr.Policy) {
 				continue
 			}
-			fmt.Fprintln(req.Stderr, "keyref:", commandDenial(ref, layer, rr.Meta.Policy, rr.Paired))
+			fmt.Fprintln(req.Stderr, "keyref:", commandDenial(ref, layer, rr.Policy))
 			return deny(10, "policy-command")
 		}
 	}
@@ -405,7 +400,7 @@ func run(req *Request) (int, *Outcome) {
 		if req.Refs[ref].Message {
 			continue
 		}
-		if err := allowedHostsFromArgv(req.Argv, req.Refs[ref].Meta.Policy.AllowedHosts); err != nil {
+		if err := allowedHostsFromArgv(req.Argv, req.Refs[ref].Policy.AllowedHosts); err != nil {
 			fmt.Fprintln(req.Stderr, "keyref:", err)
 			return deny(10, "policy-hosts")
 		}
@@ -831,7 +826,7 @@ func loginPreflight(req *Request) string {
 	if len(req.Argv) == 0 || !filepath.IsAbs(req.Argv[0]) || HasArgvPlaceholder(req.Argv[:1]) {
 		return "--stdin-login requires a literal absolute command path"
 	}
-	if rr := req.Refs[req.LoginRef]; rr != nil && rr.Meta != nil && len(rr.Meta.Policy.AllowCommands) == 0 {
+	if rr := req.Refs[req.LoginRef]; rr != nil && len(rr.Policy.AllowCommands) == 0 {
 		return "--stdin-login requires an explicit allowCommands policy for the item"
 	}
 	for _, spec := range req.EnvRefs {

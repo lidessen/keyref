@@ -13,8 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 // symlinkedTool links dir/name -> the test binary and returns dir.
@@ -295,20 +294,20 @@ func TestRedactionFailureChildTermination(t *testing.T) {
 }
 
 func TestDenyListMatchesVersionedInterpreters(t *testing.T) {
-	local := itemcrypt.MetaPolicy{Sensitivity: "standard", CommandPolicy: "deny-shells"}
+	local := Policy{Sensitivity: "standard", CommandPolicy: "deny-shells"}
 	for _, name := range []string{"python3.13", "python3", "perl5.36.0", "lua5.4", "node18", "ruby3.2", "php8.2", "bash"} {
-		if ItemAllowsCommand(name, local, false) {
+		if ItemAllowsCommand(name, local) {
 			t.Errorf("%s passed the default deny list", name)
 		}
 	}
 	for _, name := range []string{"curl", "gh", "aws", "git", "s3cmd"} {
-		if !ItemAllowsCommand(name, local, false) {
+		if !ItemAllowsCommand(name, local) {
 			t.Errorf("%s rejected by the default deny list", name)
 		}
 	}
 	// An explicit allowCommands entry stays an exact-name whitelist.
-	exact := itemcrypt.MetaPolicy{AllowCommands: []string{"python3"}}
-	if ItemAllowsCommand("python3.13", exact, false) {
+	exact := Policy{AllowCommands: []string{"python3"}}
+	if ItemAllowsCommand("python3.13", exact) {
 		t.Error("whitelist matched a versioned name it does not list")
 	}
 }

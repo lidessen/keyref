@@ -2,9 +2,9 @@
 
 The command line for AI agents. The binary is called `keyref`.
 
-One command surface covers every credential source. A **source** is a backend the commands read from and write to: the standalone **local** vault (the default, offline, no pairing) or the **sync** vault (the paired iOS vault, read-only for the CLI). There is no `local` subcommand — `keyref set` on the default source *is* the local store.
+One command surface covers every credential source. A **source** is a backend the commands read from and write to: the standalone **local** vault (the default, offline, no pairing) or the **sync** vault (the paired owner vault, read-only for the CLI; frozen while the owner app is deferred). There is no `local` subcommand — `keyref set` on the default source *is* the local store.
 
-On the paired vault the stdout never contains secret plaintext. A local source has one explicit exception: `keyref get --reveal`, which a person has to ask for by name.
+On the paired vault the stdout never contains secret plaintext. A local source has one explicit exception: `keyref get --reveal`, which a person has to ask for by name and confirm on the controlling terminal.
 
 See the "reference syntax", "exec" and "CLI" sections of [docs/design.md](../docs/design.md) for the design, and [docs/protocol.md](../docs/protocol.md) for the wire format.
 
@@ -20,14 +20,14 @@ Commands (design §12.2 and §17, implemented):
 | `keyref list` | Names, descriptions, `ref`, masks from encrypted meta (local and paired vaults) |
 | `keyref exec -- ...` | Inject secrets into a child process, redact stdout/stderr; supports `--env`, `--stdin`, `--stdin-login`, `--fd`, `--pty`/`--reply` |
 | `keyref source list\|default\|add\|remove` | Show or configure the sources |
-| `keyref pair` | Generate a device key, show a QR code in the terminal, pair with the iOS vault |
+| `keyref pair` | Generate a device key, show a QR code in the terminal, pair with the owner vault (owner app deferred; path frozen) |
 | `keyref session` | Establish or renew a server session (challenge for a token, protocol §6.7) |
 | `keyref status` | Report the selected source (`--all` for every configured one): for `local`, whether the vault file exists, where the master key comes from (OS keyring or `KEYREF_LOCAL_MASTER`) and the lock flag; for `sync`, the server, pairing, session and remaining grant lifetime |
 | `keyref lock` / `keyref unlock` | Set or clear the lock flag (`<data dir>/locked`); while set, no unwrap path runs |
 | `keyref --version` | Print the CLI version; the MCP `serverInfo.version` is the same value |
 | `keyref sync` | Pull the ciphertext within the granted scope |
 | `keyref server` | View or set the sync server URL |
-| `keyref mcp` | JSON-RPC 2.0 (MCP) over stdio: the tools are only `list` / `get` / `exec`, with the same semantics as the CLI (design §7.8). The server is a paired CLI device: all three tools speak the `sync` source |
+| `keyref mcp [--source NAME]` | JSON-RPC 2.0 (MCP) over stdio: the tools are only `list` / `get` / `exec`, with the same semantics as the CLI (design §7.8). The source is selected once at startup by the usual order (`--source`, `KEYREF_SOURCE`, the configured default, `local`) and stays fixed for the whole session, so one server serves either source with the same three tools (design §17.5) |
 
 On the paired vault there is no `reveal`, no `export` and no `--print`; the JSON of `get` has no `value` field.
 
@@ -38,7 +38,7 @@ Every data command takes `--source NAME`. `KEYREF_SOURCE` does the same, and `ke
 | Source | Kind | Notes |
 | --- | --- | --- |
 | `local` | local | The standalone offline vault at `<data dir>/local.db`. Read and write |
-| `sync` | sync | The paired iOS vault. Read only: the CLI may never create, edit or delete an item (design §2.1) |
+| `sync` | sync | The paired owner vault. Read only: the CLI may never create, edit or delete an item (design §2.1); frozen while the owner app is deferred |
 
 `keyref source add NAME --path /absolute/vault.db` registers another local vault; `keyref source remove NAME` drops it from the configuration and leaves its file alone. A local vault's directory must be private (mode 0700) — keyref refuses to create or open one otherwise.
 
@@ -58,7 +58,7 @@ keyref exec --env TOKEN=my-ref -- /absolute/path/to/consumer
 
 The master key is 32 random bytes. `keyref init` generates one and stores it in the OS keyring (macOS Keychain, Linux Secret Service); `KEYREF_LOCAL_MASTER` overrides it for headless use, carrying the same key as the standard base64 encoding of 32 bytes. An environment-provided key is used as-is and never copied into the keyring. Losing the key means losing the vault — keyref cannot recover or regenerate it.
 
-`set` reads 1 byte to 1 MiB from stdin. By default exactly one trailing newline (`\n` or `\r\n`) is stripped, so `echo "$TOKEN" | keyref set tok` stores the token itself; `--raw` keeps every byte. When stdin is a terminal the value is read as one line without echo. The value never appears in the command arguments or in any output, and the result says `created "tok"` or `replaced "tok"`. A value shorter than 8 bytes gets a warning on stderr because redaction is less reliable for short values. A ref follows design §6.1 — one lowercase letter, or 2–64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit — and `set` refuses anything else. `--description`, repeatable `--allow-command` and repeatable `--allow-host` write the entry meta; a replacement rewrites the whole meta, so a caller that does not know the value cannot keep or widen the old policy. `get` prints the mask sealed at write time (a known §6.1 prefix plus the last four characters when the value is long enough, otherwise `***`). `--reveal` is the one deliberate plaintext path: it writes the raw secret bytes to stdout and nothing else, it exists for local sources only, and the paired vault rejects it.
+`set` reads 1 byte to 1 MiB from stdin. By default exactly one trailing newline (`\n` or `\r\n`) is stripped, so `echo "$TOKEN" | keyref set tok` stores the token itself; `--raw` keeps every byte. When stdin is a terminal the value is read as one line without echo. The value never appears in the command arguments or in any output, and the result says `created "tok"` or `replaced "tok"`. A value shorter than 8 bytes gets a warning on stderr because redaction is less reliable for short values. A ref follows design §6.1 — one lowercase letter, or 2–64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit — and `set` refuses anything else. `--description`, repeatable `--allow-command` and repeatable `--allow-host` write the entry meta; a replacement rewrites the whole meta, so a caller that does not know the value cannot keep or widen the old policy. `get` prints the mask sealed at write time (a known §6.1 prefix plus the last four characters when the value is long enough, otherwise `***`). `--reveal` is the one deliberate plaintext path: it writes the raw secret bytes to stdout and nothing else, it exists for local sources only, and the paired vault rejects it. It asks for confirmation on the controlling terminal (`/dev/tty`, answering `y` or `yes`), never on stdin/stdout, so `keyref get tok --reveal | pbcopy` still works; without a controlling terminal it refuses with exit 10. There is no flag or environment variable that skips the confirmation.
 
 A local vault stores each row id as an HMAC of the ref, but the ref itself, mask, size, description and policy live in a separately encrypted meta blob; `list` and `get` decrypt only that meta, never the secret. Without the master key the file reveals neither refs nor values. Vaults created before encrypted meta keep working: `get <ref>` returns a conservative `***` mask without decrypting or writing the row. Legacy rows remain absent from `list` until an authorized `exec` reads the secret and backfills its actual mask and size, or `set` replaces the row. The library marks unknown metadata as `Incomplete`; a lost original write time remains zero. Schema migration and backfill are safe across concurrent opens, replacements and deletions.
 
@@ -93,50 +93,59 @@ The CLI must be paired and unlocked, the item must be injectable, and the item's
 
 `--timeout` still bounds the approval wait, not the child's runtime. The child stays in the caller's process group, so the caller can cancel Keyref and the child together. Sending a standalone SIGINT or SIGTERM to the child after it started terminates that child. Operations already issued still have to be settled against the consuming program's receipt. Keyref does not automatically re-issue an approval or restart the child after a cancellation, a timeout or the child's exit.
 
-### Go library: the local store
+### Go library
 
-`github.com/lidessen/keyref/cli/local` provides the standalone store (`Create`, `Open`, `Put`, `Import`, `Use`, `Stat`, `List`, `Delete`, `Close`, plus `ValidRef` and `Mask`). `Put` takes `PutOptions` (description, allowCommands, allowedHosts) and reports whether it created the row; `Import` performs an atomic idempotent batch, and its caller owns and wipes the input values. `Stat` and `List` decrypt only the encrypted meta. `Use` provides the plaintext only inside the callback; callers should avoid retaining or logging it, and in-memory clearing is not isolation from a same-user process:
+`github.com/lidessen/keyref/lib` is the standalone module for embedding. It holds the local store, the execution engine and the shared low-level packages; it must not import `cli/`.
+
+`lib/local` provides the offline store (`Create`, `Open`, `Put`, `Import`, `Use`, `Stat`, `List`, `Delete`, `Close`, plus `ValidRef` and `Mask`). `Put` takes `PutOptions` (description, allowCommands, allowedHosts) and reports whether it created the row; `Import` performs an atomic idempotent batch, and its caller owns and wipes the input values. `Stat` and `List` decrypt only the encrypted meta. `Use` provides the plaintext only inside the callback; callers should avoid retaining or logging it, and in-memory clearing is not isolation from a same-user process:
 
 ```go
 vault, err := local.Open(path, masterKey) // local.Create makes a new vault
 // check err; call Close when done with the vault.
 ```
 
-The CLI reaches it through `cli/internal/localvault`, which resolves the master key from the OS keyring or `KEYREF_LOCAL_MASTER`. No other backend ships today: the paired vault is read through the synced path, not through this package.
+`lib/exec` is the execution engine (`Run`, `Redactor`, `CheckCommand`, `CollectRefs`). It knows no sources: adapters translate their metadata into `exec.Policy`, and a source whose empty allow-list allows nothing sets `RequireAllowList` (the paired vault does; the local one does not). `lib/secret` holds the guarded buffers and `lib/exitcode` pins the exit-code table.
 
-The default server is the official hosted service. `keyref server set https://keys.example.com` or the `KEYREF_SERVER` environment variable points the CLI at a self-hosted one. The pairing QR code carries that origin, and the phone asks for confirmation before you change the server. Encryption on both sides does not depend on who is running the server.
+Store failures are distinguishable without parsing messages (design §17.7): `errors.Is` separates a missing vault from an existing one, insecure permissions, a wrong key, an invalid ref or value, a missing entry, a spent write budget and a corrupt vault, while a cancelled `context` comes back unchanged. `Error()` is a fixed, safe text — the underlying cause stays reachable through `Unwrap`. The table is in [lib/local/README.md](../lib/local/README.md).
+
+The CLI reaches the store through `cli/internal/localvault`, which resolves the master key from the OS keyring or `KEYREF_LOCAL_MASTER`, and the engine through adapters in `cli/cmd/keyref`. No other backend ships today: the paired vault is read through the synced path, not through `lib/local`.
+
+The default server is the official hosted service. `keyref server set https://keys.example.com` or the `KEYREF_SERVER` environment variable points the CLI at a self-hosted one. The pairing QR code carries that origin, and the owner confirms a server change; this pairing path is frozen while the owner app is deferred. Encryption on both sides does not depend on who is running the server.
 
 - The language is **Go** (since design v0.4, the same language as the server; the earlier "Rust + zeroize" decision was overturned and memory hygiene was downgraded to guarded allocation plus explicit zeroing — see design §12.2).
 - Private keys go into the OS keyring (macOS Keychain, Linux Secret Service). Unwrapped item keys and secret plaintext live only in guarded memory (memguard: mlock, invisible to the GC, explicitly zeroed at `lock` and on exit).
 - Never run user commands through a shell. `sh -c`, `echo`, `env` and the like are rejected by default.
 - Machine-readable output uses English headers so agents can parse it.
 
-Directory layout (actual tree, checked 2026-11-13; `cli/internal` has 20 packages):
+Directory layout (actual tree, checked 2026-11-19):
 
 ```
+lib/                      # standalone module for embedding
+├── exec/                 # policy (including shebang parsing), injection, redaction, pty/reply
+├── exitcode/             # the exit-code table of design §7.6
+├── local/                # the offline encrypted store
+└── secret/               # memguard guarded buffers, secret JSON parsing without strings
+
 cli/
-├── cmd/keyref/          # command entry points (main.go + mcp.go: stdio JSON-RPC)
-├── internal/approval/   # approval requests / polling / one-time unwrap for approval items (design §8.3)
-├── internal/audit/      # boxing and upload of exec audit events
-├── internal/client/     # a thin HTTP client for the sync API
-├── internal/config/     # origin configuration (0700 directory)
-├── internal/decider/    # the optional auto-approval delegate and its mandatory review gate (design v0.8 §14.8)
-├── internal/device/     # device identity: X25519 HPKE key + signing key
-├── internal/localvault/ # the local master key: OS keyring, KEYREF_LOCAL_MASTER override
-├── internal/exec/       # policy (including shebang parsing), injection, redaction, pty/reply
-├── internal/exitcode/   # the exit-code table of design §7.6
-├── internal/itemcrypt/  # grant unwrap, meta/secret decryption
-├── internal/keyring/    # the SecretStore interface; a go-keyring implementation; a directory implementation for tests
-├── internal/meta/       # list/get: decrypts only the meta and prints masks
-├── internal/pair/       # QR code generation, pair/register, pair/status polling
-├── internal/qr/         # terminal QR rendering
-├── internal/secret/     # memguard guarded buffers, secret JSON parsing without strings
-├── internal/session/    # challenge → token, token reuse and renewal
-├── internal/cache/      # cache.sqlite (0600, ciphertext cache)
-├── internal/source/     # the source registry: local (default) and sync
-├── internal/syncing/    # applying server changes to the local cache
-├── internal/testowner/  # a software P-256 owner for tests and e2e
-└── e2e/                 # //go:build e2e end-to-end tests
+├── cmd/keyref/           # command entry points (main.go + mcp.go: stdio JSON-RPC) and source adapters
+├── internal/approval/    # approval requests / polling / one-time unwrap for approval items (design §8.3)
+├── internal/audit/       # boxing and upload of exec audit events
+├── internal/client/      # a thin HTTP client for the sync API
+├── internal/config/      # origin configuration (0700 directory)
+├── internal/decider/     # the optional auto-approval delegate and its mandatory review gate (design v0.8 §14.8)
+├── internal/device/      # device identity: X25519 HPKE key + signing key
+├── internal/localvault/  # the local master key: OS keyring, KEYREF_LOCAL_MASTER override
+├── internal/itemcrypt/   # grant unwrap, meta/secret decryption
+├── internal/keyring/     # the SecretStore interface; a go-keyring implementation; a directory implementation for tests
+├── internal/meta/        # list/get: decrypts only the meta and prints masks
+├── internal/pair/        # QR code generation, pair/register, pair/status polling
+├── internal/qr/          # terminal QR rendering
+├── internal/session/     # challenge → token, token reuse and renewal
+├── internal/cache/       # cache.sqlite (0600, ciphertext cache)
+├── internal/source/      # the source registry: local (default) and sync
+├── internal/syncing/     # applying server changes to the local cache
+├── internal/testowner/   # a software P-256 owner for tests and e2e
+└── e2e/                  # //go:build e2e end-to-end tests
 ```
 
 Accept against fixed fixtures: the fixture plaintext must not appear in the stdout/stderr of `list`, `get` or `exec`, including base64, hex and URL encodings.

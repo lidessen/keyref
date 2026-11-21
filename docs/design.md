@@ -556,7 +556,7 @@ keyref 掌握 pty 主端。子进程的输出先过脱敏器，再交给 agent�
 - 丢掉 `LD_PRELOAD`、`LD_LIBRARY_PATH`、`DYLD_INSERT_LIBRARIES`、`DYLD_LIBRARY_PATH` 以及其他 `DYLD_*` / `LD_*`
 - 加上本次 `--env NAME=REF` 指定的变量（值是该 ref 解出的秘密），以及 `--pass NAME` 从 keyref 自己的环境里按名转发的变量
 
-`--env` 与 `--pass` 的变量名必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，且不得以 `LD_` 或 `DYLD_` 开头，也不得是能把代码带进子进程的 shell/解释器启动与钩子变量（`BASH_ENV`、`ENV`、`NODE_OPTIONS`、`PERL5OPT`、`PYTHONPATH`、`RUBYOPT`、`JAVA_TOOL_OPTIONS`、`GIT_SSH_COMMAND`、`PAGER`、`LESSOPEN` 等，完整名单见 `cli/internal/exec/inject.go`）——否则退出码 `10`，清洗过的环境不允许从后门加回来。这份名单是防误用的滑倒保护，不是安全边界。`--pass` 转发的是调用方环境里本来就有的值（例如 `HTTPS_PROXY`、`SSH_AUTH_SOCK`），不是注入的秘密，但仍然要显式写名，不做「全部继承」。
+`--env` 与 `--pass` 的变量名必须匹配 `[A-Za-z_][A-Za-z0-9_]*`，且不得以 `LD_` 或 `DYLD_` 开头，也不得是能把代码带进子进程的 shell/解释器启动与钩子变量（`BASH_ENV`、`ENV`、`NODE_OPTIONS`、`PERL5OPT`、`PYTHONPATH`、`RUBYOPT`、`JAVA_TOOL_OPTIONS`、`GIT_SSH_COMMAND`、`PAGER`、`LESSOPEN` 等，完整名单见 `lib/exec/inject.go`）——否则退出码 `10`，清洗过的环境不允许从后门加回来。这份名单是防误用的滑倒保护，不是安全边界。`--pass` 转发的是调用方环境里本来就有的值（例如 `HTTPS_PROXY`、`SSH_AUTH_SOCK`），不是注入的秘密，但仍然要显式写名，不做「全部继承」。
 
 同时设置 `RLIMIT_CORE = 0`。在 Linux 上于子进程里尝试 `PR_SET_DUMPABLE = 0`，并在实现时验证 `execve` 之后标志是否还在。不要在文档里把它写成已经封死 `/proc/<pid>/environ`。同一用户的 `procfs` 可读性是 B2，靠集成约束和以后的沙箱处理。
 
@@ -1205,7 +1205,7 @@ wifi-home    Home Wi-Fi          password ***
 
 `keyref get openai-prod` 打印同一组字段。未知 `ref` 退出 `11`，输出里看不出这个保险库里还有哪些别的 `ref`（避免把「猜 ref」变成枚举；不过 `list` 本身会列出已授予的全部 `ref`，所以这只影响没有 view 授权的条目）。
 
-命令一览（§17 的统一命令面）：`pair`（`--kind cli|decider`）、`session`、`sync`、`status`、`lock`、`unlock`、`server [set <origin>]`、`source`；数据命令 `list`（仅配对库，本地库的 ref 是单向存储的）、`get [--format json] [--reveal]`、`exec`、`mcp`；本地库的 `init`、`set`、`delete`（同为这一套命令面，`--source` 选库）。配对库对 CLI 只读：创建、修改、删除、轮换都在 iOS 上。`--reveal` 只对本地 source 存在（§17.4），配对库拒绝它。**没有 `sms` 子命令**：`sms:<message_id>` 是 `exec` 注入位置里的引用（§14.5），短信正文只在 iOS 收件箱和审批单上出现。`status` 额外报告每条 `use` 授予的剩余有效期，7 天内到期的在 stderr 警告（§8.4）。（`decider run` 是决策器部署的入口，见 §14.8。）
+命令一览（§17 的统一命令面）：`pair`（`--kind cli|decider`）、`session`、`sync`、`status`、`lock`、`unlock`、`server [set <origin>]`、`source`；数据命令 `list`（两个 source 都支持；本地库的 ref 单向存储，能列出是因为每行带加密 meta）、`get [--format json] [--reveal]`、`exec`、`mcp`；本地库的 `init`、`set`、`delete`（同为这一套命令面，`--source` 选库）。配对库对 CLI 只读：创建、修改、删除、轮换都在 iOS 上。`--reveal` 只对本地 source 存在（§17.4），配对库拒绝它。**没有 `sms` 子命令**：`sms:<message_id>` 是 `exec` 注入位置里的引用（§14.5），短信正文只在 iOS 收件箱和审批单上出现。`status` 额外报告每条 `use` 授予的剩余有效期，7 天内到期的在 stderr 警告（§8.4）。（`decider run` 是决策器部署的入口，见 §14.8。）
 
 `keyref server` 打印当前 origin。`keyref server set https://keys.example.com` 修改它，配置写在 `0700` 目录里。环境变量 `KEYREF_SERVER` 可以覆盖配置，方便 agent 的安装脚本指向自托管。未设置时使用编译进去的官方托管地址。`pair` 打出来的二维码必须带上当时的 origin。
 
@@ -1536,14 +1536,14 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 
 ### 17.7 Go 库的边界
 
-§7.8 的 embed 形态在本地库上的落点。v0.9 的库只导出了一个带 `Use` 回调的键值存储，而 keyref 真正的价值——注入与脱敏——在 `cli/internal/exec` 里，嵌入方拿不到，只能重写。
+§7.8 的 embed 形态在本地库上的落点。v0.9 的库只导出了一个带 `Use` 回调的键值存储，而 keyref 真正的价值——注入与脱敏——当时锁在 CLI 的 `internal/exec` 里，嵌入方拿不到，只能重写；这正是把库拆成独立 module 时一并导出执行引擎的原因。
 
-- **独立 module。** 库不放在 `cli` module 里：那会让嵌入方的依赖图带上密钥环、D-Bus、二维码这些只有 CLI 才用的东西，并且 `cli/go.mod` 对 `proto` 的版本钉在 workspace 之外从未被验证过。库 module 只依赖 `proto` 与 SQLite 驱动。CI 对每个 module 各做一次 `GOWORK=off` 的构建。
+- **独立 module。** 库不放在 `cli` module 里：那会让嵌入方的依赖图带上密钥环、D-Bus、二维码这些只有 CLI 才用的东西，并且 `cli/go.mod` 对 `proto` 的版本钉在 workspace 之外从未被验证过。库 module 依赖 `proto`、SQLite 驱动、执行引擎的 memguard 与 `x/sys`（pty），不含密钥环、D-Bus、二维码这些只有 CLI 才用的东西。CI 对每个 module 各做一次 `GOWORK=off` 的构建。
 - **导出两样东西。**
   1. 本地库：`Create` / `Open` / `Put` / `Use` / `Delete` / `List` / `Stat` / `Close`。`Stat` 与 `List` 只解 meta。
   2. 执行引擎：`Run(Request)` 与 `Redactor`。嵌入方用自己的方式拿到秘密（本地库、或自己的后端），把注入、spawn 前检查和脱敏交给同一份代码。
 - **引擎不认识 source。** 引擎的输入是它自己定义的策略类型（`AllowCommands`、`AllowedHosts`、`AllowArgv`、`RequireAllowList`），不是 sync 的 `itemcrypt.MetaPolicy`，也没有 `Paired` 这样的开关。「已配对的库空白名单即拒绝」由 sync 的适配层把 `RequireAllowList` 置真来表达；本地适配层不置。
-- **错误可区分。** 现在几乎所有失败都是 `ErrInvalidStore`，CLI 自己不得不先 `os.Stat` 和检查目录权限才能给出人话。库至少区分：库不存在、库已存在、目录权限不安全、钥匙不对、ref 不合法、值的大小不合法、条目不存在、写次数用尽、库损坏；底层错误用 `%w` 包住；`context` 的取消与超时原样返回，不折叠成别的错误。
+- **错误可区分。** 调用方不解析错误文本就能分辨失败：库至少区分库不存在、库已存在、权限不安全（目录 0700、库文件 0600）、钥匙不对、ref 不合法、值的大小不合法、条目不存在、写次数用尽、库损坏。钥匙不对在打开时对着库的校验块验证，成功打开之后的损坏错误说的是行，不是调用方的钥匙。底层原因通过 `Unwrap` 保留（`errors.Is` / `errors.As` 可取），但 `Error()` 只返回固定的安全文本——驱动层错误可能带 SQL 与参数值，绝不进消息；`context` 的取消与超时原样返回，不折叠成别的错误。CLI 与 MCP 按同一套分类给人话。
 - **不做注册表。** 没有 provider 注册机制；需要抽象的调用方自己声明它要的小接口。
 
 ### 17.8 命令面细则
@@ -1566,9 +1566,10 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | `set` 默认去末尾换行、`--raw`、终端不回显、新建/替换、短值警告、ref 语法 | 已实现（2026-11-13） |
 | local `import-env` 显式映射、批量事务与同值幂等 | 已实现限定赋值语法；真实 shell 凭证文件的格式兼容性未验，见 [K1](k1.md) |
 | §7.4 对去掉首尾空白的值建立匹配；只扣留可能成为匹配前缀的尾部 | 已实现（2026-11-13） |
-| `get --reveal` 的控制终端确认 | 未实现（现状没有任何确认） |
-| `keyref mcp --source`；工具消息进结果 | 部分实现：工具调用的每条消息都进结果（issue #3）；`mcp --source` 未实现，仍固定 sync |
-| 库独立 module、导出执行引擎、引擎自有策略类型、错误分类 | 未实现（注册表已删除；`GOWORK=off` 构建已修复并进 CI，issue #5） |
+| `get --reveal` 的控制终端确认 | 已实现（2026-11-19：`/dev/tty` 上输入 `y`/`yes`；无控制终端或未确认即拒绝，退出码 10，无跳过开关；e2e 覆盖无终端、拒绝、确认三种情形） |
+| `keyref mcp --source`；工具消息进结果 | 已实现（2026-11-19：启动时按 §17.3 选定 source 并固定整个会话——含库路径，会话中途改默认或删除注册都不换库；list/get/exec 在两个 source 上形状相同；工具消息、锁（12）、未配对与退出码都进结果，进程 stderr 不写；e2e 覆盖本地列表、取值、注入脱敏与会话固定） |
+| 库独立 module、导出执行引擎、引擎自有策略类型 | 已实现（2026-11-19：`lib/local`、`lib/exec`、`lib/secret`；引擎用 `exec.Policy`，`RequireAllowList` 取代 `Paired`） |
+| 库的错误分类细化 | 已实现（2026-11-19：`ErrStoreNotFound` / `ErrStoreExists` / `ErrInsecurePermissions` / `ErrInvalidKey` / `ErrInvalidRef` / `ErrInvalidValueSize` / `ErrNotFound` / `ErrWriteLimit` / `ErrCorruptStore`，加既有的 `ErrMetaTooLarge` / `ErrClosed`；`Error()` 只返回固定安全文本、底层原因经 `Unwrap` 可取；`context` 取消与超时原样返回；CLI 按分类给人话，`lib/local/README.md` 记录对照表） |
 | `status` 按 source 报告、只读命令不建文件、帮助退出 `0`、`--version` | 已实现（issue #7） |
 
-当前顺序：Neowind 最小凭证注入的 Keyref 侧契约已验证，真实消费者验收因对方会话的执行授权受阻；限定语法的本地 `import-env` 已实现，本地审计与项目级 allowlist 仍待补完。`get --reveal` 的控制终端确认作为 K1 安全债处理，`keyref mcp --source` 与库的 module 拆分、引擎导出继续按独立切片推进。实现落地时同步更新 `cli/README.md`、`cli/local/README.md` 与 `CLAUDE.md`——它们描述的是现状，本节描述的是目标。
+当前顺序：本地库与执行引擎已拆为独立 `lib` module 并由 `cli` 依赖，`get --reveal` 的控制终端确认、`keyref mcp --source` 与库的错误分类已落地，K1 的本地审计与项目级 allowlist 仍待补完（两者都需要 §16 之外的设计决定）。Neowind 最小凭证注入的 Keyref 侧契约已验证，真实消费者验收因对方会话的执行授权受阻。owner app、审批与 sync 路径暂缓；remote 读写的持钥模型未定，定案前不进入实现。`cli/README.md`、`lib/local/README.md` 与 `CLAUDE.md` 描述现状。

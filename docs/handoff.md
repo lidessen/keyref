@@ -182,6 +182,8 @@ iOS 在第 1 步已全量编译与测试通过；Android 在第 10 步已编译�
 
 范围：`cli/local`（库）、`cli/cmd/keyref` 与 `cli/internal/exec`、`source`、`localvault`（CLI 的本地路径），目标是「作为库集成」和「agent 在本机直接用 CLI」。基于 `0bb3cec`。server、iOS、Android 不在范围内。
 
+（本文其余部分按当时的路径记述：`cli/local` 现在是 `lib/local`，`cli/internal/exec` 现在是 `lib/exec`——2026-11-19 库拆成独立 `lib` module，见 design §17.7。）
+
 **设计问题** 写进了 design.md v0.10：§17 重写（本地库的加密 meta 与 `list`、`set` 的换行与策略、`--reveal` 的终端确认、密钥环条目的绑定、`mcp --source`、§17.6 local source 挡什么、§17.7 库的边界、§17.8 命令面细则），§7.4 增加两条，§16 改两条、加三条。实现状态与建议顺序在 design §17.9。
 
 **bug** 各有一条 issue，都在 `0bb3cec` 上复现过（#6、#8 是读代码得出的）：
@@ -198,10 +200,10 @@ iOS 在第 1 步已全量编译与测试通过；Android 在第 10 步已编译�
 
 **2026-11-13：以上 #2–#8 已全部修复**，每条一个提交（`e0aa65a` #5、`a1d02e8` #4、`eb5093c` #2、`b38f62d` #6、`53e6346` #8、`7f5759c` #7、`cf71be4` #3；`e361158` 补上 #5 的 `GOWORK=off` 构建所需 go.sum 条目，`cf78d82` 修掉 CI e2e 暴露的 Linux pty ioctl 与中断测试竞态）。验证：四个 module 的 `go vet`/`go test`、`GOWORK=off` 构建、全量 e2e 在 macOS 与 Linux 容器内全绿，CI 转绿。
 
-**整理项**（不是设计，也不是 bug；做 §17.7 的引擎导出时一并处理）：
+**整理项**（不是设计，也不是 bug；做 §17.7 的引擎导出时一并处理）。下述 ref 解析与参数收拢仍未做，属于纯清理，不阻塞任何已声明的能力：
 
 - 一次 exec 引用了哪些 ref，算了四遍：`runExecCore` 的 `addRef`、`refsOf`、`exec.CollectRefs`、`baseOutcome`；`injectionModes` 与 `baseOutcome` 重复，`splitSpec` 与 `splitEnvSpec` 重复，`placeholdersInArgv` 与 `ArgvPlaceholderRefs` 重复。有的排序、有的不排序，迟早漂移。让 `exec` 包解析一次、其余地方读结果。
 - `execOptions` 到 `exec.Request` 是逐字段拷贝；`approvalBaseOptions` 有 12 个参数、`resolveViaApproval` 有 13 个。把一次 sync exec 的上下文（store、identity、client、vault id、目录、审计收件人）收成一个结构。
 - `cli/cmd/keyref/main.go` 1400 行，按命令拆文件。
-- `exec.go` 里退出码的数字字面量（`10`、`11`、`15`、`18`）与 `exitcode` 常量混用。
-- `cli/local/README.md` 末尾写「仓库是私有的、需要 `GOPRIVATE`」，而仓库目前是公开的；二者取其一。
+- ~~`exec.go` 里退出码的数字字面量（`10`、`11`、`15`、`18`）与 `exitcode` 常量混用。~~（2026-11-19 处理：`exec.go` 已移入 `lib/exec`，其中只用 `exitcode` 常量；`cmd/keyref/main.go` 剩下的两处 `10` 与 `internal/approval` 的 11 处字面量也换成了 `exitcode.UnknownRef` / `exitcode.ApprovalDenied`。）
+- ~~`cli/local/README.md` 末尾写「仓库是私有的、需要 `GOPRIVATE`」，而仓库目前是公开的；二者取其一。~~（2026-11-19 处理：README 随库迁到 `lib/local/README.md`，改为公开仓库、不需要 `GOPRIVATE`，并补上了 §17.7 的错误对照表。）

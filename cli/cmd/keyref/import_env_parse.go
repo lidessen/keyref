@@ -9,8 +9,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/lidessen/keyref/cli/internal/secret"
-	"github.com/lidessen/keyref/cli/local"
+	"github.com/lidessen/keyref/lib/local"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 const (

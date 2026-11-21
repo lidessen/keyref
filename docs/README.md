@@ -1,6 +1,6 @@
 # docs
 
-Specifications and contracts. `server/`, `cli/` and `proto/` have implementations; when an implementation raises a question, change these documents first, then the code. The native app was removed on 2026-11-19 and is planned as a WebView shell; `design.md` and `ios-ui.md` remain its spec of record.
+Specifications and contracts. `server/`, `cli/`, `lib/` and `proto/` have implementations; when an implementation raises a question, change these documents first, then the code. The native app was removed on 2026-11-19 and is planned as a WebView shell; `design.md` and `ios-ui.md` remain its spec of record.
 
 The documents below are written in Chinese; commands, field names, algorithms, paths and code identifiers stay English in them, and this index is the English entry point.
 

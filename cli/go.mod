@@ -4,10 +4,15 @@ go 1.26.0
 
 require (
 	github.com/awnumar/memguard v0.23.0
+	github.com/lidessen/keyref/lib v0.0.0
 	github.com/lidessen/keyref/proto v0.0.0-20261113110209-c610494cd11e
 	github.com/zalando/go-keyring v0.2.8
 	modernc.org/sqlite v1.61.0
 )
+
+// The library is published from this repository; a checkout always
+// builds it from ../lib so GOWORK=off works without a release.
+replace github.com/lidessen/keyref/lib => ../lib
 
 require (
 	github.com/awnumar/memcall v0.4.0 // indirect

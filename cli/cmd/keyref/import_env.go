@@ -10,10 +10,10 @@ import (
 	"os"
 
 	"github.com/lidessen/keyref/cli/internal/config"
-	"github.com/lidessen/keyref/cli/internal/exitcode"
-	"github.com/lidessen/keyref/cli/internal/secret"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/local"
+	"github.com/lidessen/keyref/lib/exitcode"
+	"github.com/lidessen/keyref/lib/local"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 const importEnvUsage = `usage: keyref import-env --file PATH --map NAME=REF [--map NAME=REF ...] [--source NAME]

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/secret"
 	"github.com/lidessen/keyref/proto/crypto"
 )
 

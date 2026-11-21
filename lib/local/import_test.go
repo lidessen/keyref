@@ -276,7 +276,7 @@ func TestImportWriteBudgetRollsBackBatch(t *testing.T) {
 		t.Fatal("budget setup failed")
 	}
 	statuses, err := s.Import(ctx, []ImportItem{{Ref: "a", Value: aNew}, {Ref: "b", Value: bNew}})
-	if !errors.Is(err, ErrInvalidStore) {
+	if !errors.Is(err, ErrWriteLimit) {
 		t.Fatalf("over-budget import error = %v", err)
 	}
 	if statuses != nil {
@@ -310,7 +310,7 @@ func TestImportWriteBudgetRollsBackBatch(t *testing.T) {
 
 	// A later change must fail without touching the committed rows.
 	statuses, err = s.Import(ctx, []ImportItem{{Ref: "a", Value: aOld}})
-	if !errors.Is(err, ErrInvalidStore) || statuses != nil {
+	if !errors.Is(err, ErrWriteLimit) || statuses != nil {
 		t.Fatal("change at the write cap was not rejected")
 	}
 	requireImportValue(t, s, "a", aNew, "a after cap rejection")
@@ -483,10 +483,10 @@ func TestImportCorruptionFailsClosedWholeBatch(t *testing.T) {
 			badBlob, badMeta, _ := importSnapshot(t, s, "bad")
 			writes := importWrites(t, s)
 			statuses, err := s.Import(ctx, []ImportItem{{Ref: "good", Value: goodNew}, {Ref: "bad", Value: badNew}})
-			if !errors.Is(err, ErrInvalidStore) {
+			if !errors.Is(err, ErrCorruptStore) {
 				t.Fatalf("corrupt import error = %v", err)
 			}
-			if err.Error() != ErrInvalidStore.Error() {
+			if err.Error() != ErrCorruptStore.Error() {
 				t.Fatal("corrupt import error text is not the fixed sentinel")
 			}
 			if statuses != nil {
@@ -527,7 +527,7 @@ func TestImportCorruptMetaFailsEvenWhenUnchanged(t *testing.T) {
 	blobBefore, metaBefore, _ := importSnapshot(t, s, "bad")
 	writes := importWrites(t, s)
 	statuses, err := s.Import(ctx, []ImportItem{{Ref: "bad", Value: value}})
-	if !errors.Is(err, ErrInvalidStore) || statuses != nil {
+	if !errors.Is(err, ErrCorruptStore) || statuses != nil {
 		t.Fatal("unchanged corrupt row did not fail closed")
 	}
 	blobAfter, metaAfter, _ := importSnapshot(t, s, "bad")
@@ -554,8 +554,8 @@ func TestImportValidationRejectsWholeBatch(t *testing.T) {
 	}{
 		{"duplicate ref", []ImportItem{{Ref: "dup", Value: value}, {Ref: "dup", Value: importValue(t, 16)}}, ErrInvalidStore},
 		{"invalid ref", []ImportItem{{Ref: "pending", Value: value}, {Ref: "Not-Legal", Value: value}}, ErrInvalidRef},
-		{"empty value", []ImportItem{{Ref: "empty", Value: nil}}, ErrInvalidStore},
-		{"oversized value", []ImportItem{{Ref: "oversized", Value: make([]byte, maxValue+1)}}, ErrInvalidStore},
+		{"empty value", []ImportItem{{Ref: "empty", Value: nil}}, ErrInvalidValueSize},
+		{"oversized value", []ImportItem{{Ref: "oversized", Value: make([]byte, maxValue+1)}}, ErrInvalidValueSize},
 		{"too many items", tooMany, ErrInvalidStore},
 	}
 	for _, tc := range cases {

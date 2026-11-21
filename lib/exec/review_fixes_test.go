@@ -7,8 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 // ---- review fix: audit outcome for every attempted exec (§7.7) ----
@@ -67,9 +66,7 @@ func TestNotInjectableProducesDenyOutcome(t *testing.T) {
 
 func metaOnly(t *testing.T, ref string) *ResolvedRef {
 	t.Helper()
-	return &ResolvedRef{Ref: ref, Meta: &itemcrypt.Meta{
-		Ref: ref, Injectable: true, Policy: itemcrypt.MetaPolicy{},
-	}}
+	return &ResolvedRef{Ref: ref, Injectable: true}
 }
 
 func plainOf(t *testing.T, value string) *secret.Plaintext {
@@ -269,7 +266,7 @@ func TestStageFdFileUnlinksImmediately(t *testing.T) {
 func mkRefPolicy(t *testing.T, ref, value string, allowCommands, allowedHosts []string) *ResolvedRef {
 	t.Helper()
 	rr := mkRef(t, ref, value, true, false)
-	rr.Meta.Policy.AllowCommands = allowCommands
-	rr.Meta.Policy.AllowedHosts = allowedHosts
+	rr.Policy.AllowCommands = allowCommands
+	rr.Policy.AllowedHosts = allowedHosts
 	return rr
 }

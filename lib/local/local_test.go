@@ -29,7 +29,7 @@ func TestLocalLifecycle(t *testing.T) {
 	ctx := context.Background()
 	path := pathForTest(t)
 	key := keyForTest()
-	if _, err := Open(path, key); !errors.Is(err, ErrInvalidStore) {
+	if _, err := Open(path, key); !errors.Is(err, ErrStoreNotFound) {
 		t.Fatalf("missing open: %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -48,7 +48,7 @@ func TestLocalLifecycle(t *testing.T) {
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("store mode: %v %v", info, err)
 	}
-	if _, err := Create(path, key); !errors.Is(err, ErrInvalidStore) {
+	if _, err := Create(path, key); !errors.Is(err, ErrStoreExists) {
 		t.Fatalf("overwrite accepted: %v", err)
 	}
 	value := []byte("synthetic-plaintext-value-not-a-real-key")
@@ -120,7 +120,7 @@ func TestLocalPrivatePath(t *testing.T) {
 	if err := os.Chmod(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Create(path, key); !errors.Is(err, ErrInvalidStore) {
+	if _, err := Create(path, key); !errors.Is(err, ErrInsecurePermissions) {
 		t.Fatalf("public directory: %v", err)
 	}
 	if err := os.Chmod(dir, 0700); err != nil {
@@ -134,7 +134,7 @@ func TestLocalPrivatePath(t *testing.T) {
 	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, key); !errors.Is(err, ErrInvalidStore) {
+	if _, err := Open(path, key); !errors.Is(err, ErrInsecurePermissions) {
 		t.Fatalf("public file: %v", err)
 	}
 	if err := os.Chmod(path, 0600); err != nil {
@@ -174,7 +174,7 @@ func TestLocalAADDetectsSubstitution(t *testing.T) {
 	if _, err = s.db.Exec("UPDATE entries SET blob = ? WHERE id = ?", blob, second); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Use(ctx, "second", func([]byte) error { t.Error("substitution delivered plaintext"); return nil }); !errors.Is(err, ErrInvalidStore) {
+	if err = s.Use(ctx, "second", func([]byte) error { t.Error("substitution delivered plaintext"); return nil }); !errors.Is(err, ErrCorruptStore) {
 		t.Fatalf("tamper: %v", err)
 	}
 }
@@ -393,7 +393,7 @@ func TestLocalOversizedBlobRejected(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE entries SET blob=zeroblob(?) WHERE id=?", maxValue+29, id); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Use(ctx, "ref", func([]byte) error { t.Error("oversized blob delivered plaintext"); return nil }); !errors.Is(err, ErrInvalidStore) {
+	if err := s.Use(ctx, "ref", func([]byte) error { t.Error("oversized blob delivered plaintext"); return nil }); !errors.Is(err, ErrCorruptStore) {
 		t.Fatalf("oversized blob: %v", err)
 	}
 }
@@ -411,7 +411,7 @@ func TestLocalWriteLimitPreservesExistingValue(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE metadata SET writes=4294967295"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Put(ctx, "ref", []byte("replacement"), PutOptions{}); !errors.Is(err, ErrInvalidStore) {
+	if _, err := s.Put(ctx, "ref", []byte("replacement"), PutOptions{}); !errors.Is(err, ErrWriteLimit) {
 		t.Fatalf("write at limit: %v", err)
 	}
 	if err := s.Use(ctx, "ref", func(value []byte) error {
@@ -433,7 +433,7 @@ func TestLocalWriteLimitPreservesExistingValue(t *testing.T) {
 // entry is bound to this id).
 func TestReadStoreID(t *testing.T) {
 	path := pathForTest(t)
-	if _, err := ReadStoreID(path); !errors.Is(err, ErrInvalidStore) {
+	if _, err := ReadStoreID(path); !errors.Is(err, ErrStoreNotFound) {
 		t.Fatalf("missing vault: %v", err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -640,7 +640,7 @@ func TestLocalListAndStatDoNotDecryptSecret(t *testing.T) {
 	if err != nil || len(metas) != 1 || metas[0].Ref != "tok" {
 		t.Fatalf("List = %+v, %v", metas, err)
 	}
-	if err := s.Use(ctx, "tok", func([]byte) error { t.Error("corrupt blob delivered plaintext"); return nil }); !errors.Is(err, ErrInvalidStore) {
+	if err := s.Use(ctx, "tok", func([]byte) error { t.Error("corrupt blob delivered plaintext"); return nil }); !errors.Is(err, ErrCorruptStore) {
 		t.Fatalf("Use on corrupt blob: %v", err)
 	}
 }
@@ -667,7 +667,7 @@ func TestLocalMetaBoundToRow(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE entries SET meta=? WHERE id=?", metaBlob, second); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Stat(ctx, "second"); !errors.Is(err, ErrInvalidStore) {
+	if _, err := s.Stat(ctx, "second"); !errors.Is(err, ErrCorruptStore) {
 		t.Fatalf("substituted meta: %v", err)
 	}
 }
@@ -708,7 +708,7 @@ func TestLocalMetaRejectsMalformedPlaintext(t *testing.T) {
 		if _, err := s.db.Exec("UPDATE entries SET meta=? WHERE id=?", sealed, id); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.Stat(ctx, "tok"); !errors.Is(err, ErrInvalidStore) {
+		if _, err := s.Stat(ctx, "tok"); !errors.Is(err, ErrCorruptStore) {
 			t.Errorf("%s: %v", name, err)
 		}
 		if err := s.Use(ctx, "tok", func([]byte) error { return nil }); err != nil {
@@ -775,13 +775,13 @@ func TestLocalMetaAndSecretCannotBeSwapped(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE entries SET meta=?, blob=? WHERE id=?", secretBlob, secretBlob, id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Stat(ctx, "tok"); !errors.Is(err, ErrInvalidStore) {
+	if _, err := s.Stat(ctx, "tok"); !errors.Is(err, ErrCorruptStore) {
 		t.Fatalf("secret ciphertext accepted as meta: %v", err)
 	}
 	if _, err := s.db.Exec("UPDATE entries SET meta=?, blob=? WHERE id=?", metaBlob, metaBlob, id); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Use(ctx, "tok", func([]byte) error { t.Error("meta ciphertext delivered plaintext"); return nil }); !errors.Is(err, ErrInvalidStore) {
+	if err := s.Use(ctx, "tok", func([]byte) error { t.Error("meta ciphertext delivered plaintext"); return nil }); !errors.Is(err, ErrCorruptStore) {
 		t.Fatalf("meta ciphertext accepted as secret: %v", err)
 	}
 }

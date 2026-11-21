@@ -16,9 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lidessen/keyref/cli/internal/exitcode"
-	"github.com/lidessen/keyref/cli/internal/itemcrypt"
-	"github.com/lidessen/keyref/cli/internal/secret"
+	"github.com/lidessen/keyref/lib/exitcode"
+	"github.com/lidessen/keyref/lib/secret"
 )
 
 const (
@@ -59,11 +58,9 @@ func loginRequest(t *testing.T, username string, password string) (*Request, *in
 	t.Helper()
 	bin := testBinary(t)
 	login := &ResolvedRef{
-		Ref: loginFixtureRef,
-		Meta: &itemcrypt.Meta{
-			Injectable: true,
-			Policy:     itemcrypt.MetaPolicy{AllowCommands: []string{filepath.Base(bin)}},
-		},
+		Ref:        loginFixtureRef,
+		Injectable: true,
+		Policy:     Policy{AllowCommands: []string{filepath.Base(bin)}},
 	}
 	var calls int
 	return &Request{
@@ -103,7 +100,7 @@ func TestStdinLoginPipeAndRedaction(t *testing.T) {
 		t.Fatal("could not allocate provider fixture")
 	}
 	req.EnvRefs = []string{"PROVIDER_CREDENTIAL=provider"}
-	req.Refs["provider"] = &ResolvedRef{Meta: &itemcrypt.Meta{Injectable: true}, Value: provider}
+	req.Refs["provider"] = &ResolvedRef{Injectable: true, Value: provider}
 	code, stdout, stderr := runReq(req)
 	if code != 0 || *calls != 1 {
 		t.Fatalf("login process exit %d with %d login resolutions", code, *calls)
@@ -145,7 +142,7 @@ func TestStdinLoginRejectsInvalidFields(t *testing.T) {
 
 func TestStdinLoginChecksPolicyBeforeResolving(t *testing.T) {
 	cases := map[string]func(*Request){
-		"no-explicit-allow": func(req *Request) { req.Refs[loginFixtureRef].Meta.Policy.AllowCommands = nil },
+		"no-explicit-allow": func(req *Request) { req.Refs[loginFixtureRef].Policy.AllowCommands = nil },
 		"relative-child":    func(req *Request) { req.Argv[0] = filepath.Base(req.Argv[0]) },
 		"same-stdin":        func(req *Request) { req.StdinRef = "other" },
 		"same-env-value":    func(req *Request) { req.EnvRefs = []string{"K=" + loginFixtureRef} },
@@ -183,12 +180,10 @@ func runLoginForCancellation(marker string) {
 		Argv:     []string{bin, "helper", "hold-login", marker},
 		LoginRef: loginFixtureRef,
 		Refs: map[string]*ResolvedRef{loginFixtureRef: {
-			Username: username,
-			Value:    value,
-			Meta: &itemcrypt.Meta{
-				Injectable: true,
-				Policy:     itemcrypt.MetaPolicy{AllowCommands: []string{filepath.Base(bin)}},
-			},
+			Username:   username,
+			Value:      value,
+			Injectable: true,
+			Policy:     Policy{AllowCommands: []string{filepath.Base(bin)}},
 		}},
 		Stdout: io.Discard,
 		Stderr: io.Discard,

@@ -21,7 +21,7 @@ import (
 
 	"github.com/lidessen/keyref/cli/internal/keyring"
 	"github.com/lidessen/keyref/cli/internal/source"
-	"github.com/lidessen/keyref/cli/local"
+	"github.com/lidessen/keyref/lib/local"
 )
 
 // EnvMaster carries the master key as the standard base64 encoding of

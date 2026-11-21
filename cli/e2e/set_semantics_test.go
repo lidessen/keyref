@@ -24,7 +24,7 @@ func TestSetValueSemantics(t *testing.T) {
 	if !strings.Contains(set.stdout, `created "trimmed"`) {
 		t.Fatalf("set did not report creation: %q", set.stdout)
 	}
-	reveal := localRun(t, env, "", "get", "trimmed", "--reveal")
+	reveal := localRevealRun(t, env, "get", "trimmed", "--reveal")
 	if reveal.code != 0 || reveal.stdout != localSecret {
 		t.Fatalf("stored value %q (exit %d), want the token without its newline", reveal.stdout, reveal.code)
 	}
@@ -34,7 +34,7 @@ func TestSetValueSemantics(t *testing.T) {
 	if raw.code != 0 {
 		t.Fatalf("set --raw exit %d: %s", raw.code, raw.stderr)
 	}
-	reveal = localRun(t, env, "", "get", "raw", "--reveal")
+	reveal = localRevealRun(t, env, "get", "raw", "--reveal")
 	if reveal.code != 0 || reveal.stdout != localSecret+"\n" {
 		t.Fatalf("--raw value %q (exit %d), want the newline preserved", reveal.stdout, reveal.code)
 	}
@@ -47,7 +47,7 @@ func TestSetValueSemantics(t *testing.T) {
 	if !strings.Contains(replace.stdout, `replaced "trimmed"`) {
 		t.Fatalf("second set did not report replacement: %q", replace.stdout)
 	}
-	reveal = localRun(t, env, "", "get", "trimmed", "--reveal")
+	reveal = localRevealRun(t, env, "get", "trimmed", "--reveal")
 	if reveal.code != 0 || reveal.stdout != localSecret {
 		t.Fatalf("CRLF value %q (exit %d), want the token without its newline", reveal.stdout, reveal.code)
 	}

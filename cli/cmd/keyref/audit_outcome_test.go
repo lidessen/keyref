@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/lidessen/keyref/cli/internal/audit"
-	"github.com/lidessen/keyref/cli/internal/exec"
 	"github.com/lidessen/keyref/cli/internal/testowner"
+	"github.com/lidessen/keyref/lib/exec"
 	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/wire"
 )

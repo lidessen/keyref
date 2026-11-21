@@ -163,7 +163,7 @@ func TestLegacyBackfillHonorsWriteLimit(t *testing.T) {
 		t.Error("failed migration delivered plaintext")
 		return nil
 	})
-	if !errors.Is(err, ErrInvalidStore) {
+	if !errors.Is(err, ErrWriteLimit) {
 		t.Fatalf("migration at write limit: %v", err)
 	}
 	var missing bool

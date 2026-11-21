@@ -109,8 +109,8 @@ func TestNewReplyMatcherRejectsDangerous(t *testing.T) {
 func mkRefApproval(t *testing.T, ref, value, argv0 string) *ResolvedRef {
 	t.Helper()
 	rr := mkRef(t, ref, value, true, false)
-	rr.Meta.Policy.Sensitivity = "approval"
-	rr.Meta.Policy.AllowCommands = []string{filepath.Base(argv0)}
+	rr.Policy.Sensitivity = "approval"
+	rr.Policy.AllowCommands = []string{filepath.Base(argv0)}
 	return rr
 }
 
@@ -119,7 +119,7 @@ func mkRefApproval(t *testing.T, ref, value, argv0 string) *ResolvedRef {
 // runs (design.md §7.1).
 func TestReplyGateRejectsStandardItem(t *testing.T) {
 	rr := mkRefApproval(t, "wifi", fxSecret, testBinary(t))
-	rr.Meta.Policy.Sensitivity = "standard" // one gate half missing
+	rr.Policy.Sensitivity = "standard" // one gate half missing
 	req := &Request{
 		Pty:     true,
 		Replies: []Reply{{Pattern: "Password:", Ref: "wifi"}},
@@ -139,7 +139,7 @@ func TestReplyGateRejectsStandardItem(t *testing.T) {
 // TestReplyGateRejectsAllowCommandsMissing pins the allowCommands half.
 func TestReplyGateRejectsAllowCommandsMissing(t *testing.T) {
 	rr := mkRefApproval(t, "wifi", fxSecret, testBinary(t))
-	rr.Meta.Policy.AllowCommands = []string{"other-tool"}
+	rr.Policy.AllowCommands = []string{"other-tool"}
 	req := &Request{
 		Pty:     true,
 		Replies: []Reply{{Pattern: "Password:", Ref: "wifi"}},

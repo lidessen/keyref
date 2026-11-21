@@ -80,7 +80,7 @@ func (s *Store) Import(ctx context.Context, items []ImportItem) ([]ImportStatus,
 		}
 		seen[item.Ref] = struct{}{}
 		if len(item.Value) == 0 || len(item.Value) > maxValue {
-			return nil, ErrInvalidStore
+			return nil, ErrInvalidValueSize
 		}
 	}
 	if len(items) == 0 {
@@ -144,28 +144,28 @@ func (s *Store) Import(ctx context.Context, items []ImportItem) ([]ImportStatus,
 			return nil, importError(ctx)
 		}
 		if blobLen < 28 || blobLen > maxValue+28 {
-			return nil, ErrInvalidStore
+			return nil, ErrCorruptStore
 		}
 		// Only a genuine legacy NULL meta is accepted as absent; an empty
 		// or truncated blob is corrupt and must fail closed.
 		if !metaNull {
 			existing, err := s.openMeta(id, metaBlob)
 			if err != nil || existing.Ref != item.Ref {
-				return nil, ErrInvalidStore
+				return nil, ErrCorruptStore
 			}
 			plans[i].existing = existing
 		}
 		aad, err := keycrypto.SecretAAD(s.id, id)
 		if err != nil {
-			return nil, ErrInvalidStore
+			return nil, classify(ErrInvalidStore, "", err)
 		}
 		plain, err := keycrypto.OpenBlob(s.key, aad, blob)
 		if err != nil {
-			return nil, ErrInvalidStore
+			return nil, classify(ErrCorruptStore, "", err)
 		}
 		if len(plain) == 0 || len(plain) > maxValue {
 			keycrypto.WipeKey(plain)
-			return nil, ErrInvalidStore
+			return nil, ErrCorruptStore
 		}
 		unchanged := subtle.ConstantTimeCompare(plain, item.Value) == 1
 		keycrypto.WipeKey(plain)
@@ -181,16 +181,18 @@ func (s *Store) Import(ctx context.Context, items []ImportItem) ([]ImportStatus,
 		// The comparison decides the exact write count, so the budget
 		// check uses that count, not len(items). A single metadata row
 		// is required; anything else is a damaged vault.
-		const writeCap int64 = 4294967295
 		res, err := conn.ExecContext(ctx,
 			"UPDATE metadata SET writes=writes+? WHERE writes <= ?",
 			changed, writeCap-int64(changed))
 		if err != nil {
-			return nil, importError(ctx)
+			return nil, writeBudgetError(ctx, conn, "writes <= ?", []any{writeCap - int64(changed)}, err)
 		}
 		n, err := res.RowsAffected()
-		if err != nil || n != 1 {
-			return nil, ErrInvalidStore
+		if err != nil {
+			return nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not count the write", err)
+		}
+		if n != 1 {
+			return nil, writeBudgetError(ctx, conn, "writes <= ?", []any{writeCap - int64(changed)}, nil)
 		}
 	}
 
