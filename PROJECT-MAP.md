@@ -1,7 +1,7 @@
 # keyref 项目地图
 
 - 状态：current
-- 最后核对：2026-11-19 清理切片（移除原生 app 与安卓采集端，server 冻结）
+- 最后核对：`74bc7e3` / 2026-11-21（统一入口三件套对齐；主体逻辑同 2026-11-19 清理切片）
 - 维护者：keyref 项目窗
 - 战略健康：需关注 —— 注入与脱敏主线可用；owner app、审批与同步路径暂缓，项目授权与 remote 持钥模型仍是债务。
 - 用途：给技术型决策者判断项目有没有走歪；具体合同与验收证据见链接文档。
@@ -84,6 +84,7 @@
 
 ## 7. 深入阅读
 
+- 代理入口与规范：[AGENTS.md](AGENTS.md)（`CLAUDE.md` 通过 `@AGENTS.md` 复用）
 - 架构 / 合同：[设计](docs/design.md)、[线协议](docs/protocol.md)、[owner app 交互规格（暂缓）](docs/ios-ui.md)
 - 命令 / 库：[CLI](cli/README.md)、[本地库](lib/local/README.md)
 - 改造 / 证据：[交接](docs/handoff.md)、[K1 计划](docs/k1.md)、[K1 自查](docs/k1-self-check.md)、[注入证据](docs/k1-injection-evidence.md)、[迁移回归](lib/local/migration_test.go)、[CLI e2e](cli/e2e/)
