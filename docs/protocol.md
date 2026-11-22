@@ -127,7 +127,7 @@ proto/crypto/testdata/      // 金向量 JSON（§11.3）
 
 ```
 cli/go.mod                  // module github.com/lidessen/keyref/cli
-cli/cmd/keyref/main.go      // 命令入口：pair session status lock unlock sync list get exec server mcp
+cli/cmd/keyref/main.go      // 命令入口：server source decider pair session sync init set import-env delete list get status lock unlock exec mcp
 cli/internal/approval/      // 审批流 CLI 侧：发起审批请求、轮询、一次性解包（design §8.3）
 cli/internal/audit/         // 封箱并上传 exec 审计事件（§6.23）
 cli/internal/client/        // 同步 API 的薄 HTTP 客户端

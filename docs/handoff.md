@@ -2,6 +2,8 @@
 
 本文记录一次完整 review（设计 + CLI + server + proto + iOS + Android）之后的状态：已经修了什么、哪些经过验证、还剩什么、按什么顺序做。协议层的变更方案原写在 protocol-v2.md（2026-11 的协议 v2 破坏性变更批次规格），已随各步并入 protocol.md / design.md 并删除；文中「v2 X」即该批次的节标。
 
+路径说明：本文保留 review 当时的历史路径；`cli/internal/exec` 现为 `lib/exec`，`cli/local` 现为 `lib/local`。库拆分背景见[第 7 节](#7-lib--cli-review2026-11-13)。
+
 分支：`claude/adoring-euler-2yzqeu`（已并入 `main`）。
 
 ## 0. 进展（2026-11-13，macOS）

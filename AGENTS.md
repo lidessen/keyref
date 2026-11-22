@@ -13,7 +13,7 @@ The trust boundary is the whole design: the server stores ciphertext only and ca
 - **Active:** embedding surfaces — the standalone `lib` module is extracted, the CLI's `local` source is stable, `keyref mcp` serves whichever source it pinned at startup, and `lib/local` classifies its failures (design §17.7). The engine imports no CLI code; remaining local debt is K1's audit trail and project-level allowlist, both of which need a design decision beyond §16.
 - **Frozen:** the paired/sync path. The server stays buildable and self-hostable, but gets no new sync-protocol features.
 - **Deferred:** the human-facing app and approvals. The native iOS app and the Android SMS collector were removed from this repository; the app is planned as a WebView shell over a web UI. The design and protocol docs still describe the intended owner model and are the spec of record for that work.
-- **Next target:** self-hosted remote read/write — deploy `keyref-server`, point the CLI at it (`--server` / `KEYREF_SERVER`), sign in with GitHub, and read/write credentials without an owner app or approvals. The key-custody model for that path is not settled yet and must be decided before implementing it.
+- **Next target:** self-hosted remote read/write — deploy `keyref-server`, point the CLI at it (currently `keyref server set <origin>` or `KEYREF_SERVER`; a `--server` flag is not implemented), sign in with GitHub, and read/write credentials without an owner app or approvals. The key-custody model for that path is not settled yet and must be decided before implementing it.
 
 ## Repository layout
 
