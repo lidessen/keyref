@@ -176,6 +176,9 @@ func (s *Server) Handler() http.Handler {
 		})
 		mux.Handle("/v1/remote/", accountHandler)
 		mux.Handle("/manage/", accountHandler)
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/manage/", http.StatusFound)
+		})
 	}
 
 	mux.HandleFunc("POST /v1/vaults", s.handleCreateVault)

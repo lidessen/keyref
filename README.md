@@ -1,5 +1,7 @@
 # keyref
 
+<img src="server/internal/accountvault/web/logo.png" alt="" width="72" height="72">
+
 keyref is a secret manager for humans and a secret broker for AI agents. A human keeps API keys, tokens, passwords and notes in a vault; an agent **uses** those secrets through the CLI, and the content the tools hand back to the model contains **no plaintext**.
 
 Keyref supports an offline vault on the same machine as the CLI and a GitHub account vault on a server. The human-facing app is deferred, and the paired/sync path is frozen until a replacement owner client exists. An optional self-hosted account vault supports GitHub login and direct CLI read/write with server-managed keys. See the [account vault setup](server/README.md#github-account-vault).

@@ -1,7 +1,7 @@
 import { createRuntime, keyed } from "meowjsx";
 import { derived, mapSignal, signal } from "meowjsx/signal";
 import { createWebRenderer } from "meowjsx/web";
-import { Button, Input, Text, createMeowUI, meowUIComponents } from "meowtail";
+import { Button, Input, Text, createMeowUI } from "meowtail";
 import { standardTheme } from "meowtail/theme";
 import { createMeowUITheme } from "meowtail/web";
 
@@ -46,7 +46,7 @@ function message(error: unknown): string {
       expired_token: "The sign-in code expired. Start again to get a new one.",
       item_limit: "This vault is full. Delete an entry before adding another.",
       not_found: "This entry no longer exists. Refresh and try again.",
-      conflict: "This reference already exists. Choose another reference.",
+      conflict: "Could not save this entry. It may already exist, have changed, or the vault may be full.",
       invalid_request: "Check the reference, value, and allowed commands.",
     };
     return descriptions[error.code] ?? (error.status === 409 ? "This entry changed. Refresh and try again." : "The server could not complete the request. Try again.");
@@ -232,16 +232,13 @@ function App() {
       <section className="loading" hidden={loading}><Text variant="secondary">Opening your vault…</Text></section>
       <section className="login-layout" hidden={signedOut}>
         <div className="login-copy">
-          <p className="eyebrow">YOUR CREDENTIALS, KEPT CLOSE</p>
-          <h1>Your credentials, in one place.</h1>
-          <p className="lead">Sign in to manage the credentials your tools can use.</p>
+          <h1>Sign in to Keyref</h1>
+          <p className="lead">Manage your remote vault credentials with GitHub.</p>
           <Button variant="primary" disabled={busy} onClick={login}>Continue with GitHub <span aria-hidden="true">↗</span></Button>
-          <p className="login-footnote">Sign in with your authorized GitHub account.</p>
         </div>
         <div className="mascot" aria-hidden="true"><img src="/manage/assets/logo.png" alt="" /></div>
       </section>
       <section className="code-panel" hidden={signingIn}>
-        <p className="eyebrow">GITHUB SIGN IN</p>
         <h1>Connect your account</h1>
         <p className="lead">Enter this code on GitHub to open your vault.</p>
         <div className="device-code">{code}</div>
@@ -251,7 +248,7 @@ function App() {
       </section>
       <section className="vault" hidden={loggedIn}>
         <div className="vault-heading">
-          <div><p className="eyebrow">YOUR ACCOUNT VAULT</p><h1>Credentials</h1><p className="subheading">The keys your tools can use, all in one place.</p></div>
+          <h1>Credentials</h1>
           <Button variant="primary" onClick={() => openEditor()}>＋ Add credential</Button>
         </div>
         <div className="toolbar">
@@ -273,7 +270,7 @@ function App() {
       </section>
       <div className="overlay" hidden={editorHidden}>
         <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="editor-title">
-          <div className="dialog-header"><div><p className="eyebrow">ACCOUNT VAULT</p><h2 id="editor-title">{editorTitle}</h2></div><button className="close" aria-label="Close" onClick={closeEditor}>×</button></div>
+          <div className="dialog-header"><h2 id="editor-title">{editorTitle}</h2><button className="close" aria-label="Close" onClick={closeEditor}>×</button></div>
           <form id="credential-form" onSubmit={save}>
             <label htmlFor="ref">Reference</label><Input id="ref" name="ref" placeholder="e.g. openai-prod" disabled={refDisabled} autocomplete="off" /><small>Lowercase letters, numbers and hyphens.</small>
             <label htmlFor="value">Secret value</label><Input id="value" name="value" type="password" autocomplete="new-password" /><small>{secretHelp}</small>
@@ -293,5 +290,5 @@ function App() {
   </div>;
 }
 
-const runtime = createRuntime({ plugins: [createMeowUI({ components: meowUIComponents }), createMeowUITheme({ theme: standardTheme })] });
+const runtime = createRuntime({ plugins: [createMeowUI({ components: [Button, Input, Text] }), createMeowUITheme({ theme: standardTheme })] });
 createWebRenderer(runtime).render(<App />, document.querySelector<HTMLElement>("#app")!);

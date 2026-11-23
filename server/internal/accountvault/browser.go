@@ -49,6 +49,10 @@ func browserHeaders(w http.ResponseWriter) {
 
 func (v *Vault) browserPage(w http.ResponseWriter, r *http.Request) {
 	browserHeaders(w)
+	if _, err := fs.Stat(browserAssets, "web/build/main.js"); err != nil {
+		http.Error(w, "Management UI is not built", http.StatusServiceUnavailable)
+		return
+	}
 	data, err := browserAssets.ReadFile("web/index.html")
 	if err != nil {
 		http.Error(w, "Management UI is not built", http.StatusServiceUnavailable)
