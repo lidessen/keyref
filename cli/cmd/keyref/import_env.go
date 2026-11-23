@@ -16,7 +16,7 @@ import (
 	"github.com/lidessen/keyref/lib/secret"
 )
 
-const importEnvUsage = `usage: keyref import-env --file PATH --map NAME=REF [--map NAME=REF ...] [--source NAME]
+const importEnvUsage = `usage: keyref import-env --file PATH --map NAME=REF [--map NAME=REF ...] [--vault NAME]
 
 Import selected variables from a regular file into a local vault. Each --map
 names one variable and its distinct ref. The whole file is validated before
@@ -31,7 +31,7 @@ func cmdImportEnv(args []string) int {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 	filePath := fs.String("file", "", "input file")
-	sourceName := fs.String("source", "", "local source")
+	sourceName := fs.String("vault", "", "local vault")
 	var mappingArgs stringList
 	fs.Var(&mappingArgs, "map", "NAME=REF mapping (repeatable)")
 	rest, err := parseArgs(fs, args)

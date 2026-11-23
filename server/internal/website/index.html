@@ -96,12 +96,12 @@
         <li>
           <h3>Save a credential</h3>
           <p>Paste the token and press Enter. Keyref hides your input. <code>github-token</code> is the reference you can share with an agent.</p>
-          <pre><code>keyref set github-token --source local</code></pre>
+          <pre><code>keyref set github-token --vault local</code></pre>
         </li>
         <li>
           <h3>Run a command with the ref</h3>
           <p>Keyref injects the token as <code>GH_TOKEN</code> for this command.</p>
-          <pre><code>keyref exec --source local --env GH_TOKEN=github-token -- \
+          <pre><code>keyref exec --vault local --env GH_TOKEN=github-token -- \
   gh api user --jq .login</code></pre>
         </li>
       </ol>
@@ -111,7 +111,7 @@
       <div class="shell section sources-inner">
         <div class="section-copy">
           <h2 id="sources-title">Choose where credentials live</h2>
-          <p><code>keyref list</code> shows entries and their sources. If more than one vault can accept writes, use <code>--source</code> when saving.</p>
+          <p><code>keyref list</code> shows entries and their sources. If more than one vault can accept writes, use <code>--vault</code> when saving.</p>
         </div>
         <div class="source-options">
           <div>

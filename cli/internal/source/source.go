@@ -3,7 +3,7 @@
 // synchronized vault. One command surface covers both — there is no
 // separate "local" subcommand.
 //
-// Precedence is --source, then the KEYREF_SOURCE environment variable,
+// Precedence is --vault, then the KEYREF_SOURCE environment variable,
 // then the configured default, then the built-in local vault.
 package source
 
@@ -196,7 +196,7 @@ func (c *Config) Specs() []Spec {
 	return out
 }
 
-// SetDefault persists the source used when neither --source nor
+// SetDefault persists the source used when neither --vault nor
 // KEYREF_SOURCE is given.
 func SetDefault(p config.Paths, name string) error {
 	return atomicfile.WithLock(Path(p), func() error {

@@ -75,15 +75,15 @@ func TestUnifiedLocalAndRemoteVaults(t *testing.T) {
 	}
 
 	run("", "init")
-	if ambiguous := localRun(t, env, localSecret, "set", "same-ref"); ambiguous.code != 2 || !strings.Contains(ambiguous.stderr, "--source NAME") {
+	if ambiguous := localRun(t, env, localSecret, "set", "same-ref"); ambiguous.code != 2 || !strings.Contains(ambiguous.stderr, "--vault NAME") {
 		t.Fatalf("ambiguous write: exit %d, %s", ambiguous.code, ambiguous.stderr)
 	}
-	run(localSecret, "set", "same-ref", "--source", "local")
+	run(localSecret, "set", "same-ref", "--vault", "local")
 	if rows := list(); len(rows) != 2 || rows[0].Source != "local" || rows[1].Source != "remote" || rows[0].Ref != rows[1].Ref {
 		t.Fatalf("unexpected combined list: %+v", rows)
 	}
-	run(localSecret, "set", "same-ref", "--source", "remote", "--description", "updated")
-	if rows := list("--source", "remote"); len(rows) != 1 || rows[0].Description != "updated" {
+	run(localSecret, "set", "same-ref", "--vault", "remote", "--description", "updated")
+	if rows := list("--vault", "remote"); len(rows) != 1 || rows[0].Description != "updated" {
 		t.Fatalf("unexpected filtered list: %+v", rows)
 	}
 }

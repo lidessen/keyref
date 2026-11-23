@@ -61,7 +61,7 @@ func secretStoreOrError() (keyring.SecretStore, error) {
 	return keyring.OSKeyring{}, nil
 }
 
-// resolveSource applies --source, KEYREF_SOURCE and the configured
+// resolveSource applies --vault, KEYREF_SOURCE and the configured
 // default. The one-time default is recorded on the first command in a
 // data directory: a vault paired before sources existed keeps the
 // paired vault, so upgrading never moves existing commands onto an
@@ -142,7 +142,7 @@ func localOpenError(err error) int {
 // soon as the backend has derived its own keys from it.
 func openLocal(p config.Paths, spec source.Spec) (*local.Store, error) {
 	if _, err := os.Stat(spec.Path); errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("local source %q has no vault yet; run `keyref init --source %s`", spec.Name, spec.Name)
+		return nil, fmt.Errorf("local source %q has no vault yet; run `keyref init --vault %s`", spec.Name, spec.Name)
 	}
 	if err := checkPrivateDir(spec.Path); err != nil {
 		return nil, err
@@ -169,7 +169,7 @@ func openLocal(p config.Paths, spec source.Spec) (*local.Store, error) {
 			return nil, fmt.Errorf("the master key does not match local source %q", spec.Name)
 		case errors.Is(err, local.ErrStoreNotFound):
 			// The vault disappeared between the check above and the open.
-			return nil, fmt.Errorf("local source %q has no vault yet; run `keyref init --source %s`", spec.Name, spec.Name)
+			return nil, fmt.Errorf("local source %q has no vault yet; run `keyref init --vault %s`", spec.Name, spec.Name)
 		case errors.Is(err, local.ErrInsecurePermissions):
 			// The directory was checked above; this is the vault file's
 			// own mode.
@@ -242,7 +242,7 @@ func cmdSource(args []string) int {
 			return fatalf(1, "%v", err)
 		}
 		fmt.Printf("%s\t%s\n", spec.Name, spec.Path)
-		fmt.Fprintf(os.Stderr, "keyref: run `keyref init --source %s` to create the vault\n", spec.Name)
+		fmt.Fprintf(os.Stderr, "keyref: run `keyref init --vault %s` to create the vault\n", spec.Name)
 		return 0
 	case "remove":
 		if len(args) != 2 {
@@ -262,7 +262,7 @@ func cmdSource(args []string) int {
 
 func cmdInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	sourceName := fs.String("source", "", "source to operate on")
+	sourceName := fs.String("vault", "", "vault to operate on")
 	prepareHelp(fs, args)
 	if _, err := parseArgs(fs, args); err != nil {
 		return parseExit(err)
@@ -297,7 +297,7 @@ func cmdInit(args []string) int {
 
 func cmdSet(args []string) int {
 	fs := flag.NewFlagSet("set", flag.ContinueOnError)
-	sourceName := fs.String("source", "", "source to operate on")
+	sourceName := fs.String("vault", "", "vault to operate on")
 	raw := fs.Bool("raw", false, "store piped stdin byte for byte (default: strip one trailing newline)")
 	description := fs.String("description", "", "description stored in the entry meta")
 	var allowHosts stringList
@@ -308,7 +308,7 @@ func cmdSet(args []string) int {
 		return parseExit(err)
 	}
 	if len(rest) != 1 {
-		return fatalf(2, "usage: keyref set <ref> [--raw] [--description TEXT] [--allow-host HOST] [--source NAME]  (the secret is read from stdin)")
+		return fatalf(2, "usage: keyref set <ref> [--raw] [--description TEXT] [--allow-host HOST] [--vault NAME]  (the secret is read from stdin)")
 	}
 	ref := rest[0]
 	if !local.ValidRef(ref) {
@@ -359,14 +359,14 @@ func cmdSet(args []string) int {
 
 func cmdDelete(args []string) int {
 	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
-	sourceName := fs.String("source", "", "source to operate on")
+	sourceName := fs.String("vault", "", "vault to operate on")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseExit(err)
 	}
 	if len(rest) != 1 {
-		return fatalf(2, "usage: keyref delete <ref> [--source NAME]")
+		return fatalf(2, "usage: keyref delete <ref> [--vault NAME]")
 	}
 	p := mustPaths()
 	spec, err := resolveSource(p, *sourceName)

@@ -276,18 +276,18 @@ func TestLocalSourceListShowsMetaWithoutSecret(t *testing.T) {
 // at all.
 func TestPairedSourceRejectsWritesAndReveal(t *testing.T) {
 	_, _, env := localHome(t)
-	set := localRun(t, env, localSecret, "set", "my-ref", "--source", "sync")
+	set := localRun(t, env, localSecret, "set", "my-ref", "--vault", "sync")
 	if set.code != 2 {
 		t.Fatalf("set on the paired vault exit %d, want 2", set.code)
 	}
 	if !strings.Contains(set.stderr, "read-only") {
 		t.Fatalf("set did not explain itself: %q", set.stderr)
 	}
-	del := localRun(t, env, "", "delete", "my-ref", "--source", "sync")
+	del := localRun(t, env, "", "delete", "my-ref", "--vault", "sync")
 	if del.code != 2 {
 		t.Fatalf("delete on the paired vault exit %d, want 2", del.code)
 	}
-	reveal := localRun(t, env, "", "get", "my-ref", "--reveal", "--source", "sync")
+	reveal := localRun(t, env, "", "get", "my-ref", "--reveal", "--vault", "sync")
 	if reveal.code != 2 {
 		t.Fatalf("get --reveal on the paired vault exit %d, want 2", reveal.code)
 	}
@@ -371,7 +371,7 @@ func TestLocalSourceWithAnEnvironmentKey(t *testing.T) {
 	}
 }
 
-// Several local vaults can coexist; --source, KEYREF_SOURCE and the
+// Several local vaults can coexist; --vault, KEYREF_SOURCE and the
 // configured default each pick one.
 func TestLocalSourceSelection(t *testing.T) {
 	_, _, env := localHome(t)
@@ -386,11 +386,11 @@ func TestLocalSourceSelection(t *testing.T) {
 	if add.code != 0 {
 		t.Fatalf("source add exit %d: %s", add.code, add.stderr)
 	}
-	if run := localRun(t, env, "", "init", "--source", "work"); run.code != 0 {
-		t.Fatalf("init --source work exit %d: %s", run.code, run.stderr)
+	if run := localRun(t, env, "", "init", "--vault", "work"); run.code != 0 {
+		t.Fatalf("init --vault work exit %d: %s", run.code, run.stderr)
 	}
-	if run := localRun(t, env, localSecret, "set", "my-ref", "--source", "work"); run.code != 0 {
-		t.Fatalf("set --source work exit %d: %s", run.code, run.stderr)
+	if run := localRun(t, env, localSecret, "set", "my-ref", "--vault", "work"); run.code != 0 {
+		t.Fatalf("set --vault work exit %d: %s", run.code, run.stderr)
 	}
 
 	// The default source is still the built-in local vault, which has
@@ -402,10 +402,13 @@ func TestLocalSourceSelection(t *testing.T) {
 	if !strings.Contains(missing.stderr, "keyref init") {
 		t.Fatalf("get did not say how to fix it: %q", missing.stderr)
 	}
-	// --source finds it.
-	byFlag := localRevealRun(t, env, "get", "my-ref", "--source", "work", "--reveal")
+	// --vault finds it.
+	byFlag := localRevealRun(t, env, "get", "my-ref", "--vault", "work", "--reveal")
 	if byFlag.code != 0 || byFlag.stdout != localSecret {
-		t.Fatalf("get --source work = %q (exit %d): %s", byFlag.stdout, byFlag.code, byFlag.stderr)
+		t.Fatalf("get --vault work = %q (exit %d): %s", byFlag.stdout, byFlag.code, byFlag.stderr)
+	}
+	if retired := localRun(t, env, "", "get", "my-ref", "--source", "work"); retired.code != 2 {
+		t.Fatalf("get with retired --source flag exited %d, want 2", retired.code)
 	}
 	// KEYREF_SOURCE finds it too.
 	byEnv := localRevealRun(t, append(env, "KEYREF_SOURCE=work"), "get", "my-ref", "--reveal")

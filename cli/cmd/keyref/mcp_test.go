@@ -437,7 +437,7 @@ func TestMCPSourcePinnedForTheSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add source: %v", err)
 	}
-	if code := cmdInit([]string{"--source", "alt"}); code != 0 {
+	if code := cmdInit([]string{"--vault", "alt"}); code != 0 {
 		t.Fatalf("init alt exit %d", code)
 	}
 	mcpPut(t, altSpec, "altref", localSecret)

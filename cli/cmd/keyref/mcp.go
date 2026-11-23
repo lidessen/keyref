@@ -504,13 +504,13 @@ func approvalTimeoutFromSeconds(secs float64) time.Duration {
 // cmdMCP is the `keyref mcp` entry point. stdout is the JSON-RPC
 // channel; the CLI's own notices stay on stderr. The source is selected
 // here, once, by the same order as every data command (design §17.3):
-// --source, KEYREF_SOURCE, the configured default, then `local`. It is
+// --vault, KEYREF_SOURCE, the configured default, then `local`. It is
 // fixed for the whole session (§17.5).
 func cmdMCP(args []string) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
-	sourceName := fs.String("source", "", "source to serve")
+	sourceName := fs.String("vault", "", "vault to serve")
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), "usage: keyref mcp [--source NAME]\n\nServe the selected vault over stdio as an MCP JSON-RPC 2.0 server\n(tools: list, get, exec — pass refs, never secrets).\n")
+		fmt.Fprint(fs.Output(), "usage: keyref mcp [--vault NAME]\n\nServe the selected vault over stdio as an MCP JSON-RPC 2.0 server\n(tools: list, get, exec — pass refs, never secrets).\n")
 	}
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
@@ -518,7 +518,7 @@ func cmdMCP(args []string) int {
 		return parseExit(err)
 	}
 	if len(rest) != 0 {
-		return fatalf(2, "usage: keyref mcp [--source NAME]")
+		return fatalf(2, "usage: keyref mcp [--vault NAME]")
 	}
 	p := mustPaths()
 	spec, err := resolveSource(p, *sourceName)

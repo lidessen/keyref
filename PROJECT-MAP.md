@@ -14,7 +14,7 @@
 
 1. **独立 lib module**（2026-11-19 完成）：导出本地库与执行引擎；公开接口不引用 CLI `internal` 类型；`GOWORK=off` 可构建；`cli` 改为依赖它且行为不变。
 2. **local 路径稳定**（2026-11-19 完成）：`get --reveal` 有控制终端确认、无终端时拒绝；五模块 vet/test 与 CLI e2e 全绿；`cli/README.md`、`lib/local/README.md`、`CLAUDE.md` 与实现一致。
-3. **`keyref mcp --source`**（2026-11-19 完成）：MCP 在启动时按 §17.3 选定 source 并固定整个会话（含库路径），list/get/exec 在两个 source 上形状相同，工具消息与锁、退出码一并进结果。
+3. **`keyref mcp --vault`**（2026-11-19 完成）：MCP 在启动时按 §17.3 选定 source 并固定整个会话（含库路径），list/get/exec 在两个 source 上形状相同，工具消息与锁、退出码一并进结果。
 4. **库的错误分类**（2026-11-19 完成）：`lib/local` 至少区分库不存在/已存在、目录权限不安全、钥匙不对、ref 不合法、值大小不合法、条目不存在、写次数用尽、库损坏，`context` 取消与超时原样返回，CLI 按新分类给出人话。
 
 下一项目标，尚未设计完成，不当作既定方案：
@@ -57,7 +57,7 @@
 ## 5. 核心机制与命令
 
 - **数据流**：agent 提交 ref → CLI 查 meta、检查策略 → local 解密或 sync 授予/审批（冻结）→ 受信子进程得到值 → 被捕获的 stdout/stderr 脱敏后返回 agent。
-- **状态归属**：local 主密钥在 OS keyring 或显式环境覆盖；sync 的 VMK 在已暂缓的 owner 侧。服务器只是密文中继。source 按 `--source` → `KEYREF_SOURCE` → 配置默认 → `local` 选择。
+- **状态归属**：local 主密钥在 OS keyring 或显式环境覆盖；sync 的 VMK 在已暂缓的 owner 侧。服务器只是密文中继。source 按 `--vault` → `KEYREF_SOURCE` → 配置默认 → `local` 选择。
 - **meta/secret 分离**：本地两种密文使用不同钥匙和 AAD；默认 get/list 不解 secret。旧库的真实 meta 在已授权 Use 时回填，不能伪造原写入时间或覆盖并发写入。
 - **策略边界**：非空 allowCommands 是名字白名单；本地空列表才用内置拒绝名单。allowedHosts 解析 argv 中 URL 的真实 hostname，不约束配置内 endpoint 或网络重定向。
 - **关键不变量**：服务端无明文/ref；sync 无 reveal；配对初始授予为空；approval key 不落 CLI 缓存；验签后再落盘；策略拒绝不启动子进程；脱敏失败关闭。local 显式 reveal 是单独例外。
@@ -71,12 +71,12 @@
 | `keyref source list\|default\|add\|remove` | 配置凭据来源 | 可用 | [CLI](cli/README.md) |
 | `keyref pair` / `session` / `sync` / `status` | 配对、会话、同步与状态；owner app 缺位，冻结 | 冻结 | [CLI](cli/README.md) |
 | `keyref lock` / `unlock` | 本机阻止或恢复解包 | 可用 | [CLI](cli/README.md) |
-| `keyref mcp [--source NAME]` | stdio list/get/exec；启动时选定 source 并固定整个会话 | 可用 | [设计 §17.5](docs/design.md)、[e2e](cli/e2e/mcp_local_test.go) |
+| `keyref mcp [--vault NAME]` | stdio list/get/exec；启动时选定 source 并固定整个会话 | 可用 | [设计 §17.5](docs/design.md)、[e2e](cli/e2e/mcp_local_test.go) |
 | `keyref decider run` | owner 委派范围内的 SMS 自动批准；随安卓采集端冻结 | 冻结 | [设计 §14.8](docs/design.md) |
 
 ## 6. 变化、风险与健康
 
-- 最近变化：2026-11-19 移除原生 iOS app 与 Android 采集端，server 冻结；跨语言金向量移至 `tools/vectordump/testdata/`；同日拆出独立 `lib` module（cli 改为依赖它）、补上 `get --reveal` 的控制终端确认、落地 `keyref mcp --source`（启动选定并固定 source，本地库可走 MCP）与 §17.7 的库错误分类（`lib/local/README.md` 有对照表），五模块 vet/test 与 CLI e2e 全绿。此前 `0047831` 落地 set 值语义和 trim 脱敏；`9eca165` 落地本地 meta 与策略；`acb0aba` 修复 URL userinfo 绕过、旧库迁移/并发和失败输入清零问题。
+- 最近变化：2026-11-19 移除原生 iOS app 与 Android 采集端，server 冻结；跨语言金向量移至 `tools/vectordump/testdata/`；同日拆出独立 `lib` module（cli 改为依赖它）、补上 `get --reveal` 的控制终端确认、落地 `keyref mcp --vault`（启动选定并固定 source，本地库可走 MCP）与 §17.7 的库错误分类（`lib/local/README.md` 有对照表），五模块 vet/test 与 CLI e2e 全绿。此前 `0047831` 落地 set 值语义和 trim 脱敏；`9eca165` 落地本地 meta 与策略；`acb0aba` 修复 URL userinfo 绕过、旧库迁移/并发和失败输入清零问题。
 - 走偏风险：把 ref 前缀、source 名、命令名字白名单误当项目隔离，或把终端脱敏误当所有文件/网络出口的保护；接入越多，这两种错误承诺的影响越大。另一个风险是在 owner app 缺位时把 `sync` 或审批说成能用的路径。
 - 组织 / 技术健康：local 与冻结的 sync 边界明确，字节合同集中在 `proto`；独立 lib module 已落地（`lib/local`、`lib/exec`、`lib/secret`、`lib/exitcode`），引擎用自有 `exec.Policy`，`lib` 不依赖 `cli`。
 - 债务信号：K1 的本地审计和项目授权不能由现有注入功能替代（两者都需要 §16 之外的设计决定）。

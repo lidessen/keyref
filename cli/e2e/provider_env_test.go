@@ -60,17 +60,17 @@ func providerContractCase(t *testing.T, envName, scenario string, wantCode int) 
 		"NEOWIND_STATE_DIR="+stateDir,
 		envName+"=synthetic-parent-decoy",
 		"UNRELATED_PROVIDER_KEY=synthetic-unrelated-value")
-	initialized := localRun(t, env, "", "init", "--source", "local")
+	initialized := localRun(t, env, "", "init", "--vault", "local")
 	if initialized.code != 0 {
 		t.Fatalf("fixture initialization exit %d", initialized.code)
 	}
 	assertProviderValueAbsent(t, value, initialized.stdout, initialized.stderr)
-	stored := localRun(t, env, value, "set", ref, "--source", "local")
+	stored := localRun(t, env, value, "set", ref, "--vault", "local")
 	if stored.code != 0 {
 		t.Fatalf("fixture set exit %d", stored.code)
 	}
 	assertProviderValueAbsent(t, value, stored.stdout, stored.stderr)
-	for _, args := range [][]string{{"get", ref, "--source", "local"}, {"list", "--source", "local", "--format", "json"}} {
+	for _, args := range [][]string{{"get", ref, "--vault", "local"}, {"list", "--vault", "local", "--format", "json"}} {
 		r := localRun(t, env, "", args...)
 		if r.code != 0 {
 			t.Fatalf("metadata read exit %d", r.code)
@@ -105,7 +105,7 @@ func providerContractCase(t *testing.T, envName, scenario string, wantCode int) 
 	if scenario == "blocked-command" {
 		argv = []string{"/bin/sh", "-c", "exit 99"}
 	}
-	args := []string{"exec", "--source", "local", "--env", envName + "=" + selected,
+	args := []string{"exec", "--vault", "local", "--env", envName + "=" + selected,
 		"--pass", "XDG_CONFIG_HOME", "--pass", "NEOWIND_STATE_DIR", "--"}
 	r := localRun(t, env, "", append(args, argv...)...)
 	assertProviderValueAbsent(t, value, r.stdout, r.stderr)

@@ -146,9 +146,9 @@ func usage(w *os.File) {
 	fmt.Fprint(w, `usage: keyref <command> [args]
 
 commands:
-  init [--source NAME]    create the local vault (key goes to the OS keyring)
-  set <ref> [--source NAME]
-                          store stdin in the only writable source or the one selected
+  init [--vault NAME]     create the local vault (key goes to the OS keyring)
+  set <ref> [--vault NAME]
+                          store stdin in the selected or only writable vault
   import-env              import selected variables into a local vault
   get <ref> [--format json] [--reveal]
                           one entry; masked by default, --reveal prints the
@@ -177,7 +177,7 @@ sources:
   local                   the standalone offline vault (the default)
   sync                    the paired iOS vault (read-only for the CLI)
   remote                  the signed-in GitHub account vault
-  --source NAME or KEYREF_SOURCE selects one source. By default, list reads
+  --vault NAME or KEYREF_SOURCE selects one vault. By default, list reads
   all configured sources and set needs an explicit choice if several are writable.
   For other source-aware commands, "keyref source default NAME" persists
   the default. The local master key
@@ -418,14 +418,14 @@ func cmdSync(args []string) int {
 func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	format := fs.String("format", "text", "text | json")
-	sourceName := fs.String("source", "", "source to operate on")
+	sourceName := fs.String("vault", "", "vault to operate on")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseExit(err)
 	}
 	if len(rest) != 0 || (*format != "text" && *format != "json") {
-		return fatalf(2, "usage: keyref list [--format text|json] [--source NAME]")
+		return fatalf(2, "usage: keyref list [--format text|json] [--vault NAME]")
 	}
 	return listSources(mustPaths(), *sourceName, *format)
 }
@@ -491,14 +491,14 @@ func cmdGet(args []string) int {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	format := fs.String("format", "text", "text | json")
 	reveal := fs.Bool("reveal", false, "print the raw secret bytes (local sources only)")
-	sourceName := fs.String("source", "", "source to operate on")
+	sourceName := fs.String("vault", "", "vault to operate on")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseExit(err)
 	}
 	if len(rest) != 1 {
-		return fatalf(2, "usage: keyref get <ref> [--format json] [--reveal] [--source NAME]")
+		return fatalf(2, "usage: keyref get <ref> [--format json] [--reveal] [--vault NAME]")
 	}
 	ref := rest[0]
 	p := mustPaths()
@@ -605,7 +605,7 @@ func statusSource(p config.Paths, spec source.Spec) int {
 func statusLocal(p config.Paths, spec source.Spec) int {
 	switch _, err := os.Stat(spec.Path); {
 	case errors.Is(err, os.ErrNotExist):
-		fmt.Printf("vault: %s (not created yet; run keyref init --source %s)\n", spec.Path, spec.Name)
+		fmt.Printf("vault: %s (not created yet; run keyref init --vault %s)\n", spec.Path, spec.Name)
 		fmt.Println("key: none")
 	case err != nil:
 		return fatalf(1, "%v", err)
@@ -757,7 +757,7 @@ func cmdExec(args []string) int {
 	replies := multiFlag{}
 	fs.Var(&replies, "reply", "REGEX=REF type REF into the pty input when REGEX matches the pre-redaction output (needs --pty, approval item, allowCommands)")
 	timeoutSecs := fs.Int64("timeout", 120, "approval wait timeout in seconds (approval items)")
-	sourceName := fs.String("source", "", "source to operate on")
+	sourceName := fs.String("vault", "", "vault to operate on")
 	prepareHelp(fs, args)
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)

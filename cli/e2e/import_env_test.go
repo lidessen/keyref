@@ -109,14 +109,14 @@ func TestImportEnvWorkflow(t *testing.T) {
 	env := localEnv(home, keyringDir,
 		"KEYREF_LOCAL_MASTER="+base64.StdEncoding.EncodeToString(master),
 		"XDG_CONFIG_HOME="+configDir, "NEOWIND_STATE_DIR="+stateDir)
-	if r := localRun(t, env, "", "init", "--source", "local"); r.code != 0 {
+	if r := localRun(t, env, "", "init", "--vault", "local"); r.code != 0 {
 		t.Fatalf("synthetic vault initialization failed: exit %d", r.code)
 	}
 	input := "# synthetic input\nexport FIRST='" + first + "'\nSECOND=\"" + second + "\" # comment\nUNSELECTED=" + unselected + "\n"
 	if err := os.WriteFile(inputPath, []byte(input), 0o600); err != nil {
 		t.Fatal("could not write synthetic input")
 	}
-	args := []string{"import-env", "--source", "local", "--file", inputPath,
+	args := []string{"import-env", "--vault", "local", "--file", inputPath,
 		"--map", "FIRST=first", "--map", "SECOND=second"}
 	created := localRun(t, env, "", args...)
 	for _, value := range []string{first, second, unselected, replacement} {
@@ -125,7 +125,7 @@ func TestImportEnvWorkflow(t *testing.T) {
 	if created.code != 0 || created.stderr != "" || created.stdout != "FIRST\tfirst\tcreated\nSECOND\tsecond\tcreated\n" {
 		t.Fatalf("synthetic import did not report two creates: exit %d", created.code)
 	}
-	if r := localRun(t, env, "", "get", "unselected", "--source", "local"); r.code != 11 {
+	if r := localRun(t, env, "", "get", "unselected", "--vault", "local"); r.code != 11 {
 		t.Fatalf("unselected variable unexpectedly created an entry: exit %d", r.code)
 	}
 
@@ -145,7 +145,7 @@ func TestImportEnvWorkflow(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	run := localRun(t, env, "", "exec", "--source", "local", "--env", "JEV_API_KEY=first",
+	run := localRun(t, env, "", "exec", "--vault", "local", "--env", "JEV_API_KEY=first",
 		"--pass", "XDG_CONFIG_HOME", "--pass", "NEOWIND_STATE_DIR", "--",
 		helperBin, "provider-env", server.URL, "JEV_API_KEY", filepath.Join(stateDir, "started"))
 	assertProviderValueAbsent(t, first, run.stdout, run.stderr)
@@ -186,7 +186,7 @@ func TestImportEnvWorkflow(t *testing.T) {
 	}
 
 	// A replacement retains the existing host restrictions.
-	set := localRun(t, env, first, "set", "first", "--source", "local",
+	set := localRun(t, env, first, "set", "first", "--vault", "local",
 		"--allow-host", "127.0.0.1")
 	assertProviderValueAbsent(t, first, set.stdout, set.stderr)
 	if set.code != 0 {
@@ -218,7 +218,7 @@ func TestImportEnvWorkflow(t *testing.T) {
 	}
 
 	expected.Store(replacement)
-	run = localRun(t, env, "", "exec", "--source", "local", "--env", "JEV_API_KEY=first",
+	run = localRun(t, env, "", "exec", "--vault", "local", "--env", "JEV_API_KEY=first",
 		"--pass", "XDG_CONFIG_HOME", "--pass", "NEOWIND_STATE_DIR", "--",
 		helperBin, "provider-env", server.URL, "JEV_API_KEY", filepath.Join(stateDir, "started"))
 	assertProviderValueAbsent(t, replacement, run.stdout, run.stderr)
@@ -226,7 +226,7 @@ func TestImportEnvWorkflow(t *testing.T) {
 		t.Fatalf("replacement was not delivered safely: exit %d", run.code)
 	}
 	wrongHostMarker := filepath.Join(stateDir, "wrong-host-started")
-	wrongHost := localRun(t, env, "", "exec", "--source", "local", "--env", "JEV_API_KEY=first",
+	wrongHost := localRun(t, env, "", "exec", "--vault", "local", "--env", "JEV_API_KEY=first",
 		"--pass", "XDG_CONFIG_HOME", "--pass", "NEOWIND_STATE_DIR", "--",
 		helperBin, "provider-env", "http://example.invalid/", "JEV_API_KEY", wrongHostMarker)
 	assertProviderValueAbsent(t, replacement, wrongHost.stdout, wrongHost.stderr)

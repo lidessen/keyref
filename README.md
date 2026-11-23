@@ -30,6 +30,9 @@ keyref update --check
 keyref update
 ```
 
+When upgrading from v0.1.0, switch vault selection in your scripts to
+`--vault NAME`. Remote CLI injection now asks for terminal confirmation.
+
 ## Quickstart
 
 This example uses a GitHub token and the `gh` CLI. Run `keyref set` in a
@@ -37,9 +40,9 @@ terminal, paste the token, then press Enter. The input is hidden.
 
 ```sh
 keyref init
-keyref set github-token --source local
+keyref set github-token --vault local
 keyref list
-keyref exec --source local --env GH_TOKEN=github-token -- \
+keyref exec --vault local --env GH_TOKEN=github-token -- \
   gh api user --jq .login
 ```
 
@@ -57,7 +60,7 @@ can still send or write the credentials it receives.
 
 Open the [hosted account vault](https://keyref.sh/manage/) in a browser, or
 follow the [CLI sign-in guide](cli/README.md#github-account-vault). When several
-writable vaults are configured, pick one with `keyref set REF --source NAME`.
+writable vaults are configured, pick one with `keyref set REF --vault NAME`.
 
 ## Development
 

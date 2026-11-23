@@ -1205,7 +1205,7 @@ wifi-home    Home Wi-Fi          password ***
 
 `keyref get openai-prod` 打印同一组字段。未知 `ref` 退出 `11`，输出里看不出这个保险库里还有哪些别的 `ref`（避免把「猜 ref」变成枚举；不过 `list` 本身会列出已授予的全部 `ref`，所以这只影响没有 view 授权的条目）。
 
-命令一览（§17 的统一命令面）：`pair`（`--kind cli|decider`）、`session`、`sync`、`status`、`lock`、`unlock`、`server [set <origin>]`、`source`；数据命令 `list`（两个 source 都支持；本地库的 ref 单向存储，能列出是因为每行带加密 meta）、`get [--format json] [--reveal]`、`exec`、`mcp`；本地库的 `init`、`set`、`delete`（同为这一套命令面，`--source` 选库）。配对库对 CLI 只读：创建、修改、删除、轮换都在 iOS 上。`--reveal` 只对本地 source 存在（§17.4），配对库拒绝它。**没有 `sms` 子命令**：`sms:<message_id>` 是 `exec` 注入位置里的引用（§14.5），短信正文只在 iOS 收件箱和审批单上出现。`status` 额外报告每条 `use` 授予的剩余有效期，7 天内到期的在 stderr 警告（§8.4）。（`decider run` 是决策器部署的入口，见 §14.8。）
+命令一览（§17 的统一命令面）：`pair`（`--kind cli|decider`）、`session`、`sync`、`status`、`lock`、`unlock`、`server [set <origin>]`、`source`；数据命令 `list`（两个 source 都支持；本地库的 ref 单向存储，能列出是因为每行带加密 meta）、`get [--format json] [--reveal]`、`exec`、`mcp`；本地库的 `init`、`set`、`delete`（同为这一套命令面，`--vault` 选库）。配对库对 CLI 只读：创建、修改、删除、轮换都在 iOS 上。`--reveal` 只对本地 source 存在（§17.4），配对库拒绝它。**没有 `sms` 子命令**：`sms:<message_id>` 是 `exec` 注入位置里的引用（§14.5），短信正文只在 iOS 收件箱和审批单上出现。`status` 额外报告每条 `use` 授予的剩余有效期，7 天内到期的在 stderr 警告（§8.4）。（`decider run` 是决策器部署的入口，见 §14.8。）
 
 `keyref server` 打印当前 origin。`keyref server set https://keys.example.com` 修改它，配置写在 `0700` 目录里。环境变量 `KEYREF_SERVER` 可以覆盖配置，方便 agent 的安装脚本指向自托管。未设置时使用编译进去的官方托管地址。`pair` 打出来的二维码必须带上当时的 origin。
 
@@ -1450,7 +1450,7 @@ v0.9 落地之后，这句话只在名义上成立：`list` 只有 sync 有，`m
 
 ### 17.3 选源顺序
 
-`--source NAME` > `KEYREF_SOURCE` > 配置的默认（`<data dir>/sources.json`）> `local`。
+`--vault NAME` > `KEYREF_SOURCE` > 配置的默认（`<data dir>/sources.json`）> `local`。
 
 `keyref source list|default|add|remove` 管理这套配置：`add` 注册另一个本地库（`--path` 必须是绝对路径），`remove` 只删配置、不删文件，也不删密钥环条目。
 
@@ -1519,7 +1519,7 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 
 ### 17.5 MCP
 
-`keyref mcp [--source NAME]` 按 §17.3 在启动时选定一个 source，整个会话不变。三个工具（list / get / exec）在两个 source 上都存在、形状相同（§17.4），所以 v0.9 的「MCP 始终对着 sync」不再需要。选中 `sync` 时它仍然是「一台已配对的 CLI 设备」（§7.8）。
+`keyref mcp [--vault NAME]` 按 §17.3 在启动时选定一个 source，整个会话不变。三个工具（list / get / exec）在两个 source 上都存在、形状相同（§17.4），所以 v0.9 的「MCP 始终对着 sync」不再需要。选中 `sync` 时它仍然是「一台已配对的 CLI 设备」（§7.8）。
 
 工具调用期间产生的每一条消息都进这次调用的结果，不写进程的 stderr：MCP 客户端看不到 server 的 stderr，只拿到一个退出码等于没有报错。
 
@@ -1566,12 +1566,12 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | local `import-env` 显式映射、批量事务与同值幂等 | 已实现限定赋值语法；真实 shell 凭证文件的格式兼容性未验，见 [K1](k1.md) |
 | §7.4 对去掉首尾空白的值建立匹配；只扣留可能成为匹配前缀的尾部 | 已实现（2026-11-13） |
 | `get --reveal` 的控制终端确认 | 已实现（2026-11-19：`/dev/tty` 上输入 `y`/`yes`；无控制终端或未确认即拒绝，退出码 10，无跳过开关；e2e 覆盖无终端、拒绝、确认三种情形） |
-| `keyref mcp --source`；工具消息进结果 | 已实现（2026-11-19：启动时按 §17.3 选定 source 并固定整个会话——含库路径，会话中途改默认或删除注册都不换库；list/get/exec 在两个 source 上形状相同；工具消息、锁（12）、未配对与退出码都进结果，进程 stderr 不写；e2e 覆盖本地列表、取值、注入脱敏与会话固定） |
+| `keyref mcp --vault`；工具消息进结果 | 已实现（2026-11-19：启动时按 §17.3 选定 source 并固定整个会话——含库路径，会话中途改默认或删除注册都不换库；list/get/exec 在两个 source 上形状相同；工具消息、锁（12）、未配对与退出码都进结果，进程 stderr 不写；e2e 覆盖本地列表、取值、注入脱敏与会话固定） |
 | 库独立 module、导出执行引擎、引擎自有策略类型 | 已实现（2026-11-19：`lib/local`、`lib/exec`、`lib/secret`；引擎用 `exec.Policy`，`RequireAllowList` 取代 `Paired`） |
 | 库的错误分类细化 | 已实现（2026-11-19：`ErrStoreNotFound` / `ErrStoreExists` / `ErrInsecurePermissions` / `ErrInvalidKey` / `ErrInvalidRef` / `ErrInvalidValueSize` / `ErrNotFound` / `ErrWriteLimit` / `ErrCorruptStore`，加既有的 `ErrMetaTooLarge` / `ErrClosed`；`Error()` 只返回固定安全文本、底层原因经 `Unwrap` 可取；`context` 取消与超时原样返回；CLI 按分类给人话，`lib/local/README.md` 记录对照表） |
 | `status` 按 source 报告、只读命令不建文件、帮助退出 `0`、`--version` | 已实现（issue #7） |
 
-当前顺序：本地库与执行引擎已拆为独立 `lib` module 并由 `cli` 依赖，`get --reveal` 的控制终端确认、`keyref mcp --source` 与库的错误分类已落地，K1 的本地审计与项目级 allowlist 仍待补完（两者都需要 §16 之外的设计决定）。Neowind 最小凭证注入的 Keyref 侧契约已验证，真实消费者验收因对方会话的执行授权受阻。owner app、审批与 sync 路径暂缓；GitHub 账号远程库采用 Server 托管密钥，详见下文。`cli/README.md`、`lib/local/README.md` 与 `CLAUDE.md` 描述现状。
+当前顺序：本地库与执行引擎已拆为独立 `lib` module 并由 `cli` 依赖，`get --reveal` 的控制终端确认、`keyref mcp --vault` 与库的错误分类已落地，K1 的本地审计与项目级 allowlist 仍待补完（两者都需要 §16 之外的设计决定）。Neowind 最小凭证注入的 Keyref 侧契约已验证，真实消费者验收因对方会话的执行授权受阻。owner app、审批与 sync 路径暂缓；GitHub 账号远程库采用 Server 托管密钥，详见下文。`cli/README.md`、`lib/local/README.md` 与 `CLAUDE.md` 描述现状。
 
 ## 18. GitHub 账号远程库
 

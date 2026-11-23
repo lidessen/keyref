@@ -42,7 +42,7 @@ func TestFlagBeatsEnvBeatsConfiguredDefault(t *testing.T) {
 		t.Fatalf("environment should win over the configured default, got %+v", spec)
 	}
 	if spec, _ = Resolve(p, SyncName); spec.Name != SyncName {
-		t.Fatalf("--source should win over the environment, got %+v", spec)
+		t.Fatalf("--vault should win over the environment, got %+v", spec)
 	}
 }
 

@@ -28,15 +28,15 @@ Commands (design §12.2 and §17, implemented):
 | `keyref --version` | Print the CLI version; the MCP `serverInfo.version` is the same value |
 | `keyref sync` | Pull the ciphertext within the granted scope |
 | `keyref server` | View or set the sync server URL |
-| `keyref mcp [--source NAME]` | JSON-RPC 2.0 (MCP) over stdio: the tools are only `list` / `get` / `exec`, with a single vault (design §7.8). The source is selected once at startup by the usual order (`--source`, `KEYREF_SOURCE`, the configured default, `local`) and stays fixed for the whole session, so one server serves either source with the same three tools (design §17.5) |
+| `keyref mcp [--vault NAME]` | JSON-RPC 2.0 (MCP) over stdio: the tools are only `list` / `get` / `exec`, with a single vault (design §7.8). The source is selected once at startup by the usual order (`--vault`, `KEYREF_SOURCE`, the configured default, `local`) and stays fixed for the whole session, so one server serves either source with the same three tools (design §17.5) |
 
 On the paired vault there is no `reveal`, no `export` and no `--print`; the JSON of `get` has no `value` field.
 
 ### Sources
 
-By default, `keyref list` shows entries across initialized local vaults, the signed-in account vault, and the paired vault if present. Output identifies each source, including when a ref appears in multiple vaults. `keyref list --source NAME` filters the results.
+By default, `keyref list` shows entries across initialized local vaults, the signed-in account vault, and the paired vault if present. Output identifies each source, including when a ref appears in multiple vaults. `keyref list --vault NAME` filters the results.
 
-`keyref set REF` writes to the only initialized writable vault. With several writable vaults, choose one with `--source NAME`. The `KEYREF_SOURCE` environment variable also selects a source for either command. Other source-aware commands use the configured default when neither override is provided.
+`keyref set REF` writes to the only initialized writable vault. With several writable vaults, choose one with `--vault NAME`. The `KEYREF_SOURCE` environment variable also selects a source for either command. Other source-aware commands use the configured default when neither override is provided.
 
 | Source | Kind | Notes |
 | --- | --- | --- |
@@ -73,7 +73,7 @@ For both sources, `--pty` drains the terminal output after the child exits. The 
 ### Importing selected environment variables
 
 ```sh
-keyref import-env --source local --file /path/to/input.env \
+keyref import-env --vault local --file /path/to/input.env \
   --map PROVIDER_KEY=provider-key --map OTHER_KEY=other-key
 ```
 
@@ -162,14 +162,14 @@ origin and run the GitHub device authorization flow:
 ```sh
 keyref server set https://keys.example.com
 keyref remote login
-keyref set example-token --source remote < /path/to/token
+keyref set example-token --vault remote < /path/to/token
 keyref remote get example-token
 keyref list
 keyref remote delete example-token
 keyref remote logout
 ```
 
-Omit `--source remote` when the account vault is the only writable source.
+Omit `--vault remote` when the account vault is the only writable source.
 `remote get` and `list` display masks. For command injection,
 use `keyref remote exec --env NAME=REF -- COMMAND ...`. Confirm each invocation from the controlling terminal. Keyref refuses remote injection without that confirmation. Upgrade older clients before using remote injection on a migrated server.
 The server operator holds the account vault's wrapping key and can

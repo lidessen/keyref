@@ -19,7 +19,7 @@ func TestImportEnvOutputCollisions(t *testing.T) {
 	defer clear(master)
 	home, keyringDir, _ := localHome(t)
 	env := localEnv(home, keyringDir, "KEYREF_LOCAL_MASTER="+base64.StdEncoding.EncodeToString(master))
-	if r := localRun(t, env, "", "init", "--source", "local"); r.code != 0 {
+	if r := localRun(t, env, "", "init", "--vault", "local"); r.code != 0 {
 		t.Fatalf("synthetic vault initialization failed: exit %d", r.code)
 	}
 	path := filepath.Join(t.TempDir(), "synthetic.env")
@@ -54,7 +54,7 @@ func TestImportEnvOutputCollisions(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.input), 0o600); err != nil {
 				t.Fatal("could not write synthetic input")
 			}
-			args := []string{"import-env", "--source", tc.source, "--file", path}
+			args := []string{"import-env", "--vault", tc.source, "--file", path}
 			for _, mapping := range tc.maps {
 				args = append(args, "--map", mapping)
 			}
@@ -98,11 +98,11 @@ func TestImportEnvRejectsBareFinalCarriageReturn(t *testing.T) {
 	defer clear(master)
 	home, keyringDir, _ := localHome(t)
 	env := localEnv(home, keyringDir, "KEYREF_LOCAL_MASTER="+base64.StdEncoding.EncodeToString(master))
-	if r := localRun(t, env, "", "init", "--source", "local"); r.code != 0 {
+	if r := localRun(t, env, "", "init", "--vault", "local"); r.code != 0 {
 		t.Fatalf("synthetic vault initialization failed: exit %d", r.code)
 	}
 	path := filepath.Join(t.TempDir(), "synthetic.env")
-	args := []string{"import-env", "--source", "local", "--file", path, "--map", "TOKEN=token"}
+	args := []string{"import-env", "--vault", "local", "--file", path, "--map", "TOKEN=token"}
 	if err := os.WriteFile(path, []byte("TOKEN="+original+"\r\n"), 0o600); err != nil {
 		t.Fatal("could not write synthetic input")
 	}
@@ -149,7 +149,7 @@ func TestImportEnvKeyringErrorDoesNotExposePath(t *testing.T) {
 	home, keyringDir, _ := localHome(t)
 	masterEnv := "KEYREF_LOCAL_MASTER=" + base64.StdEncoding.EncodeToString(master)
 	env := localEnv(home, keyringDir, masterEnv)
-	if r := localRun(t, env, "", "init", "--source", "local"); r.code != 0 {
+	if r := localRun(t, env, "", "init", "--vault", "local"); r.code != 0 {
 		t.Fatalf("synthetic vault initialization failed: exit %d", r.code)
 	}
 	root := t.TempDir()
@@ -165,7 +165,7 @@ func TestImportEnvKeyringErrorDoesNotExposePath(t *testing.T) {
 	vaultPath := filepath.Join(home, "local.db")
 	before, writesBefore := importEnvSnapshot(t, vaultPath)
 	badEnv := localEnv(home, badKeyringDir, masterEnv)
-	r := localRun(t, badEnv, "", "import-env", "--source", "local", "--file", inputPath, "--map", "TOKEN=first")
+	r := localRun(t, badEnv, "", "import-env", "--vault", "local", "--file", inputPath, "--map", "TOKEN=first")
 	assertProviderValueAbsent(t, value, r.stdout, r.stderr)
 	if r.code != 1 || r.stdout != "" || !strings.Contains(r.stderr, "SOURCE_ERROR") || strings.Contains(r.stderr, parent) {
 		t.Fatalf("keyring failure did not return a safe diagnostic: exit %d", r.code)
@@ -185,7 +185,7 @@ func TestImportEnvRejectsInvalidArgumentsAndSources(t *testing.T) {
 	defer clear(master)
 	home, keyringDir, _ := localHome(t)
 	env := localEnv(home, keyringDir, "KEYREF_LOCAL_MASTER="+base64.StdEncoding.EncodeToString(master))
-	if r := localRun(t, env, "", "init", "--source", "local"); r.code != 0 {
+	if r := localRun(t, env, "", "init", "--vault", "local"); r.code != 0 {
 		t.Fatalf("synthetic vault initialization failed: exit %d", r.code)
 	}
 	path := filepath.Join(t.TempDir(), "synthetic.env")
@@ -199,12 +199,12 @@ func TestImportEnvRejectsInvalidArgumentsAndSources(t *testing.T) {
 		code int
 		want string
 	}{
-		{"missing mapping", []string{"--source", "local", "--file", path}, 2, "INVALID_MAPPING_COUNT"},
-		{"invalid mapping", []string{"--source", "local", "--file", path, "--map", "TOKEN=" + value}, 2, "INVALID_MAPPING"},
-		{"duplicate ref", []string{"--source", "local", "--file", path, "--map", "TOKEN=tok", "--map", "OTHER=tok"}, 2, "DUPLICATE_MAPPING"},
-		{"missing name", []string{"--source", "local", "--file", path, "--map", "OTHER=tok"}, 2, "MISSING_VARIABLE"},
-		{"unknown flag", []string{"--source", "local", "--file", path, "--map", "TOKEN=tok", "--unexpected=" + value}, 2, "INVALID_ARGUMENTS"},
-		{"sync source", []string{"--source", "sync", "--file", path, "--map", "TOKEN=tok"}, 2, "SOURCE_READ_ONLY"},
+		{"missing mapping", []string{"--vault", "local", "--file", path}, 2, "INVALID_MAPPING_COUNT"},
+		{"invalid mapping", []string{"--vault", "local", "--file", path, "--map", "TOKEN=" + value}, 2, "INVALID_MAPPING"},
+		{"duplicate ref", []string{"--vault", "local", "--file", path, "--map", "TOKEN=tok", "--map", "OTHER=tok"}, 2, "DUPLICATE_MAPPING"},
+		{"missing name", []string{"--vault", "local", "--file", path, "--map", "OTHER=tok"}, 2, "MISSING_VARIABLE"},
+		{"unknown flag", []string{"--vault", "local", "--file", path, "--map", "TOKEN=tok", "--unexpected=" + value}, 2, "INVALID_ARGUMENTS"},
+		{"sync source", []string{"--vault", "sync", "--file", path, "--map", "TOKEN=tok"}, 2, "SOURCE_READ_ONLY"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := localRun(t, env, "", append([]string{"import-env"}, tc.args...)...)
@@ -217,7 +217,7 @@ func TestImportEnvRejectsInvalidArgumentsAndSources(t *testing.T) {
 	if r := localRun(t, env, "", "lock"); r.code != 0 {
 		t.Fatalf("could not lock synthetic vault: exit %d", r.code)
 	}
-	locked := localRun(t, env, "", "import-env", "--source", "local", "--file", path, "--map", "TOKEN=tok")
+	locked := localRun(t, env, "", "import-env", "--vault", "local", "--file", path, "--map", "TOKEN=tok")
 	assertProviderValueAbsent(t, value, locked.stdout, locked.stderr)
 	if locked.code != 12 || locked.stdout != "" || !strings.Contains(locked.stderr, "SOURCE_LOCKED") {
 		t.Fatalf("locked import was not rejected: exit %d", locked.code)

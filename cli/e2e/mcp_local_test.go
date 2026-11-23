@@ -110,7 +110,7 @@ func TestMCPservesTheLocalSource(t *testing.T) {
 		t.Fatalf("set exit %d: %s", run.code, run.stderr)
 	}
 
-	// No --source: a fresh installation serves its default, which is
+	// No --vault: a fresh installation serves its default, which is
 	// the local vault (design §17.3).
 	m := startLocalMCP(t, env)
 	if init := m.call(t, "initialize", map[string]any{"protocolVersion": "2024-11-05"}); init["result"] == nil {
@@ -176,14 +176,14 @@ func TestMCPservesTheLocalSource(t *testing.T) {
 		t.Fatalf("CLI get must follow the new default: exit %d %q", run.code, run.stderr)
 	}
 
-	// --source selects explicitly, whatever the default says.
-	explicit := startLocalMCP(t, env, "--source", "local")
+	// --vault selects explicitly, whatever the default says.
+	explicit := startLocalMCP(t, env, "--vault", "local")
 	if init := explicit.call(t, "initialize", map[string]any{"protocolVersion": "2024-11-05"}); init["result"] == nil {
-		t.Fatalf("mcp --source initialize: %+v", init)
+		t.Fatalf("mcp --vault initialize: %+v", init)
 	}
 	text = mcpText(t, explicit.tool(t, "list", nil))
 	if !strings.Contains(text, `"ref": "tok"`) {
-		t.Fatalf("mcp --source local: %q", text)
+		t.Fatalf("mcp --vault local: %q", text)
 	}
 
 	// Nothing reached the process stderr: an MCP client only ever sees

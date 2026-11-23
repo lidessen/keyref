@@ -135,7 +135,7 @@ func writableSource(p config.Paths, override string) (source.Spec, *remoteClient
 		for _, spec := range specs {
 			names = append(names, spec.Name)
 		}
-		return source.Spec{}, nil, fmt.Errorf("multiple writable sources (%s); choose one with --source NAME", strings.Join(names, ", "))
+		return source.Spec{}, nil, fmt.Errorf("multiple writable sources (%s); choose one with --vault NAME", strings.Join(names, ", "))
 	}
 }
 
