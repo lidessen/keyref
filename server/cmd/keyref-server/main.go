@@ -33,10 +33,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 
+	"github.com/lidessen/keyref/server/internal/accountvault"
 	"github.com/lidessen/keyref/server/internal/api"
 	"github.com/lidessen/keyref/server/internal/apns"
 	"github.com/lidessen/keyref/server/internal/httpserver"
@@ -155,7 +157,16 @@ func serve(args []string) error {
 			pairLimit = n
 		}
 	}
+	var managedVault http.Handler
+	if clientID, key, ids := os.Getenv("KEYREF_GITHUB_CLIENT_ID"), os.Getenv("KEYREF_REMOTE_WRAP_KEY"), os.Getenv("KEYREF_REMOTE_GITHUB_IDS"); clientID != "" || key != "" || ids != "" {
+		vault, err := accountvault.Open(ctx, st, key, clientID, ids)
+		if err != nil {
+			return err
+		}
+		managedVault = vault.Handler()
+	}
 	handler := api.New(st, quotas.NewManager(st), pow.NewIssuer(), api.Config{
+		AccountVault:          managedVault,
 		EnforceQuotas:         os.Getenv("KEYREF_ENFORCE_QUOTAS") == "1",
 		PairRegisterPerMinute: pairLimit,
 		Version:               version,

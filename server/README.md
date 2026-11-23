@@ -1,6 +1,6 @@
 # server
 
-The ciphertext sync service. Implemented (Phase 1 plus the Phase 2 approval endpoints). The server neither holds nor can decrypt the VMK or any item plaintext. The hosted service and the self-hosted deployment are the same program.
+The ciphertext sync service and optional GitHub account vault. For paired sync, the server neither holds the VMK nor can decrypt item plaintext. The account vault has a separate server-managed key model. The hosted service and the self-hosted deployment are the same program.
 
 See the "storage, deployment and cost" and "server API" sections of [docs/design.md](../docs/design.md) for the design; [docs/protocol.md](../docs/protocol.md) is the authority on the wire format.
 
@@ -58,3 +58,28 @@ small enough that a full `cursor=0` sync response fits within 4.5 MB.
 The hosted free plan (`KEYREF_ENFORCE_QUOTAS=1`) limits vault storage
 and requires proof of work at registration. The Vercel deployment
 serves the existing paired sync API.
+
+## GitHub account vault
+
+The optional account vault exposes `/v1/remote/` alongside device sync.
+Set these environment variables together to enable it:
+
+| Variable | Value |
+| --- | --- |
+| `KEYREF_GITHUB_CLIENT_ID` | Client ID of a GitHub application with device authorization enabled |
+| `KEYREF_REMOTE_GITHUB_IDS` | Comma-separated numeric GitHub user IDs allowed to sign in |
+| `KEYREF_REMOTE_WRAP_KEY` | Stable 32-byte random wrapping key encoded as standard base64, stored as a sensitive runtime environment variable |
+
+Use HTTPS for a remote host. A client on this service delegates key
+custody to the operator. The server wraps each account's vault key
+under the deployment wrapping key and returns that vault key on
+successful GitHub authorization. The operator can decrypt the account
+vault. Preserve the wrapping key in a separate secure backup. Losing
+it makes the existing account vaults inaccessible. Use different
+wrapping keys and databases for preview and production.
+
+GitHub tokens remain transient on the server and are used only to
+resolve the authenticated numeric user ID. Keyref stores a digest of
+each 12-hour session token and revokes that session on logout. Removing
+a user ID from the allowlist disables that user's existing sessions.
+The CLI encrypts metadata and values separately before uploading them.

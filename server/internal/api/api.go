@@ -69,10 +69,11 @@ type Config struct {
 	EnforceQuotas bool // KEYREF_ENFORCE_QUOTAS=1 (design §12.3)
 	Version       string
 	Commit        string
-	Origin        string // fixed public origin; empty means derive per request
-	DataDir       string // for the disk-usage healthz check
-	SharedState   bool   // persist challenges and rate limits across instances
-	Vercel        bool   // TLS and client IP are provided by Vercel
+	AccountVault  http.Handler // optional account vault, independent of paired sync
+	Origin        string       // fixed public origin; empty means derive per request
+	DataDir       string       // for the disk-usage healthz check
+	SharedState   bool         // persist challenges and rate limits across instances
+	Vercel        bool         // TLS and client IP are provided by Vercel
 	StartedAt     int64
 	Now           func() time.Time // injectable clock for tests
 
@@ -148,6 +149,25 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
+	if s.cfg.AccountVault != nil {
+		mux.Handle("/v1/remote/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			if !s.cfg.Vercel && r.TLS == nil && !net.ParseIP(host).IsLoopback() {
+				writeError(w, "forbidden")
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/v1/remote/login/") {
+				limit := int64(30)
+				if r.URL.Path == "/v1/remote/login/device" {
+					limit = 5
+				}
+				if !s.requestWindowAllow(w, r, "account:"+r.URL.Path+":"+s.clientIPKey(r), s.cfg.Now().UnixMilli(), limit, 60_000) {
+					return
+				}
+			}
+			s.cfg.AccountVault.ServeHTTP(w, r)
+		}))
+	}
 
 	mux.HandleFunc("POST /v1/vaults", s.handleCreateVault)
 	mux.HandleFunc("GET /v1/vaults/{vault_id}/recovery", s.handleGetRecoveryMaterials)

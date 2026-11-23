@@ -91,6 +91,8 @@ func recoverFatal(code *int) {
 func dispatch(cmd string, args []string) int {
 
 	switch cmd {
+	case "remote":
+		return cmdRemote(args)
 	case "server":
 		return cmdServer(args)
 	case "source":
@@ -153,6 +155,8 @@ commands:
   exec [flags] -- <argv>  run a command with injected secrets
   source <list|default|add|remove>
                           show or configure credential sources
+  remote <login|logout|list|get|set|delete|exec>
+                          use a GitHub-authenticated remote vault
   server [set <origin>]   show or set the sync-server origin
   pair [--name <label>]   pair with the iOS vault (QR code + fingerprint)
                             --kind decider pairs an auto-approval delegate

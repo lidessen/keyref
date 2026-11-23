@@ -1572,4 +1572,18 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | 库的错误分类细化 | 已实现（2026-11-19：`ErrStoreNotFound` / `ErrStoreExists` / `ErrInsecurePermissions` / `ErrInvalidKey` / `ErrInvalidRef` / `ErrInvalidValueSize` / `ErrNotFound` / `ErrWriteLimit` / `ErrCorruptStore`，加既有的 `ErrMetaTooLarge` / `ErrClosed`；`Error()` 只返回固定安全文本、底层原因经 `Unwrap` 可取；`context` 取消与超时原样返回；CLI 按分类给人话，`lib/local/README.md` 记录对照表） |
 | `status` 按 source 报告、只读命令不建文件、帮助退出 `0`、`--version` | 已实现（issue #7） |
 
-当前顺序：本地库与执行引擎已拆为独立 `lib` module 并由 `cli` 依赖，`get --reveal` 的控制终端确认、`keyref mcp --source` 与库的错误分类已落地，K1 的本地审计与项目级 allowlist 仍待补完（两者都需要 §16 之外的设计决定）。Neowind 最小凭证注入的 Keyref 侧契约已验证，真实消费者验收因对方会话的执行授权受阻。owner app、审批与 sync 路径暂缓；remote 读写的持钥模型未定，定案前不进入实现。`cli/README.md`、`lib/local/README.md` 与 `CLAUDE.md` 描述现状。
+当前顺序：本地库与执行引擎已拆为独立 `lib` module 并由 `cli` 依赖，`get --reveal` 的控制终端确认、`keyref mcp --source` 与库的错误分类已落地，K1 的本地审计与项目级 allowlist 仍待补完（两者都需要 §16 之外的设计决定）。Neowind 最小凭证注入的 Keyref 侧契约已验证，真实消费者验收因对方会话的执行授权受阻。owner app、审批与 sync 路径暂缓；GitHub 账号远程库采用 Server 托管密钥，详见下文。`cli/README.md`、`lib/local/README.md` 与 `CLAUDE.md` 描述现状。
+
+## 18. GitHub 账号远程库
+
+GitHub 账号远程库是显式启用的独立模式，入口为 `keyref remote` 和
+`/v1/remote/`。其信任边界允许 Server 托管密钥。Server 用部署环境中
+的包装密钥加密每个账号独立生成的库密钥，GitHub 设备授权成功后经 HTTPS
+将库密钥和限时会话交给 CLI。Server 运维者有能力解密该库。§16 中服务端
+无法解密的约束继续适用于设备配对同步库。
+
+Server 用 GitHub 返回的稳定数字账号 ID 判断允许登录的身份，不请求
+额外 GitHub scope，不保存 GitHub token。CLI 用库密钥派生独立的条目标识
+HMAC 和加密密钥，分别加密元数据和值。条目标识与字段类型绑定到 AEAD
+附加数据，Server 数据库只接收密文及不透明条目标识。多设备共享同一个账号
+库，更新同一条目以最后提交的写入为准。CLI 登录态存于系统密钥环。

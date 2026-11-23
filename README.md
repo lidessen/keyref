@@ -2,7 +2,7 @@
 
 keyref is a secret manager for humans and a secret broker for AI agents. A human keeps API keys, tokens, passwords and notes in a vault; an agent **uses** those secrets through the CLI, and the content the tools hand back to the model contains **no plaintext**.
 
-Today the usable vault is the local source, on the same machine as the CLI. The human-facing app is deferred, and the paired/sync path is frozen until a replacement owner client exists. The next target is a self-hosted server with CLI read/write access; see "Status" in [CLAUDE.md](CLAUDE.md).
+Today the usable vault is the local source, on the same machine as the CLI. The human-facing app is deferred, and the paired/sync path is frozen until a replacement owner client exists. An optional self-hosted account vault supports GitHub login and direct CLI read/write with server-managed keys. See the [account vault setup](server/README.md#github-account-vault).
 
 Typical use:
 
@@ -62,9 +62,9 @@ The local source is what this README's commands use: same command surface, no ph
 
 ## Decisions already made
 
-- The server stores ciphertext only. Names, descriptions, `ref` and secret values all live inside the ciphertext.
+- The paired-sync server stores ciphertext only. Names, descriptions, `ref` and secret values all live inside the ciphertext.
 - The intended owner model keeps the root key on a human-controlled device, never on the server and never in the CLI. The native app that implemented this was removed; the replacement owner client is deferred, so the paired path is frozen.
 - Placeholders are written as `{{keyref:openai-prod}}`. The safer injection shapes are `--env`, stdin or an extra file descriptor, rather than putting a secret in process arguments.
-- The sync layer is one Go server with embedded SQLite. Self-hosting is free: deploy it yourself and point the CLI at that address. The key-custody model for the CLI's remote read/write path is still being decided.
+- The sync layer is one Go server with embedded SQLite. Self-hosting is free: deploy it yourself and point the CLI at that address.
 
 The trade-offs, the threat model and the questions that are still open are written up in [docs/design.md](docs/design.md).

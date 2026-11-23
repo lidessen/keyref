@@ -2,4 +2,8 @@
 // keyref binary against a real keyref-server (docs/protocol.md §11).
 // Every test file except this one carries the `e2e` build tag; run them
 // with: go test -C cli -tags=e2e ./e2e
+//
+// Set KEYREF_E2E_HOSTED_ORIGIN to an HTTPS deployment and use
+// -run '^TestHostedEndToEnd$' to create and remove a synthetic hosted
+// vault while exercising the existing pairing and exec flow.
 package e2e

@@ -6,14 +6,14 @@ This file provides guidance to AI coding agents (`Claude Code`, `Agy`, `Codex`, 
 
 keyref is a secret manager for humans plus a secret broker for AI agents. A human owns the vault; an agent uses the `keyref` CLI to *use* secrets. The agent writes a stable reference (`openai-prod`), never the secret. The CLI injects the real value into a child process and redacts it back out of stdout/stderr, so plaintext never reaches the model's context.
 
-The trust boundary is the whole design: the server stores ciphertext only and cannot decrypt anything; the human-owned client holds the root key; the CLI only ever holds per-item keys for items it was granted.
+The paired-sync trust boundary keeps the root key on the human-owned client and only gives the CLI granted item keys. The optional GitHub account vault delegates key custody to the server operator. These vaults use separate storage and APIs.
 
 ## Status (2026-11-19)
 
 - **Active:** embedding surfaces — the standalone `lib` module is extracted, the CLI's `local` source is stable, `keyref mcp` serves whichever source it pinned at startup, and `lib/local` classifies its failures (design §17.7). The engine imports no CLI code; remaining local debt is K1's audit trail and project-level allowlist, both of which need a design decision beyond §16.
 - **Frozen:** the paired/sync path. The server stays buildable and self-hostable, but gets no new sync-protocol features.
 - **Deferred:** the human-facing app and approvals. The native iOS app and the Android SMS collector were removed from this repository; the app is planned as a WebView shell over a web UI. The design and protocol docs still describe the intended owner model and are the spec of record for that work.
-- **Next target:** self-hosted remote read/write — deploy `keyref-server`, point the CLI at it (currently `keyref server set <origin>` or `KEYREF_SERVER`; a `--server` flag is not implemented), sign in with GitHub, and read/write credentials without an owner app or approvals. The key-custody model for that path is not settled yet and must be decided before implementing it.
+- **Account vault:** opt-in GitHub device authorization and server-managed vault keys. Use `keyref remote` for direct read/write and environment injection. See [server setup](server/README.md#github-account-vault).
 
 ## Repository layout
 

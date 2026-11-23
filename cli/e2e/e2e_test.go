@@ -13,10 +13,12 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -48,39 +50,54 @@ var (
 	serverURL string
 	cliBin    string
 	helperBin string
+	hosted    bool
 )
 
-func TestMain(m *testing.M) {
+func TestMain(m *testing.M) { os.Exit(runTests(m)) }
+
+func runTests(m *testing.M) int {
 	var err error
 	base, err = os.MkdirTemp("", "keyref-e2e-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
 	defer os.RemoveAll(base)
 
-	// Build the server, the CLI and the helper child fixture
-	// (docs/protocol.md §11.3 step 1).
-	if err := build("../..", "server", filepath.Join(base, "keyref-server"), "./cmd/keyref-server"); err != nil {
-		fmt.Fprintln(os.Stderr, "build server:", err)
-		os.Exit(1)
-	}
 	if err := build("../..", "cli", filepath.Join(base, "keyref"), "./cmd/keyref"); err != nil {
 		fmt.Fprintln(os.Stderr, "build cli:", err)
-		os.Exit(1)
+		return 1
 	}
 	if err := build(".", "", filepath.Join(base, "helper"), "./testdata/helper"); err != nil {
 		fmt.Fprintln(os.Stderr, "build helper:", err)
-		os.Exit(1)
+		return 1
 	}
 	cliBin = filepath.Join(base, "keyref")
 	helperBin = filepath.Join(base, "helper")
+
+	if origin := os.Getenv("KEYREF_E2E_HOSTED_ORIGIN"); origin != "" {
+		flag.Parse()
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+			u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+			flag.Lookup("test.run").Value.String() != "^TestHostedEndToEnd$" {
+			fmt.Fprintln(os.Stderr, "hosted acceptance requires an HTTPS origin and -run '^TestHostedEndToEnd$'")
+			return 1
+		}
+		serverURL = origin
+		hosted = true
+		return m.Run()
+	}
+	if err := build("../..", "server", filepath.Join(base, "keyref-server"), "./cmd/keyref-server"); err != nil {
+		fmt.Fprintln(os.Stderr, "build server:", err)
+		return 1
+	}
 
 	// Free port, temp data dir, plain-HTTP dev mode, no quotas.
 	port, err := freePort()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
 	serverURL = "http://127.0.0.1:" + port
 	dataDir := filepath.Join(base, "data")
@@ -94,12 +111,12 @@ func TestMain(m *testing.M) {
 	srv.Stderr = &srvLog
 	if err := srv.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "start server:", err)
-		os.Exit(1)
+		return 1
 	}
 	if err := waitHealthy(serverURL, 20*time.Second); err != nil {
 		_ = srv.Process.Kill()
 		fmt.Fprintln(os.Stderr, "server not healthy:", err, "\n", srvLog.String())
-		os.Exit(1)
+		return 1
 	}
 
 	code := m.Run()
@@ -109,7 +126,7 @@ func TestMain(m *testing.M) {
 	if code != 0 {
 		fmt.Fprintln(os.Stderr, "---- server log ----\n"+srvLog.String())
 	}
-	os.Exit(code)
+	return code
 }
 
 func build(workdir, mod, out, pkg string) error {
@@ -291,10 +308,66 @@ func (o *owner) createVault(t *testing.T) {
 		DirectorySigned:   dir,
 		Signature:         o.sign(dir),
 	}
-	var out wire.CreateVaultResponse
-	if resp := o.do(t, "POST", "/v1/vaults", req, &out); resp.StatusCode != 201 {
+	var reply struct {
+		Error     string    `json:"error"`
+		Challenge wire.Blob `json:"challenge"`
+	}
+	resp := o.do(t, "POST", "/v1/vaults", req, &reply)
+	if resp.StatusCode == 401 && reply.Error == "pow_required" {
+		req.PoW = solveHostedPoW(t, reply.Challenge, o.vaultID)
+		resp = o.do(t, "POST", "/v1/vaults", req, nil)
+	}
+	if resp.StatusCode != 201 {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("create vault: %d %s", resp.StatusCode, raw)
+	}
+	if hosted {
+		t.Cleanup(func() { o.removeHostedFixture(t) })
+	}
+}
+
+// solveHostedPoW solves the public registration challenge from protocol §10.1.
+func solveHostedPoW(t *testing.T, challenge wire.Blob, vaultID string) *wire.PoWSolution {
+	t.Helper()
+	id, err := hex.DecodeString(vaultID)
+	if err != nil || len(challenge) != 32 || len(id) != 16 {
+		t.Fatal("invalid registration challenge")
+	}
+	var block [56]byte
+	copy(block[:32], challenge)
+	copy(block[32:48], id)
+	for nonce := uint64(0); nonce < 1<<27; nonce++ {
+		binary.BigEndian.PutUint64(block[48:], nonce)
+		hash := sha256.Sum256(block[:])
+		if hash[0] == 0 && hash[1] == 0 && hash[2]>>3 == 0 {
+			return &wire.PoWSolution{Challenge: challenge, Nonce: block[48:]}
+		}
+	}
+	t.Fatal("registration proof search exceeded its limit")
+	return nil
+}
+
+func (o *owner) removeHostedFixture(t *testing.T) {
+	t.Helper()
+	if o.token == "" {
+		o.session(t)
+	}
+	path := "/v1/vaults/" + o.vaultID
+	var reply struct {
+		Error     string    `json:"error"`
+		Challenge wire.Blob `json:"challenge"`
+	}
+	if resp := o.do(t, "DELETE", path, nil, &reply); resp.StatusCode != 401 || reply.Error != "delete_challenge_required" {
+		t.Fatalf("could not request fixture deletion: %d", resp.StatusCode)
+	}
+	transcript, err := wire.BuildVaultDeleteTranscript(o.vaultID, reply.Challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := wire.Blob(o.sign(transcript))
+	req := wire.DeleteVaultRequest{Challenge: &reply.Challenge, Signature: &signature}
+	if resp := o.do(t, "DELETE", path, req, nil); resp.StatusCode != 204 {
+		t.Fatalf("could not delete hosted fixture: %d", resp.StatusCode)
 	}
 }
 
@@ -787,6 +860,18 @@ func assertNoLeak(t *testing.T, where string, outputs ...string) {
 // ---- the tests ----
 
 func TestEndToEnd(t *testing.T) {
+	testEndToEnd(t)
+}
+
+func TestHostedEndToEnd(t *testing.T) {
+	if !hosted {
+		t.Skip("requires KEYREF_E2E_HOSTED_ORIGIN")
+	}
+	testEndToEnd(t)
+}
+
+func testEndToEnd(t *testing.T) {
+	t.Helper()
 	vaultID := newID(t)
 	owner := newOwner(t, vaultID)
 	owner.createVault(t)

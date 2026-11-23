@@ -149,3 +149,28 @@ cli/
 ```
 
 Accept against fixed fixtures: the fixture plaintext must not appear in the stdout/stderr of `list`, `get` or `exec`, including base64, hex and URL encodings.
+
+## GitHub account vault
+
+On a server with the account vault enabled, point the CLI at its HTTPS
+origin and run the GitHub device authorization flow:
+
+```sh
+keyref server set https://keys.example.com
+keyref remote login
+keyref remote set --allow-command curl example-token < /path/to/token
+keyref remote get example-token
+keyref remote list
+keyref remote delete example-token
+keyref remote logout
+```
+
+`remote get` and `remote list` display masks. For command injection,
+use `keyref remote exec --env NAME=REF -- COMMAND ...`. Set an exact
+`--allow-command` for each consuming command when writing an entry.
+The server operator holds the account vault's wrapping key and can
+decrypt stored entries. The CLI keeps its session and vault key in the
+OS keyring, scoped to the server origin and Keyref data directory.
+Signing into the same GitHub account on another device accesses the
+same vault. The account vault supports up to 128 entries with values
+up to 64 KiB each.
