@@ -27,6 +27,19 @@ The agent writes the stable reference `openai-prod`, not the secret itself. `key
 
 `go vet` + `go test` for server / cli / lib / proto / tools, plus the CLI end-to-end tests (a software owner drives create vault, pair, sync and exec against a real running server) are the CI gate ([.github/workflows/ci.yml](.github/workflows/ci.yml)). The native iOS app and the Android SMS collector were removed on 2026-11-19; the app is planned as a WebView shell over a web UI.
 
+## Install the CLI
+
+On macOS or Linux with Bash and Go 1.26 or newer installed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lidessen/keyref/main/scripts/install.sh | bash
+keyref --version
+```
+
+The installer builds from GitHub source and installs into `~/.local/bin`.
+Add that directory to `PATH` if needed. Pass `KEYREF_BIN_DIR=/path/to/bin`
+or `KEYREF_REF=<tag-or-commit>` to the `bash` command to override the defaults.
+
 ## Local development
 
 ```bash
