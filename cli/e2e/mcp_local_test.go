@@ -167,10 +167,13 @@ func TestMCPservesTheLocalSource(t *testing.T) {
 	if !strings.Contains(text, `"ref": "tok"`) {
 		t.Fatalf("the running session left its pinned vault: %q", text)
 	}
-	// The CLI, resolving fresh, follows the new default — which has no
-	// vault yet.
-	if run := localRun(t, env, "", "list"); run.code == 0 || !strings.Contains(run.stderr, "has no vault yet") {
-		t.Fatalf("a fresh command must follow the new default: exit %d %q", run.code, run.stderr)
+	// CLI listing includes every initialized vault. Get still follows
+	// the configured default, which has no vault yet.
+	if run := localRun(t, env, "", "list"); run.code != 0 || !strings.Contains(run.stdout, "tok") {
+		t.Fatalf("CLI list lost an initialized vault: exit %d %q", run.code, run.stderr)
+	}
+	if run := localRun(t, env, "", "get", "tok"); run.code == 0 || !strings.Contains(run.stderr, "has no vault yet") {
+		t.Fatalf("CLI get must follow the new default: exit %d %q", run.code, run.stderr)
 	}
 
 	// --source selects explicitly, whatever the default says.
