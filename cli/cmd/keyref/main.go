@@ -464,9 +464,28 @@ func printEntries(entries []meta.Entry, format string) int {
 		}
 		return 0
 	}
-	fmt.Printf("%-24s %-28s %-10s %-16s %s\n", "REF", "NAME", "TYPE", "SOURCE", "MASKED")
+	showName := false
 	for _, e := range entries {
-		fmt.Printf("%-24s %-28s %-10s %-16s %s\n", e.Ref, truncate(e.Name, 28), e.Type, e.Source, e.Masked)
+		if e.Name != "" && e.Name != e.Ref {
+			showName = true
+			break
+		}
+	}
+	if showName {
+		fmt.Printf("%-24s %-28s %-10s %-16s %s\n", "REF", "NAME", "TYPE", "SOURCE", "MASKED")
+	} else {
+		fmt.Printf("%-24s %-10s %-16s %s\n", "REF", "TYPE", "SOURCE", "MASKED")
+	}
+	for _, e := range entries {
+		if showName {
+			name := e.Name
+			if name == "" || name == e.Ref {
+				name = "—"
+			}
+			fmt.Printf("%-24s %-28s %-10s %-16s %s\n", e.Ref, truncate(name, 28), e.Type, e.Source, e.Masked)
+		} else {
+			fmt.Printf("%-24s %-10s %-16s %s\n", e.Ref, e.Type, e.Source, e.Masked)
+		}
 	}
 	return 0
 }
