@@ -1,0 +1,62 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #263633; background: #f5f6f2; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+.app { min-height: 100vh; background: #f5f6f2; color: #263633; }
+.topbar { height: 76px; border-bottom: 1px solid #e3e9e2; background: #fff; }
+.topbar-inner { max-width: 1120px; height: 100%; padding: 0 28px; margin: auto; display: flex; justify-content: space-between; align-items: center; }
+.brand { display: inline-flex; align-items: center; gap: 10px; color: #243831; text-decoration: none; font-size: 22px; font-weight: 750; letter-spacing: -1px; }
+.brand img { width: 38px; height: 38px; border-radius: 12px; object-fit: cover; }
+main { max-width: 1120px; margin: 0 auto; padding: 0 28px 80px; }
+.alert { position: relative; z-index: 8; padding: 14px 18px; margin-top: 24px; border-radius: 10px; font-size: 14px; }
+.error { background: #fbe8e5; color: #983c2f; } .notice { background: #e1f3e8; color: #236440; }
+.loading { padding: 60px 0; }
+.login-layout { min-height: calc(100vh - 156px); display: grid; grid-template-columns: 1fr 0.8fr; align-items: center; gap: 9%; }
+.login-copy { padding: 50px 0; max-width: 490px; }
+.eyebrow { margin: 0 0 18px; color: #487566; font-size: 11px; font-weight: 750; letter-spacing: .12em; }
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: 16px; font-size: clamp(38px, 5vw, 58px); line-height: 1.08; font-weight: 700; letter-spacing: -.052em; }
+.lead { max-width: 430px; color: #6a7971; font-size: 17px; line-height: 1.65; margin-bottom: 30px; }
+.login-copy button { min-height: 48px; padding-inline: 20px; }
+.login-footnote { color: #8b9991; font-size: 12px; margin-top: 20px; }
+.mascot { aspect-ratio: 1; border-radius: 28px; overflow: hidden; box-shadow: 0 18px 55px #44564917; }
+.mascot img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.code-panel { max-width: 480px; padding: 88px 0; }
+.device-code { display: inline-block; margin: 8px 0 24px; padding: 18px 24px; border-radius: 12px; background: #fff; border: 1px solid #dce5db; font: 700 29px ui-monospace, monospace; letter-spacing: .08em; }
+.github-link { display: block; width: fit-content; color: #fff; background: #233d32; border-radius: 9px; padding: 14px 20px; font-weight: 650; text-decoration: none; }
+.waiting { margin: 28px 0 12px; color: #708177; font-size: 14px; }
+.pulse { display: inline-block; width: 8px; height: 8px; margin-right: 10px; background: #3eaa71; border-radius: 100%; }
+.vault { padding-top: 72px; }
+.vault-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding-bottom: 48px; }
+.vault-heading h1 { margin-bottom: 10px; font-size: 44px; }
+.subheading { margin: 0; color: #75857b; font-size: 15px; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; border-bottom: 1px solid #dfe7df; padding: 0 0 17px; }
+.search { width: min(340px, 70%); position: relative; }
+.search span { position: absolute; z-index: 1; top: 7px; left: 12px; font-size: 23px; color: #8b9b90; line-height: 1; pointer-events: none; }
+.search input { padding-left: 36px; width: 100%; background: white; }
+.credential-list { display: grid; }
+.credential { display: flex; align-items: center; gap: 18px; padding: 23px 0; border-bottom: 1px solid #e1e8e0; }
+.entry-icon { flex: 0 0 46px; height: 46px; display: grid; place-items: center; color: #3c805a; background: #e2eee5; border-radius: 14px; font-size: 20px; }
+.entry-main { min-width: 0; flex: 1; }
+.entry-title { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.entry-title strong { font-size: 15px; overflow-wrap: anywhere; }
+.entry-title code { background: #e9eee8; border-radius: 5px; padding: 3px 6px; color: #718277; font-size: 11px; }
+.entry-main p { margin: 5px 0 3px; color: #728278; font-size: 13px; overflow-wrap: anywhere; }
+.entry-commands { color: #93a097; font-size: 11px; overflow-wrap: anywhere; }
+.entry-actions { display: flex; align-items: center; gap: 5px; }
+.empty { text-align: center; padding: 74px 20px; color: #7d8b81; }
+.empty-icon { margin: 0 auto 16px; color: #72a786; font-size: 28px; }
+.empty h2 { color: #31473b; font-size: 17px; margin-bottom: 8px; }.empty p { font-size: 14px; }
+.overlay { position: fixed; z-index: 5; inset: 0; background: #1b2924a8; display: grid; align-items: center; justify-items: center; padding: 20px; overflow-y: auto; }
+.dialog { width: min(100%, 490px); padding: 30px; border-radius: 18px; background: #fff; box-shadow: 0 25px 80px #10271933; }
+.dialog-header { display: flex; justify-content: space-between; align-items: start; }.dialog-header .eyebrow { margin-bottom: 9px; }.dialog h2 { margin-bottom: 23px; font-size: 24px; letter-spacing: -.03em; }.close { border: 0; background: transparent; font-size: 25px; color: #7b8a80; cursor: pointer; }
+.dialog label { display: block; margin: 18px 0 7px; font-size: 13px; font-weight: 650; }.dialog label span { color: #a3afa5; font-weight: 400; }.dialog input { width: 100%; }.dialog small { display: block; margin-top: 7px; color: #91a096; font-size: 12px; line-height: 1.4; }
+.dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 9px; margin-top: 28px; }.confirm p { color: #728278; line-height: 1.5; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+@media (max-width: 700px) {
+  .topbar { height: 64px; }.topbar-inner, main { padding-left: 20px; padding-right: 20px; }
+  .login-layout { display: flex; flex-direction: column-reverse; align-items: stretch; justify-content: center; gap: 0; padding-top: 36px; }
+  .mascot { max-width: 280px; width: 72%; margin: 0 auto; }.login-copy { padding: 35px 0; }
+  .vault { padding-top: 46px; }.vault-heading { align-items: flex-start; flex-direction: column; padding-bottom: 35px; }.vault-heading h1 { font-size: 36px; }
+  .credential { flex-wrap: wrap; gap: 12px; }.entry-actions { margin-left: 58px; width: 100%; }.dialog { padding: 24px; }
+}

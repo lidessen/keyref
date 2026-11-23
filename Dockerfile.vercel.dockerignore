@@ -3,3 +3,6 @@
 !proto/**
 !server/
 !server/**
+
+server/web/node_modules/
+server/internal/accountvault/web/build/

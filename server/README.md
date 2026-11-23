@@ -64,6 +64,18 @@ The hosted free plan (`KEYREF_ENFORCE_QUOTAS=1`) limits vault storage
 and requires proof of work at registration. The Vercel deployment
 serves the existing paired sync API.
 
+## Browser management
+
+When the account vault is enabled, visit `/manage/` on the server's HTTPS
+origin. GitHub device authorization grants access to that account's entries.
+The page displays masked metadata and supports creating, editing, and deleting
+credentials. A blank value while editing keeps the existing secret.
+
+The container images build the bundled Meowland frontend with Bun. For local
+development, run `bun install --frozen-lockfile` and `bun run build` in
+`server/web` before building or running the server. The frontend bundle is
+generated at `server/internal/accountvault/web/build/main.js`.
+
 ## GitHub account vault
 
 The optional account vault exposes `/v1/remote/` alongside device sync.

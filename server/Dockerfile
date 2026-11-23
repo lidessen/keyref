@@ -6,6 +6,13 @@
 # The builder writes its own go.work with only ./proto and ./server so
 # the image does not depend on the CLI module.
 
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS web
+WORKDIR /src/server/web
+COPY server/web/package.json server/web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY server/web/ ./
+RUN bun run build
+
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 WORKDIR /src
 
@@ -18,6 +25,7 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 WORKDIR /src
 COPY proto/ ./proto/
 COPY server/ ./server/
+COPY --from=web /src/server/internal/accountvault/web/build/main.js ./server/internal/accountvault/web/build/main.js
 
 ARG TARGETOS
 ARG TARGETARCH

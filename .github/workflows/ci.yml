@@ -67,6 +67,24 @@ jobs:
           ./scripts/build-release.sh v0.0.0 "$RUNNER_TEMP/keyref-release" "$PLATFORM"
           ./scripts/test-install.sh "$RUNNER_TEMP/keyref-release" v0.0.0
 
+  web:
+    name: Account vault frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Type-check and build
+        working-directory: server/web
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run build
+
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 20

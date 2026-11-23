@@ -1,4 +1,11 @@
 # Build from the repository root so the proto module is in context.
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS web
+WORKDIR /src/server/web
+COPY server/web/package.json server/web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY server/web/ ./
+RUN bun run build
+
 FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY proto/go.mod proto/go.sum ./proto/
@@ -9,6 +16,7 @@ RUN go mod download
 WORKDIR /src
 COPY proto/ ./proto/
 COPY server/ ./server/
+COPY --from=web /src/server/internal/accountvault/web/build/main.js ./server/internal/accountvault/web/build/main.js
 WORKDIR /src/server
 RUN CGO_ENABLED=0 go build -trimpath -o /out/keyref-server ./cmd/keyref-server
 

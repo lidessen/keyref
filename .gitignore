@@ -46,3 +46,7 @@ core.*
 out/
 tools/vectordump/vectordump
 .keyref-design-preview.html
+
+# Account vault frontend dependencies and generated bundle
+server/web/node_modules/
+server/internal/accountvault/web/build/

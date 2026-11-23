@@ -1,0 +1,17 @@
+{
+  "name": "keyref-admin-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./src/main.tsx --outfile ../internal/accountvault/web/build/main.js --target browser --minify",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "meowcss": "0.3.0-alpha.2",
+    "meowjsx": "0.3.0-alpha.2",
+    "meowtail": "0.4.0-alpha.2"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
