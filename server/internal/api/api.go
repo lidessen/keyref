@@ -280,7 +280,7 @@ func (s *Server) bodyLimit(r *http.Request) int64 {
 // names and refs never do (they are encrypted, design §15).
 func redactPath(r *http.Request) string {
 	if strings.HasPrefix(r.URL.Path, "/manage/api/items/") {
-		return "/manage/api/items/{ref}"
+		return "/manage/api/items/{id}"
 	}
 	return r.URL.Path
 }

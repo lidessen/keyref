@@ -107,7 +107,10 @@ func TestBrowserAccountVault(t *testing.T) {
 	check(status, 409, body)
 	status, body, _ = request("GET", "/manage/api/items", "", "", false)
 	check(status, 200, body)
-	var rows []remote.Metadata
+	var rows []struct {
+		ID string `json:"id"`
+		remote.Metadata
+	}
 	if err := json.Unmarshal(body, &rows); err != nil || len(rows) != 1 || rows[0].Ref != "api-key" || rows[0].Mask != "***" || rows[0].Description != "first" {
 		t.Fatalf("unexpected metadata: %s %v", body, err)
 	}
@@ -117,6 +120,10 @@ func TestBrowserAccountVault(t *testing.T) {
 	}
 	defer clear(key)
 	id := remote.ItemID(key, "api-key")
+	if rows[0].ID != id {
+		t.Fatal("browser item ID does not match CLI item ID")
+	}
+	itemPath := "/manage/api/items/" + id
 	var encryptedBefore []byte
 	if err := st.DB().QueryRowContext(ctx, "SELECT value FROM account_items WHERE account=? AND id=?", 42, id).Scan(&encryptedBefore); err != nil {
 		t.Fatal(err)
@@ -128,19 +135,23 @@ func TestBrowserAccountVault(t *testing.T) {
 		t.Fatal("CLI-compatible value decryption failed")
 	}
 	clear(plaintext)
-	status, body, _ = request("PATCH", "/manage/api/items/api-key", `{"ref":"api-key","description":"updated","allow_commands":["git"]}`, "", true)
+	status, body, _ = request("PATCH", itemPath, `{"ref":"other-ref","value":"replacement"}`, "", true)
+	check(status, 400, body)
+	status, body, _ = request("DELETE", "/manage/api/items/api-key", "", "", true)
+	check(status, 400, body)
+	status, body, _ = request("PATCH", itemPath, `{"ref":"api-key","description":"updated","allow_commands":["git"]}`, "", true)
 	check(status, 204, body)
 	var encryptedAfter []byte
 	if err := st.DB().QueryRowContext(ctx, "SELECT value FROM account_items WHERE account=? AND id=?", 42, id).Scan(&encryptedAfter); err != nil || !bytes.Equal(encryptedBefore, encryptedAfter) {
 		t.Fatal("metadata-only edit changed the value")
 	}
-	status, body, _ = request("DELETE", "/manage/api/items/api-key", "", "https://attacker.example", true)
+	status, body, _ = request("DELETE", itemPath, "", "https://attacker.example", true)
 	check(status, 403, body)
-	status, body, _ = request("DELETE", "/manage/api/items/api-key", "", "", false)
+	status, body, _ = request("DELETE", itemPath, "", "", false)
 	check(status, 403, body)
-	status, body, _ = request("DELETE", "/manage/api/items/api-key", "", "", true)
+	status, body, _ = request("DELETE", itemPath, "", "", true)
 	check(status, 204, body)
-	status, body, _ = request("PATCH", "/manage/api/items/api-key", `{"ref":"api-key","value":"new"}`, "", true)
+	status, body, _ = request("PATCH", itemPath, `{"ref":"api-key","value":"new"}`, "", true)
 	check(status, 404, body)
 	status, body, _ = request("DELETE", "/manage/api/session", "", "", true)
 	check(status, 204, body)

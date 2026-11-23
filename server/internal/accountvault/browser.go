@@ -36,8 +36,8 @@ func (v *Vault) registerBrowser(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /manage/api/session", v.browserAuthorized(v.browserLogout))
 	mux.HandleFunc("GET /manage/api/items", v.browserAuthorized(v.browserList))
 	mux.HandleFunc("POST /manage/api/items", v.browserAuthorized(v.browserCreate))
-	mux.HandleFunc("PATCH /manage/api/items/{ref}", v.browserAuthorized(v.browserEdit))
-	mux.HandleFunc("DELETE /manage/api/items/{ref}", v.browserAuthorized(v.browserDelete))
+	mux.HandleFunc("PATCH /manage/api/items/{id}", v.browserAuthorized(v.browserEdit))
+	mux.HandleFunc("DELETE /manage/api/items/{id}", v.browserAuthorized(v.browserDelete))
 }
 
 func browserHeaders(w http.ResponseWriter) {
@@ -237,7 +237,11 @@ func (v *Vault) browserList(w http.ResponseWriter, r *http.Request, account int6
 		return
 	}
 	defer rows.Close()
-	entries := make([]remote.Metadata, 0)
+	type browserEntry struct {
+		ID string `json:"id"`
+		remote.Metadata
+	}
+	entries := make([]browserEntry, 0)
 	for rows.Next() {
 		var id string
 		var blob []byte
@@ -250,7 +254,7 @@ func (v *Vault) browserList(w http.ResponseWriter, r *http.Request, account int6
 			failure(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		entries = append(entries, entry)
+		entries = append(entries, browserEntry{ID: id, Metadata: entry})
 	}
 	if rows.Err() != nil {
 		failure(w, http.StatusInternalServerError, "internal")
@@ -277,7 +281,7 @@ func (v *Vault) browserEdit(w http.ResponseWriter, r *http.Request, account int6
 
 func (v *Vault) browserPut(w http.ResponseWriter, r *http.Request, account int64, create bool) {
 	var input browserWrite
-	if !read(r, &input) || !browserRef.MatchString(input.Ref) || (!create && input.Ref != r.PathValue("ref")) || len(input.Value) > remote.MaxSecret || (create && len(input.Value) == 0) {
+	if !read(r, &input) || !browserRef.MatchString(input.Ref) || (!create && !validID(r.PathValue("id"))) || len(input.Value) > remote.MaxSecret || (create && len(input.Value) == 0) {
 		failure(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -294,6 +298,10 @@ func (v *Vault) browserPut(w http.ResponseWriter, r *http.Request, account int64
 	}
 	defer clear(key)
 	id := remote.ItemID(key, input.Ref)
+	if !create && id != r.PathValue("id") {
+		failure(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
 	cipherKey := remote.CipherKey(key)
 	defer clear(cipherKey)
 	meta := remote.Metadata{Ref: input.Ref, Description: input.Description, AllowCommands: input.AllowCommands}
@@ -362,18 +370,12 @@ func (v *Vault) browserPut(w http.ResponseWriter, r *http.Request, account int64
 }
 
 func (v *Vault) browserDelete(w http.ResponseWriter, r *http.Request, account int64, _ [32]byte) {
-	ref := r.PathValue("ref")
-	if !browserRef.MatchString(ref) {
+	id := r.PathValue("id")
+	if !validID(id) {
 		failure(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	key, err := v.browserKey(r, account)
-	if err != nil {
-		failure(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	defer clear(key)
-	res, err := v.store.DB().ExecContext(r.Context(), "DELETE FROM account_items WHERE account=? AND id=?", account, remote.ItemID(key, ref))
+	res, err := v.store.DB().ExecContext(r.Context(), "DELETE FROM account_items WHERE account=? AND id=?", account, id)
 	if err != nil {
 		failure(w, http.StatusInternalServerError, "internal")
 		return
