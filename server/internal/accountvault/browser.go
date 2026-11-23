@@ -73,6 +73,8 @@ func (v *Vault) browserAsset(w http.ResponseWriter, r *http.Request) {
 		path, contentType = "web/styles.css", "text/css; charset=utf-8"
 	case "logo.png":
 		path, contentType = "web/logo.png", "image/png"
+	case "login-illustration.webp":
+		path, contentType = "web/login-illustration.webp", "image/webp"
 	default:
 		http.NotFound(w, r)
 		return

@@ -236,7 +236,9 @@ function App() {
           <p className="lead">Manage your remote vault credentials with GitHub.</p>
           <Button variant="primary" disabled={busy} onClick={login}>Continue with GitHub <span aria-hidden="true">↗</span></Button>
         </div>
-        <div className="mascot" aria-hidden="true"><img src="/manage/assets/logo.png" alt="" /></div>
+        <div className="login-art" aria-hidden="true">
+          <img src="/manage/assets/login-illustration.webp" alt="" width="1000" height="1000" decoding="async" />
+        </div>
       </section>
       <section className="code-panel" hidden={signingIn}>
         <h1>Connect your account</h1>
