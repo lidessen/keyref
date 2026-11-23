@@ -26,6 +26,7 @@ import (
 	"github.com/lidessen/keyref/server/internal/pow"
 	"github.com/lidessen/keyref/server/internal/quotas"
 	"github.com/lidessen/keyref/server/internal/store"
+	"github.com/lidessen/keyref/server/internal/website"
 )
 
 // Body size ceilings enforced before parsing (protocol §1.2).
@@ -148,6 +149,7 @@ func New(st *store.Store, quota *quotas.Manager, po *pow.Issuer, cfg Config) *Se
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
+	website.Register(mux, s.cfg.AccountVault != nil)
 	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
 	if s.cfg.AccountVault != nil {
 		accountHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,9 +176,6 @@ func (s *Server) Handler() http.Handler {
 		})
 		mux.Handle("/v1/remote/", accountHandler)
 		mux.Handle("/manage/", accountHandler)
-		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/manage/", http.StatusFound)
-		})
 	}
 
 	mux.HandleFunc("POST /v1/vaults", s.handleCreateVault)

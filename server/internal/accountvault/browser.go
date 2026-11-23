@@ -16,6 +16,7 @@ import (
 
 	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/remote"
+	"github.com/lidessen/keyref/server/internal/website"
 )
 
 //go:embed all:web
@@ -69,7 +70,8 @@ func (v *Vault) browserAsset(w http.ResponseWriter, r *http.Request) {
 	case "styles.css":
 		path, contentType = "web/styles.css", "text/css; charset=utf-8"
 	case "logo.png":
-		path, contentType = "web/logo.png", "image/png"
+		website.ServeLogo(w, r)
+		return
 	case "login-illustration.webp":
 		path, contentType = "web/login-illustration.webp", "image/webp"
 	default:
