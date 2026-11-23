@@ -292,5 +292,5 @@ function App() {
   </div>;
 }
 
-const runtime = createRuntime({ plugins: [createMeowUI({ components: [Button, Input, Text] }), createMeowUITheme({ theme: standardTheme })] });
+const runtime = createRuntime({ plugins: [createMeowUI({ components: [Button, Input, Text] }), createMeowUITheme({ theme: standardTheme, page: false })] });
 createWebRenderer(runtime).render(<App />, document.querySelector<HTMLElement>("#app")!);
