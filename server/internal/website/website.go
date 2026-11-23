@@ -7,7 +7,7 @@ import (
 	"net/http"
 )
 
-//go:embed index.html site.css site.js logo.png
+//go:embed index.html site.css site.js icons.svg logo.png fonts
 var assets embed.FS
 
 var homepage = template.Must(template.ParseFS(assets, "index.html"))
@@ -16,7 +16,7 @@ const installerURL = "https://raw.githubusercontent.com/lidessen/keyref/main/scr
 
 func Register(mux *http.ServeMux, accountVault bool) {
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = homepage.Execute(w, accountVault)
@@ -24,12 +24,11 @@ func Register(mux *http.ServeMux, accountVault bool) {
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, installerURL, http.StatusFound)
 	})
-	mux.HandleFunc("GET /assets/site.css", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, assets, "site.css")
-	})
-	mux.HandleFunc("GET /assets/site.js", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, assets, "site.js")
-	})
+	for _, name := range []string{"site.css", "site.js", "icons.svg", "fonts/bricolage-grotesque.woff2", "fonts/ibm-plex-mono.woff2"} {
+		mux.HandleFunc("GET /assets/"+name, func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFileFS(w, r, assets, name)
+		})
+	}
 	mux.HandleFunc("GET /assets/logo.png", ServeLogo)
 }
 

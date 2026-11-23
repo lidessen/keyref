@@ -5,87 +5,103 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="Keyref is a credential vault and CLI for developers and AI agents. Store credentials, then inject them into commands by reference.">
-  <title>Keyref — Use secrets by reference</title>
+  <title>Keyref | Use secrets by reference</title>
   <link rel="icon" type="image/png" href="/assets/logo.png">
+  <link rel="preload" href="/assets/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/assets/site.css">
   <script src="/assets/site.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="intro">
+  <header class="header">
     <div class="shell masthead">
       <a class="brand" href="/" aria-label="Keyref home">
-        <img src="/assets/logo.png" width="36" height="36" alt="">
+        <img src="/assets/logo.png" width="32" height="32" alt="">
         <span>keyref</span>
       </a>
       <nav aria-label="Main">
         <a href="#install">Install</a>
         <a href="#quickstart">Quickstart</a>
         <a href="https://github.com/lidessen/keyref">GitHub</a>
-        {{if .}}<a class="vault-link" href="/manage/">Open vault <span aria-hidden="true">↗</span></a>{{end}}
+        {{if .}}<a class="vault-link" href="/manage/"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#lock"></use></svg>Open vault</a>{{end}}
       </nav>
     </div>
   </header>
   <main id="main" tabindex="-1">
-    <div class="intro">
-      <section class="shell hero" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <h1 id="hero-title">Use secrets<br>by reference<span>.</span></h1>
-          <p>Keyref is a credential vault and CLI for developers and AI agents. Pass a reference like <code>github-token</code>, and Keyref supplies the stored value to the command when it runs.</p>
-          <div class="hero-actions">
-            <a class="button" href="#install">Install the CLI <span aria-hidden="true">↓</span></a>
-            <a class="quiet" href="#quickstart">See how it works <span aria-hidden="true">→</span></a>
+    <section class="shell hero" aria-labelledby="hero-title">
+      <h1 id="hero-title">Use secrets <span>by reference.</span></h1>
+      <p class="hero-summary">A credential vault and CLI for developers and AI agents. Save a secret once, then pass its reference to the commands that need it.</p>
+      <div class="hero-actions">
+        <a class="button" href="#install">Install Keyref<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg></a>
+        <a class="quiet" href="#quickstart">Quickstart<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#arrow-right"></use></svg></a>
+      </div>
+
+      <div class="example">
+        <div class="example-vault">
+          <div class="example-title"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#lock"></use></svg>Local vault</div>
+          <div class="example-entry">
+            <svg class="icon entry-key" aria-hidden="true"><use href="/assets/icons.svg#key"></use></svg>
+            <div><code class="reference">github-token</code><code class="masked">ghp_****8a2f</code></div>
           </div>
         </div>
-        <figure class="terminal">
-          <figcaption><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span> Terminal</figcaption>
-          <pre><code><span class="comment"># Save a GitHub token in your vault</span>
-<span class="prompt" aria-hidden="true">$</span> keyref set <mark>github-token</mark>
-<span class="result">created "github-token"</span>
-
-<span class="comment"># Use the same ref in a command</span>
-<span class="prompt" aria-hidden="true">$</span> keyref exec --env GH_TOKEN=<mark>github-token</mark> -- \
-    gh api user --jq .login
-<span class="result">octocat</span></code></pre>
+        <figure class="example-terminal">
+          <figcaption class="example-title"><svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#terminal"></use></svg>Terminal</figcaption>
+          <pre><code><span class="prompt" aria-hidden="true">$</span> keyref exec \
+  --env <span class="variable">GH_TOKEN</span>=<span class="reference">github-token</span> -- \
+  gh api user --jq .login
+<span class="terminal-output">octocat</span></code></pre>
         </figure>
-      </section>
-    </div>
+        <dl class="example-legend">
+          <div><dt><code class="variable">GH_TOKEN</code></dt><dd>Variable passed to <code>gh</code></dd></div>
+          <div><dt><code class="reference">github-token</code></dt><dd>Reference looked up by Keyref</dd></div>
+        </dl>
+      </div>
+    </section>
 
     <section class="shell section install" id="install" aria-labelledby="install-title">
-      <div class="section-copy">
+      <div class="section-heading">
         <h2 id="install-title">Install Keyref</h2>
-        <p>Available for macOS and Linux on arm64 and x86-64. The installer verifies the binary against the release’s SHA-256 checksums and places it in <code>~/.local/bin</code>.</p>
+        <p>Available for macOS and Linux on arm64 and x86-64.</p>
       </div>
-      <div class="install-body">
-        <div class="command">
-          <pre><code id="install-command">curl -fsSL https://keyref.sh/install.sh | bash</code></pre>
-          <button type="button" id="copy-install" aria-label="Copy install command" hidden>Copy</button>
-        </div>
-        <p class="install-note">Add <code>~/.local/bin</code> to your <code>PATH</code> if needed. Run <code>keyref --version</code> to check the installation.</p>
-        <div class="downloads">
-          <div>
-            <h3>macOS</h3>
-            <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-darwin-arm64">Apple silicon <span aria-hidden="true">↓</span></a>
-            <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-darwin-amd64">Intel <span aria-hidden="true">↓</span></a>
+      <div class="install-grid">
+        <div class="install-command">
+          <h3>Terminal install</h3>
+          <div class="command">
+            <pre><code id="install-command">curl -fsSL https://keyref.sh/install.sh | bash</code></pre>
+            <button type="button" id="copy-install" hidden>
+              <svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#copy"></use></svg><span>Copy</span><span class="sr-only"> install command</span>
+            </button>
+            <span class="sr-only" role="status" id="copy-status"></span>
           </div>
-          <div>
-            <h3>Linux</h3>
-            <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-linux-arm64">arm64 <span aria-hidden="true">↓</span></a>
-            <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-linux-amd64">x86-64 <span aria-hidden="true">↓</span></a>
-          </div>
+          <p>The installer verifies the binary against the release’s SHA-256 checksum and places it in <code>~/.local/bin</code>. Add that directory to <code>PATH</code> if needed, then run <code>keyref --version</code>.</p>
         </div>
-        <div class="release-links">
-          <a href="https://github.com/lidessen/keyref/releases/latest/download/SHA256SUMS">SHA-256 checksums</a>
-          <a href="https://github.com/lidessen/keyref/releases">Release notes <span aria-hidden="true">↗</span></a>
+        <div class="manual-downloads">
+          <h3>Manual downloads</h3>
+          <div class="downloads">
+            <div>
+              <h4>macOS</h4>
+              <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-darwin-arm64">Apple silicon<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg></a>
+              <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-darwin-amd64">Intel<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg></a>
+            </div>
+            <div>
+              <h4>Linux</h4>
+              <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-linux-arm64">arm64<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg></a>
+              <a href="https://github.com/lidessen/keyref/releases/latest/download/keyref-linux-amd64">x86-64<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#download"></use></svg></a>
+            </div>
+          </div>
+          <div class="release-links">
+            <a href="https://github.com/lidessen/keyref/releases/latest/download/SHA256SUMS">SHA-256 checksums</a>
+            <a href="https://github.com/lidessen/keyref/releases">Release notes<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#external"></use></svg></a>
+          </div>
         </div>
       </div>
     </section>
 
     <section class="shell section quickstart" id="quickstart" aria-labelledby="quickstart-title">
-      <div class="section-copy">
+      <div class="section-heading">
         <h2 id="quickstart-title">Start with a local vault</h2>
-        <p>Try it with a GitHub token and the <code>gh</code> CLI. Keyref passes the value to the child process and redacts matching values in captured output.</p>
-        <a href="https://github.com/lidessen/keyref/blob/main/cli/README.md">Read the CLI guide <span aria-hidden="true">↗</span></a>
+        <p>Try it with a GitHub token and the <code>gh</code> CLI. Keyref redacts matching secret values in captured output.</p>
+        <a class="quiet" href="https://github.com/lidessen/keyref/blob/main/cli/README.md">CLI guide<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#external"></use></svg></a>
       </div>
       <ol class="steps">
         <li>
@@ -95,41 +111,46 @@
         </li>
         <li>
           <h3>Save a credential</h3>
-          <p>Paste the token and press Enter. Keyref hides your input. <code>github-token</code> is the reference you can share with an agent.</p>
+          <p>Paste the token and press Enter. Keyref hides the input.</p>
           <pre><code>keyref set github-token --vault local</code></pre>
         </li>
         <li>
-          <h3>Run a command with the ref</h3>
-          <p>Keyref injects the token as <code>GH_TOKEN</code> for this command.</p>
-          <pre><code>keyref exec --vault local --env GH_TOKEN=github-token -- \
+          <h3>Run a command by reference</h3>
+          <p>Keyref reads <code>github-token</code> from the vault and sets <code>GH_TOKEN</code> for this command.</p>
+          <pre><code>keyref exec --vault local \
+  --env GH_TOKEN=github-token -- \
   gh api user --jq .login</code></pre>
         </li>
       </ol>
     </section>
 
-    <section class="sources" aria-labelledby="sources-title">
-      <div class="shell section sources-inner">
-        <div class="section-copy">
-          <h2 id="sources-title">Choose where credentials live</h2>
-          <p><code>keyref list</code> shows entries and their sources. If more than one vault can accept writes, use <code>--vault</code> when saving.</p>
+    <section class="shell section sources" aria-labelledby="sources-title">
+      <div class="section-heading">
+        <h2 id="sources-title">Choose where credentials live</h2>
+        <p><code>keyref list</code> shows entries and their vaults. Use <code>--vault</code> when saving and more than one vault is writable.</p>
+      </div>
+      <div class="source-options">
+        <div class="source">
+          <svg class="icon source-icon" aria-hidden="true"><use href="/assets/icons.svg#lock"></use></svg>
+          <div><h3>Local vault</h3><p>Encrypted storage on your machine, available offline.</p></div>
         </div>
-        <div class="source-options">
-          <div>
-            <h3>Local vault</h3>
-            <p>Encrypted storage on your machine, available offline.</p>
-          </div>
+        <div class="source">
+          <svg class="icon source-icon" aria-hidden="true"><use href="/assets/icons.svg#cloud"></use></svg>
           <div>
             <h3>GitHub account vault</h3>
-            <p>Access your vault from multiple devices after GitHub sign-in. The server operator manages the encryption keys. Sign-in requires access to the configured server.</p>
-            {{if .}}<a href="/manage/">Open vault <span aria-hidden="true">↗</span></a>{{end}}
-            <a href="https://github.com/lidessen/keyref/blob/main/server/README.md">Self-hosting guide <span aria-hidden="true">↗</span></a>
+            <p>Access your vault from multiple devices after GitHub sign-in. The server operator manages the encryption keys and grants access.</p>
+            {{if .}}<a class="quiet" href="/manage/">Open vault<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#arrow-right"></use></svg></a>{{end}}
+            <a class="quiet" href="https://github.com/lidessen/keyref/blob/main/server/README.md">Self-hosting guide<svg class="icon" aria-hidden="true"><use href="/assets/icons.svg#external"></use></svg></a>
           </div>
         </div>
       </div>
     </section>
   </main>
   <footer class="shell footer">
-    <span>keyref</span>
+    <a class="brand" href="/" aria-label="Keyref home">
+      <img src="/assets/logo.png" width="24" height="24" alt="">
+      <span>keyref</span>
+    </a>
     <nav aria-label="More about Keyref">
       <a href="https://github.com/lidessen/keyref">Source code</a>
       <a href="https://github.com/lidessen/keyref/issues">Report an issue</a>
