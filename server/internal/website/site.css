@@ -1,7 +1,14 @@
 @font-face {
-  font-family: "Geist";
-  src: url("/assets/fonts/geist.woff2") format("woff2");
-  font-weight: 400 800;
+  font-family: "Inter";
+  src: url("/assets/fonts/inter.woff2") format("woff2");
+  font-weight: 400 750;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Recursive";
+  src: url("/assets/fonts/recursive.woff2") format("woff2");
+  font-weight: 450 700;
   font-display: swap;
 }
 
@@ -14,7 +21,7 @@
 
 :root {
   color-scheme: light dark;
-  --sans: "Geist", system-ui, sans-serif;
+  --sans: "Inter", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, monospace;
   --bg: #f7f8f5;
   --surface: #ffffff;
@@ -135,11 +142,13 @@ nav > a:hover { color: var(--ink); text-decoration: underline; }
 .hero h1 {
   max-width: 1010px;
   margin-inline: auto;
-  font-size: clamp(2.7rem, 6.2vw, 5.125rem);
-  line-height: 1.06;
-  letter-spacing: -.027em;
+  font-family: "Recursive", sans-serif;
+  font-size: clamp(2.75rem, 5.8vw, 5rem);
+  line-height: 1.07;
+  letter-spacing: -.014em;
   word-spacing: .025em;
-  font-weight: 650;
+  font-weight: 570;
+  font-variation-settings: "CASL" 0.3;
   text-align: center;
   text-wrap: balance;
 }

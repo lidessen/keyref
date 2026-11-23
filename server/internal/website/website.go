@@ -24,7 +24,7 @@ func Register(mux *http.ServeMux, accountVault bool) {
 	mux.HandleFunc("GET /install.sh", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, installerURL, http.StatusFound)
 	})
-	for _, name := range []string{"site.css", "site.js", "icons.svg", "fonts/geist.woff2", "fonts/ibm-plex-mono.woff2"} {
+	for _, name := range []string{"site.css", "site.js", "icons.svg", "fonts/inter.woff2", "fonts/recursive.woff2", "fonts/ibm-plex-mono.woff2"} {
 		mux.HandleFunc("GET /assets/"+name, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, assets, name)
 		})
