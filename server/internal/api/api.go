@@ -158,10 +158,8 @@ func (s *Server) Handler() http.Handler {
 			}
 			loginPath := r.URL.Path
 			switch r.URL.Path {
-			case "/manage/api/login/device":
+			case "/manage/api/login/github":
 				loginPath = "/v1/remote/login/device"
-			case "/manage/api/login/poll":
-				loginPath = "/v1/remote/login/poll"
 			}
 			if strings.HasPrefix(loginPath, "/v1/remote/login/") {
 				limit := int64(30)

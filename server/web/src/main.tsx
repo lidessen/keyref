@@ -13,14 +13,7 @@ interface Item {
   allow_commands?: string[];
   size: number;
 }
-interface DeviceCode {
-  user_code: string;
-  verification_uri: string;
-  expires_in: number;
-  interval: number;
-}
-
-type Screen = "loading" | "signed-out" | "code" | "ready";
+type Screen = "loading" | "signed-out" | "ready";
 class APIError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code); }
 }
@@ -43,7 +36,7 @@ function message(error: unknown): string {
     const descriptions: Record<string, string> = {
       forbidden: "This GitHub account does not have access to this vault.",
       access_denied: "GitHub authorization was declined.",
-      expired_token: "The sign-in code expired. Start again to get a new one.",
+      github_oauth_unconfigured: "GitHub sign-in has not been configured on this server.",
       item_limit: "This vault is full. Delete an entry before adding another.",
       not_found: "This entry no longer exists. Refresh and try again.",
       conflict: "Could not save this entry. It may already exist, have changed, or the vault may be full.",
@@ -61,16 +54,13 @@ function App() {
   const error = signal("");
   const notice = signal("");
   const busy = signal(false);
-  const code = signal("");
   const editRef = signal("");
   const editID = signal("");
   const editing = signal(false);
   const confirmRef = signal("");
   const confirmID = signal("");
-  let pollGeneration = 0;
   let opener: HTMLElement | null = null;
   const signedOut = derived(() => screen.value !== "signed-out");
-  const signingIn = derived(() => screen.value !== "code");
   const loggedIn = derived(() => screen.value !== "ready");
   const loading = derived(() => screen.value !== "loading");
   const errorHidden = derived(() => error.value === "");
@@ -91,7 +81,6 @@ function App() {
   function clearMessages() { error.value = ""; notice.value = ""; }
   function fail(cause: unknown) {
     if (cause instanceof APIError && cause.status === 401) {
-      pollGeneration++;
       items.value = [];
       editing.value = false;
       confirmRef.value = "";
@@ -110,36 +99,21 @@ function App() {
     clearMessages();
     busy.value = true;
     try {
-      const device = await request<DeviceCode>("login/device", "POST");
-      const verification = new URL(device.verification_uri);
-      if (verification.href !== "https://github.com/login/device") throw new Error("Invalid authorization URL");
-      code.value = device.user_code;
-      screen.value = "code";
-      const generation = ++pollGeneration;
-      const deadline = Date.now() + device.expires_in * 1000;
-      let interval = Math.max(device.interval, 1) * 1000;
-      while (generation === pollGeneration && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, interval));
-        if (generation !== pollGeneration) return;
-        try {
-          await request<void>("login/poll", "POST");
-          if (generation === pollGeneration) await refresh();
-          return;
-        } catch (cause) {
-          if (cause instanceof APIError && cause.status === 409 && cause.code === "authorization_pending") continue;
-          if (cause instanceof APIError && cause.status === 409 && cause.code === "slow_down") { interval += 5000; continue; }
-          throw cause;
-        }
+      const result = await request<{ authorization_url: string }>("login/github", "POST");
+      const authorization = new URL(result.authorization_url);
+      if (authorization.origin !== "https://github.com" || authorization.pathname !== "/login/oauth/authorize") {
+        throw new Error("Invalid authorization URL");
       }
-      if (generation === pollGeneration) { screen.value = "signed-out"; error.value = message(new APIError(409, "expired_token")); }
-    } catch (cause) { screen.value = "signed-out"; error.value = message(cause); }
-    finally { busy.value = false; }
+      location.assign(authorization.href);
+    } catch (cause) {
+      error.value = message(cause);
+      busy.value = false;
+    }
   }
   async function logout() {
     clearMessages();
     try { await request("session", "DELETE"); }
     catch (cause) { if (!(cause instanceof APIError && cause.status === 401)) { fail(cause); return; } }
-    pollGeneration++;
     items.value = [];
     query.value = "";
     editing.value = false;
@@ -217,6 +191,13 @@ function App() {
     } catch (cause) { fail(cause); }
     finally { busy.value = false; }
   }
+  const loginStatus = new URLSearchParams(location.search).get("login");
+  if (loginStatus) {
+    history.replaceState(null, "", "/manage/");
+    error.value = loginStatus === "forbidden"
+      ? "This GitHub account does not have access to this vault."
+      : loginStatus === "cancelled" ? "GitHub sign-in was cancelled." : "GitHub sign-in failed. Please try again.";
+  }
   void refresh();
 
   return <div className="app">
@@ -239,14 +220,6 @@ function App() {
         <div className="login-art" aria-hidden="true">
           <img src="/manage/assets/login-illustration.webp" alt="" width="1000" height="1000" decoding="async" />
         </div>
-      </section>
-      <section className="code-panel" hidden={signingIn}>
-        <h1>Connect your account</h1>
-        <p className="lead">Enter this code on GitHub to open your vault.</p>
-        <div className="device-code">{code}</div>
-        <a className="github-link" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">Open GitHub <span aria-hidden="true">↗</span></a>
-        <p className="waiting"><span className="pulse" />Waiting for authorization…</p>
-        <Button variant="quiet" onClick={() => { pollGeneration++; busy.value = false; screen.value = "signed-out"; }}>Cancel</Button>
       </section>
       <section className="vault" hidden={loggedIn}>
         <div className="vault-heading">

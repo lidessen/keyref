@@ -24,15 +24,14 @@ import (
 var browserAssets embed.FS
 
 const browserSession = "keyref_session"
-const browserDevice = "keyref_device"
 
 var browserRef = regexp.MustCompile(`^(?:[a-z]|[a-z][a-z0-9-]{0,62}[a-z0-9])$`)
 
 func (v *Vault) registerBrowser(mux *http.ServeMux) {
 	mux.HandleFunc("GET /manage/{$}", v.browserPage)
 	mux.HandleFunc("GET /manage/assets/{asset}", v.browserAsset)
-	mux.HandleFunc("POST /manage/api/login/device", v.browserBegin)
-	mux.HandleFunc("POST /manage/api/login/poll", v.browserPoll)
+	mux.HandleFunc("POST /manage/api/login/github", v.oauthStart)
+	mux.HandleFunc("GET "+OAuthCallbackPath, v.oauthCallback)
 	mux.HandleFunc("DELETE /manage/api/session", v.browserAuthorized(v.browserLogout))
 	mux.HandleFunc("GET /manage/api/items", v.browserAuthorized(v.browserList))
 	mux.HandleFunc("POST /manage/api/items", v.browserAuthorized(v.browserCreate))
@@ -106,62 +105,6 @@ func browserMutation(r *http.Request) bool {
 		}
 	}
 	return true
-}
-
-func (v *Vault) browserBegin(w http.ResponseWriter, r *http.Request) {
-	if !browserMutation(r) {
-		failure(w, http.StatusForbidden, "forbidden")
-		return
-	}
-	device, err := v.github.begin(r.Context())
-	if err != nil {
-		failure(w, http.StatusBadGateway, "github_unavailable")
-		return
-	}
-	v.cookie(w, r, browserDevice, device.DeviceCode, device.ExpiresIn)
-	respond(w, http.StatusOK, struct {
-		UserCode        string `json:"user_code"`
-		VerificationURI string `json:"verification_uri"`
-		ExpiresIn       int    `json:"expires_in"`
-		Interval        int    `json:"interval"`
-	}{device.UserCode, device.VerificationURI, device.ExpiresIn, device.Interval})
-}
-
-func (v *Vault) browserPoll(w http.ResponseWriter, r *http.Request) {
-	if !browserMutation(r) {
-		failure(w, http.StatusForbidden, "forbidden")
-		return
-	}
-	device, err := r.Cookie(browserDevice)
-	if err != nil || len(device.Value) < 16 || len(device.Value) > 256 {
-		failure(w, http.StatusBadRequest, "invalid_request")
-		return
-	}
-	account, pending, err := v.github.poll(r.Context(), device.Value)
-	if err != nil {
-		failure(w, http.StatusBadGateway, "github_unavailable")
-		return
-	}
-	if pending != "" {
-		if pending == "access_denied" || pending == "expired_token" {
-			v.cookie(w, r, browserDevice, "", -1)
-		}
-		failure(w, http.StatusConflict, pending)
-		return
-	}
-	v.cookie(w, r, browserDevice, "", -1)
-	if !v.allowed[account] {
-		failure(w, http.StatusForbidden, "forbidden")
-		return
-	}
-	session, err := v.issue(r.Context(), account)
-	if err != nil {
-		failure(w, http.StatusInternalServerError, "internal")
-		return
-	}
-	defer clear(session.VaultKey)
-	v.cookie(w, r, browserSession, session.Token, int((12 * time.Hour).Seconds()))
-	w.WriteHeader(http.StatusNoContent)
 }
 
 type browserAccountHandler func(http.ResponseWriter, *http.Request, int64, [32]byte)

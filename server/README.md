@@ -67,7 +67,12 @@ serves the existing paired sync API.
 ## Browser management
 
 When the account vault is enabled, visit `/manage/` on the server's HTTPS
-origin. GitHub device authorization grants access to that account's entries.
+origin. Configure browser sign-in on the same GitHub OAuth App by setting its
+authorization callback to `https://<host>/manage/api/login/github/callback`.
+Set the server-only `KEYREF_GITHUB_CLIENT_SECRET` and set
+`KEYREF_GITHUB_CALLBACK_URL` to that exact callback URL. The browser uses the
+OAuth web flow with PKCE and the existing GitHub account allowlist. Keep
+device authorization enabled on the app for CLI sign-in.
 The page displays masked metadata and supports creating, editing, and deleting
 credentials. A blank value while editing keeps the existing secret.
 

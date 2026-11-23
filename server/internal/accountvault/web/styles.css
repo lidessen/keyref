@@ -22,8 +22,6 @@
   --entry-ink: #3c805a;
   --chip-bg: #e9eee8;
   --chip-ink: #718277;
-  --accent: #233d32;
-  --accent-ink: #fff;
   --overlay: #1b2924a8;
   --shadow: #10271933;
   color: var(--ink);
@@ -52,8 +50,6 @@
     --entry-ink: #9ad7b1;
     --chip-bg: #32423a;
     --chip-ink: #c2d7ca;
-    --accent: #a6dabb;
-    --accent-ink: #1a3729;
     --overlay: #090f0cd9;
     --shadow: #0008;
   }
@@ -91,11 +87,6 @@ h1 { margin-bottom: 16px; font-size: clamp(38px, 5vw, 58px); line-height: 1.08; 
   height: 100%;
   object-fit: contain;
 }
-.code-panel { max-width: 480px; padding: 88px 0; }
-.device-code { display: inline-block; margin: 8px 0 24px; padding: 18px 24px; border-radius: 12px; background: var(--surface); border: 1px solid var(--detail-line); font: 700 29px ui-monospace, monospace; letter-spacing: .08em; }
-.github-link { display: block; width: fit-content; color: var(--accent-ink); background: var(--accent); border-radius: 9px; padding: 14px 20px; font-weight: 650; text-decoration: none; }
-.waiting { margin: 28px 0 12px; color: var(--muted); font-size: 14px; }
-.pulse { display: inline-block; width: 8px; height: 8px; margin-right: 10px; background: #3eaa71; border-radius: 100%; }
 .vault { padding-top: 72px; }
 .vault-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding-bottom: 48px; }
 .vault-heading h1 { margin-block: 0; font-size: 44px; }

@@ -26,6 +26,7 @@ type Vault struct {
 	github      githubProvider
 	allowed     map[int64]bool
 	vercel      bool
+	oauth       *browserOAuth
 }
 
 func Open(ctx context.Context, st *store.Store, encodedKey, clientID, ids string) (*Vault, error) {

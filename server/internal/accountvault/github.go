@@ -72,16 +72,21 @@ func (g githubProvider) poll(ctx context.Context, code string) (int64, string, e
 	if token.AccessToken == "" {
 		return 0, "", errors.New("missing GitHub access token")
 	}
+	id, err := g.userID(ctx, token.AccessToken)
+	return id, "", err
+}
+
+func (g githubProvider) userID(ctx context.Context, token string) (int64, error) {
 	var user struct {
 		ID int64 `json:"id"`
 	}
-	if err := g.request(ctx, http.MethodGet, g.apiURL+"/user", token.AccessToken, nil, &user); err != nil {
-		return 0, "", err
+	if err := g.request(ctx, http.MethodGet, g.apiURL+"/user", token, nil, &user); err != nil {
+		return 0, err
 	}
 	if user.ID <= 0 {
-		return 0, "", errors.New("invalid GitHub user ID")
+		return 0, errors.New("invalid GitHub user ID")
 	}
-	return user.ID, "", nil
+	return user.ID, nil
 }
 
 func newGitHub(clientID string) githubProvider {

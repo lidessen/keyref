@@ -164,6 +164,9 @@ func serve(args []string) error {
 			return err
 		}
 		vault.SetVercel(vercel)
+		if err := vault.ConfigureBrowserOAuth(os.Getenv("KEYREF_GITHUB_CLIENT_SECRET"), os.Getenv("KEYREF_GITHUB_CALLBACK_URL")); err != nil {
+			return err
+		}
 		managedVault = vault.Handler()
 	}
 	handler := api.New(st, quotas.NewManager(st), pow.NewIssuer(), api.Config{
