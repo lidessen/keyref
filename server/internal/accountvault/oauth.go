@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const OAuthCallbackPath = "/manage/api/login/github/callback"
+const OAuthCallbackPath = "/v1/remote/oauth/callback"
 
 type browserOAuth struct {
 	secret   string

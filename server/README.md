@@ -68,7 +68,7 @@ serves the existing paired sync API.
 
 When the account vault is enabled, visit `/manage/` on the server's HTTPS
 origin. Configure browser sign-in on the same GitHub OAuth App by setting its
-authorization callback to `https://<host>/manage/api/login/github/callback`.
+authorization callback to `https://<host>/v1/remote/oauth/callback`.
 Set the server-only `KEYREF_GITHUB_CLIENT_SECRET` and set
 `KEYREF_GITHUB_CALLBACK_URL` to that exact callback URL. The browser uses the
 OAuth web flow with PKCE and the existing GitHub account allowlist. Keep
