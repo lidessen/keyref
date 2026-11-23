@@ -82,6 +82,50 @@ func (c *remoteClient) request(ctx context.Context, method, path string, in, out
 	return nil
 }
 
+func newRemoteClient(p config.Paths) (*remoteClient, error) {
+	u, err := url.Parse(config.Origin(p))
+	if err != nil || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		(u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1"))) {
+		return nil, errors.New("configure an HTTPS server origin with keyref server set")
+	}
+	c := &remoteClient{origin: u.Scheme + "://" + strings.ToLower(u.Host), http: &http.Client{
+		Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+	return c, nil
+}
+
+func (c *remoteClient) keyringSlot(p config.Paths) string {
+	return c.origin + "|" + filepath.Clean(p.Dir)
+}
+
+func (c *remoteClient) loadSession(p config.Paths, ks keyring.SecretStore) error {
+	state, err := ks.Get(remoteKeyringService, c.keyringSlot(p))
+	if err != nil {
+		return err
+	}
+	rawState := []byte(state)
+	err = json.Unmarshal(rawState, &c.session)
+	clear(rawState)
+	if err != nil || !validRemoteSession(c.session) {
+		clear(c.session.VaultKey)
+		return errRemoteSession
+	}
+	return nil
+}
+
+var errRemoteSession = errors.New("remote login state is invalid; sign in with keyref remote login")
+
+func remoteSessionError(err error) int {
+	switch {
+	case errors.Is(err, keyring.ErrNotFound):
+		return fatalf(exitcode.SessionLocked, "sign in with keyref remote login")
+	case errors.Is(err, errRemoteSession):
+		return fatalf(exitcode.SessionLocked, "%v", err)
+	default:
+		return fatalf(1, "could not access remote login in keyring")
+	}
+}
+
 func cmdRemote(args []string) int {
 	if len(args) == 0 {
 		return fatalf(2, "usage: keyref remote <login|logout|list|get|set|delete|exec>")
@@ -90,18 +134,14 @@ func cmdRemote(args []string) int {
 	if err != nil {
 		return fatalf(1, "could not resolve keyref configuration")
 	}
-	u, err := url.Parse(config.Origin(p))
-	if err != nil || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
-		(u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1"))) {
-		return fatalf(2, "configure an HTTPS server origin with keyref server set")
+	c, err := newRemoteClient(p)
+	if err != nil {
+		return fatalf(2, "%v", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	c := remoteClient{origin: u.Scheme + "://" + strings.ToLower(u.Host), http: &http.Client{
-		Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
 	ks := secretStore()
-	slot := c.origin + "|" + filepath.Clean(p.Dir)
+	slot := c.keyringSlot(p)
 	cmd, args := args[0], args[1:]
 	if cmd == "login" {
 		if len(args) != 0 {
@@ -113,19 +153,8 @@ func cmdRemote(args []string) int {
 		fmt.Println("Signed in to remote vault.")
 		return 0
 	}
-	state, err := ks.Get(remoteKeyringService, slot)
-	if errors.Is(err, keyring.ErrNotFound) {
-		return fatalf(exitcode.SessionLocked, "sign in with keyref remote login")
-	}
-	if err != nil {
-		return fatalf(1, "could not access remote login in keyring")
-	}
-	rawState := []byte(state)
-	err = json.Unmarshal(rawState, &c.session)
-	clear(rawState)
-	if err != nil || !validRemoteSession(c.session) {
-		clear(c.session.VaultKey)
-		return fatalf(exitcode.SessionLocked, "remote login state is invalid")
+	if err := c.loadSession(p, ks); err != nil {
+		return remoteSessionError(err)
 	}
 	defer clear(c.session.VaultKey)
 	switch cmd {
@@ -146,17 +175,9 @@ func cmdRemote(args []string) int {
 		if len(args) != 0 {
 			return fatalf(2, "usage: keyref remote list")
 		}
-		var items []remote.Item
-		if err := c.request(ctx, http.MethodGet, "items", nil, &items); err != nil {
+		metas, err := c.listMetadata(ctx)
+		if err != nil {
 			return remoteFail(err)
-		}
-		metas := make([]remote.Metadata, 0, len(items))
-		for _, item := range items {
-			meta, err := c.metadata(item)
-			if err != nil {
-				return remoteFail(err)
-			}
-			metas = append(metas, meta)
 		}
 		sort.Slice(metas, func(i, j int) bool { return metas[i].Ref < metas[j].Ref })
 		for _, meta := range metas {
@@ -191,6 +212,22 @@ func cmdRemote(args []string) int {
 	default:
 		return fatalf(2, "unknown remote command")
 	}
+}
+
+func (c *remoteClient) listMetadata(ctx context.Context) ([]remote.Metadata, error) {
+	var items []remote.Item
+	if err := c.request(ctx, http.MethodGet, "items", nil, &items); err != nil {
+		return nil, err
+	}
+	metas := make([]remote.Metadata, 0, len(items))
+	for _, item := range items {
+		meta, err := c.metadata(item)
+		if err != nil {
+			return nil, err
+		}
+		metas = append(metas, meta)
+	}
+	return metas, nil
 }
 
 func validRemoteSession(s remote.Session) bool {
@@ -303,16 +340,19 @@ func (c *remoteClient) set(ctx context.Context, args []string) int {
 	if fs.NArg() != 1 || !local.ValidRef(fs.Arg(0)) {
 		return fatalf(2, "usage: keyref remote set [--raw] [--allow-command NAME] REF")
 	}
-	value, err := readLocalSecret(os.Stdin, *raw)
+	return c.putFromStdin(ctx, fs.Arg(0), *raw, local.PutOptions{AllowCommands: commands})
+}
+
+func (c *remoteClient) putFromStdin(ctx context.Context, ref string, raw bool, opts local.PutOptions) int {
+	value, err := readLocalSecret(os.Stdin, raw)
 	defer clear(value)
 	if err != nil || len(value) == 0 || len(value) > remote.MaxSecret {
 		return fatalf(2, "remote secret must be between 1 and 65536 bytes")
 	}
-	ref := fs.Arg(0)
 	id := remote.ItemID(c.session.VaultKey, ref)
 	key := remote.CipherKey(c.session.VaultKey)
 	defer clear(key)
-	rawMeta, err := json.Marshal(remote.Metadata{Ref: ref, Mask: local.Mask(value), Size: len(value), AllowCommands: commands})
+	rawMeta, err := json.Marshal(remote.Metadata{Ref: ref, Mask: local.Mask(value), Size: len(value), AllowCommands: opts.AllowCommands, Description: opts.Description})
 	if err != nil || len(rawMeta) > remote.MaxMetadata {
 		return fatalf(2, "remote metadata exceeds size limit")
 	}

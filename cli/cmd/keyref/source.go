@@ -316,9 +316,19 @@ func cmdSet(args []string) int {
 		return fatalf(2, "invalid ref %q: a ref is one lowercase letter, or 2-64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit", ref)
 	}
 	p := mustPaths()
-	spec, err := resolveSource(p, *sourceName)
+	opts := local.PutOptions{Description: *description, AllowCommands: allowCommands, AllowedHosts: allowHosts}
+	spec, client, err := writableSource(p, *sourceName)
 	if err != nil {
-		return fatalf(1, "%v", err)
+		return fatalf(2, "%v", err)
+	}
+	if client != nil {
+		defer clear(client.session.VaultKey)
+		if len(allowHosts) > 0 {
+			return fatalf(2, "--allow-host is available for local sources")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return client.putFromStdin(ctx, ref, *raw, opts)
 	}
 	if spec.Kind != source.KindLocal {
 		return fatalf(2, "the paired vault is read-only for the CLI; create or edit items on iOS")
@@ -333,11 +343,7 @@ func cmdSet(args []string) int {
 		return fatalf(1, "%v", err)
 	}
 	defer secret.Wipe(value)
-	created, err := vault.Put(context.Background(), ref, value, local.PutOptions{
-		Description:   *description,
-		AllowCommands: allowCommands,
-		AllowedHosts:  allowHosts,
-	})
+	created, err := vault.Put(context.Background(), ref, value, opts)
 	if err != nil {
 		return fatalf(1, "could not store %q: %v", ref, err)
 	}
@@ -483,23 +489,23 @@ func localEntry(m local.Meta) meta.Entry {
 	}
 }
 
-// runLocalList prints every local entry's meta. The secret column is
+// localList reads every local entry's meta. The secret column is
 // never read: list decrypts the meta blob only.
-func runLocalList(p config.Paths, spec source.Spec, format string) int {
+func localList(p config.Paths, spec source.Spec) ([]meta.Entry, int) {
 	vault, err := openLocal(p, spec)
 	if err != nil {
-		return localOpenError(err)
+		return nil, localOpenError(err)
 	}
 	defer vault.Close()
 	metas, err := vault.List(context.Background())
 	if err != nil {
-		return fatalf(1, "could not list source %q: %v", spec.Name, err)
+		return nil, fatalf(1, "could not list source %q: %v", spec.Name, err)
 	}
 	entries := make([]meta.Entry, len(metas))
 	for i, m := range metas {
 		entries[i] = localEntry(m)
 	}
-	return printEntries(entries, format)
+	return entries, 0
 }
 
 // readLocalSecret reads one secret from stdin. On a terminal it reads one

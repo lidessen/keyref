@@ -145,13 +145,14 @@ func usage(w *os.File) {
 
 commands:
   init [--source NAME]    create the local vault (key goes to the OS keyring)
-  set <ref>               store a secret read from stdin (--raw keeps every byte)
+  set <ref> [--source NAME]
+                          store stdin in the only writable source or the one selected
   import-env              import selected variables into a local vault
   get <ref> [--format json] [--reveal]
                           one entry; masked by default, --reveal prints the
                           raw secret bytes (local sources only)
   delete <ref>            delete an entry from a local source
-  list [--format json]    refs, names, masks (local and paired vaults)
+  list [--format json]    refs, names, masks and sources across configured vaults
   exec [flags] -- <argv>  run a command with injected secrets
   source <list|default|add|remove>
                           show or configure credential sources
@@ -172,10 +173,13 @@ commands:
 sources:
   local                   the standalone offline vault (the default)
   sync                    the paired iOS vault (read-only for the CLI)
-  Every data command takes --source NAME; KEYREF_SOURCE does the same, and
-  "keyref source default NAME" persists the choice. The local master key
+  remote                  the signed-in GitHub account vault
+  --source NAME or KEYREF_SOURCE selects one source. By default, list reads
+  all configured sources and set needs an explicit choice if several are writable.
+  For other source-aware commands, "keyref source default NAME" persists
+  the default. The local master key
   lives in the OS keyring; KEYREF_LOCAL_MASTER (32 random bytes, standard
-  base64) overrides it for headless use. Both sources store encrypted meta;
+  base64) overrides it for headless use. Vaults store encrypted meta;
   "list" and masked "get" read it without decrypting the secret.
 
 exec flags:
@@ -413,34 +417,34 @@ func cmdList(args []string) int {
 	format := fs.String("format", "text", "text | json")
 	sourceName := fs.String("source", "", "source to operate on")
 	prepareHelp(fs, args)
-	if _, err := parseArgs(fs, args); err != nil {
+	rest, err := parseArgs(fs, args)
+	if err != nil {
 		return parseExit(err)
 	}
-	p := mustPaths()
-	spec, err := resolveSource(p, *sourceName)
-	if err != nil {
-		return fatalf(1, "%v", err)
+	if len(rest) != 0 || (*format != "text" && *format != "json") {
+		return fatalf(2, "usage: keyref list [--format text|json] [--source NAME]")
 	}
-	if spec.Kind == source.KindLocal {
-		return runLocalList(p, spec, *format)
-	}
+	return listSources(mustPaths(), *sourceName, *format)
+}
+
+func syncList(p config.Paths) ([]meta.Entry, int) {
 	st, err := existingStore(p)
 	if errors.Is(err, errNotPaired) {
-		return fatalf(1, "not paired; run keyref pair first")
+		return nil, fatalf(1, "not paired; run keyref pair first")
 	}
 	if err != nil {
-		return fatalf(1, "%v", err)
+		return nil, fatalf(1, "%v", err)
 	}
 	defer st.Close()
 	if locked(p) {
-		return fatalf(exitcode.SessionLocked, "session is locked; run keyref unlock")
+		return nil, fatalf(exitcode.SessionLocked, "session is locked; run keyref unlock")
 	}
 	id := mustIdentity()
 	entries, err := meta.Items(st, id)
 	if err != nil {
-		return unwrapOrGeneric(os.Stderr, err)
+		return nil, unwrapOrGeneric(os.Stderr, err)
 	}
-	return printEntries(entries, *format)
+	return entries, 0
 }
 
 // printEntries renders the same table and JSON array for every source,
@@ -457,9 +461,9 @@ func printEntries(entries []meta.Entry, format string) int {
 		}
 		return 0
 	}
-	fmt.Printf("%-24s %-28s %-10s %s\n", "REF", "NAME", "TYPE", "MASKED")
+	fmt.Printf("%-24s %-28s %-10s %-16s %s\n", "REF", "NAME", "TYPE", "SOURCE", "MASKED")
 	for _, e := range entries {
-		fmt.Printf("%-24s %-28s %-10s %s\n", e.Ref, truncate(e.Name, 28), e.Type, e.Masked)
+		fmt.Printf("%-24s %-28s %-10s %-16s %s\n", e.Ref, truncate(e.Name, 28), e.Type, e.Source, e.Masked)
 	}
 	return 0
 }

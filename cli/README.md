@@ -2,7 +2,7 @@
 
 The command line for AI agents. The binary is called `keyref`.
 
-One command surface covers every credential source. A **source** is a backend the commands read from and write to: the standalone **local** vault (the default, offline, no pairing) or the **sync** vault (the paired owner vault, read-only for the CLI; frozen while the owner app is deferred). There is no `local` subcommand — `keyref set` on the default source *is* the local store.
+A **source** is a place where Keyref stores credentials. The CLI supports offline local vaults, a GitHub account vault, and the frozen paired owner vault.
 
 On the paired vault the stdout never contains secret plaintext. A local source has one explicit exception: `keyref get --reveal`, which a person has to ask for by name and confirm on the controlling terminal.
 
@@ -13,11 +13,11 @@ Commands (design §12.2 and §17, implemented):
 | Command | Purpose |
 | --- | --- |
 | `keyref init` | Create the local vault; the master key goes to the OS keyring |
-| `keyref set <ref>` | Store a secret read from stdin (`--raw` keeps every byte); local sources |
+| `keyref set <ref>` | Store a secret read from stdin (`--raw` keeps every byte) in the selected writable vault |
 | `keyref import-env --file PATH --map NAME=REF` | Import explicitly selected assignments into a local vault |
 | `keyref get <ref>` | One entry from encrypted meta: names, descriptions, `ref`, masks. `--reveal` prints the raw bytes (local sources only) |
 | `keyref delete <ref>` | Delete an entry (local sources) |
-| `keyref list` | Names, descriptions, `ref`, masks from encrypted meta (local and paired vaults) |
+| `keyref list` | Names, refs, masks and source names across configured vaults |
 | `keyref exec -- ...` | Inject secrets into a child process, redact stdout/stderr; supports `--env`, `--stdin`, `--stdin-login`, `--fd`, `--pty`/`--reply` |
 | `keyref source list\|default\|add\|remove` | Show or configure the sources |
 | `keyref pair` | Generate a device key, show a QR code in the terminal, pair with the owner vault (owner app deferred; path frozen) |
@@ -27,17 +27,20 @@ Commands (design §12.2 and §17, implemented):
 | `keyref --version` | Print the CLI version; the MCP `serverInfo.version` is the same value |
 | `keyref sync` | Pull the ciphertext within the granted scope |
 | `keyref server` | View or set the sync server URL |
-| `keyref mcp [--source NAME]` | JSON-RPC 2.0 (MCP) over stdio: the tools are only `list` / `get` / `exec`, with the same semantics as the CLI (design §7.8). The source is selected once at startup by the usual order (`--source`, `KEYREF_SOURCE`, the configured default, `local`) and stays fixed for the whole session, so one server serves either source with the same three tools (design §17.5) |
+| `keyref mcp [--source NAME]` | JSON-RPC 2.0 (MCP) over stdio: the tools are only `list` / `get` / `exec`, with a single vault (design §7.8). The source is selected once at startup by the usual order (`--source`, `KEYREF_SOURCE`, the configured default, `local`) and stays fixed for the whole session, so one server serves either source with the same three tools (design §17.5) |
 
 On the paired vault there is no `reveal`, no `export` and no `--print`; the JSON of `get` has no `value` field.
 
 ### Sources
 
-Every data command takes `--source NAME`. `KEYREF_SOURCE` does the same, and `keyref source default NAME` persists the choice. With none of them set, the source is `local` — or `sync`, if this data directory already held a paired vault before sources existed.
+By default, `keyref list` shows entries across initialized local vaults, the signed-in account vault, and the paired vault if present. Output identifies each source, including when a ref appears in multiple vaults. `keyref list --source NAME` filters the results.
+
+`keyref set REF` writes to the only initialized writable vault. With several writable vaults, choose one with `--source NAME`. The `KEYREF_SOURCE` environment variable also selects a source for either command. Other source-aware commands use the configured default when neither override is provided.
 
 | Source | Kind | Notes |
 | --- | --- | --- |
 | `local` | local | The standalone offline vault at `<data dir>/local.db`. Read and write |
+| `remote` | remote | The account vault for the current server. Read and write after `keyref remote login` |
 | `sync` | sync | The paired owner vault. Read only: the CLI may never create, edit or delete an item (design §2.1); frozen while the owner app is deferred |
 
 `keyref source add NAME --path /absolute/vault.db` registers another local vault; `keyref source remove NAME` drops it from the configuration and leaves its file alone. A local vault's directory must be private (mode 0700) — keyref refuses to create or open one otherwise.
@@ -158,14 +161,15 @@ origin and run the GitHub device authorization flow:
 ```sh
 keyref server set https://keys.example.com
 keyref remote login
-keyref remote set --allow-command curl example-token < /path/to/token
+keyref set example-token --source remote --allow-command curl < /path/to/token
 keyref remote get example-token
-keyref remote list
+keyref list
 keyref remote delete example-token
 keyref remote logout
 ```
 
-`remote get` and `remote list` display masks. For command injection,
+Omit `--source remote` when the account vault is the only writable source.
+`remote get` and `list` display masks. For command injection,
 use `keyref remote exec --env NAME=REF -- COMMAND ...`. Set an exact
 `--allow-command` for each consuming command when writing an entry.
 The server operator holds the account vault's wrapping key and can

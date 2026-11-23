@@ -2,7 +2,7 @@
 
 keyref is a secret manager for humans and a secret broker for AI agents. A human keeps API keys, tokens, passwords and notes in a vault; an agent **uses** those secrets through the CLI, and the content the tools hand back to the model contains **no plaintext**.
 
-Today the usable vault is the local source, on the same machine as the CLI. The human-facing app is deferred, and the paired/sync path is frozen until a replacement owner client exists. An optional self-hosted account vault supports GitHub login and direct CLI read/write with server-managed keys. See the [account vault setup](server/README.md#github-account-vault).
+Keyref supports an offline vault on the same machine as the CLI and a GitHub account vault on a server. The human-facing app is deferred, and the paired/sync path is frozen until a replacement owner client exists. An optional self-hosted account vault supports GitHub login and direct CLI read/write with server-managed keys. See the [account vault setup](server/README.md#github-account-vault).
 
 Typical use:
 
@@ -61,7 +61,7 @@ Turso Cloud database from the Vercel Marketplace. See the
 
 ## Two sources, one command surface
 
-`keyref` reads and writes **sources**. `local` is a standalone offline vault on this machine and is the default; `sync` is the paired owner vault, which the CLI may read but never write. Every data command takes `--source NAME`, `KEYREF_SOURCE` does the same, and `keyref source default NAME` persists the choice. With the owner app deferred, `sync` is frozen and not a supported end-user path yet.
+Keyref stores credentials in local vaults and a GitHub account vault. Run `keyref list` to see entries across configured vaults with their source names. `keyref set REF` uses the only writable vault, and requires `--source NAME` when several are configured. The frozen paired `sync` vault remains read-only for the CLI.
 
 ```sh
 keyref init                              # create the local vault (key → OS keyring)
@@ -71,7 +71,7 @@ keyref get my-ref                        # ref, mask, size — never the value
 keyref exec --env TOKEN=my-ref -- curl https://api.example.com
 ```
 
-The local source is what this README's commands use: same command surface, no phone, no server, no approvals. See [cli/README.md](cli/README.md).
+This example assumes the local vault is the only writable source. See the [CLI guide](cli/README.md) for account login and source selection.
 
 ## Decisions already made
 

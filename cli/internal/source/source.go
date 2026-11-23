@@ -30,13 +30,16 @@ const (
 	// KindSync is the paired iOS vault. It is read-only for the CLI:
 	// only an owner device may create, edit or delete items.
 	KindSync Kind = "sync"
+	// KindRemote is the signed-in account vault.
+	KindRemote Kind = "remote"
 )
 
 const (
 	// LocalName is the built-in standalone vault.
 	LocalName = "local"
 	// SyncName is the built-in paired vault.
-	SyncName = "sync"
+	SyncName   = "sync"
+	RemoteName = "remote"
 	// EnvSource overrides the configured default source.
 	EnvSource = "KEYREF_SOURCE"
 	// FileName is the sources configuration inside the 0700 data directory.
@@ -214,7 +217,7 @@ func Add(p config.Paths, name, path string) (Spec, error) {
 	if !validName(name) {
 		return Spec{}, fmt.Errorf("%w: a source name is 1 to 32 characters of a-z, 0-9, '-' or '_'", ErrInvalid)
 	}
-	if _, built := builtins(p)[name]; built {
+	if _, built := builtins(p)[name]; built || name == RemoteName {
 		return Spec{}, fmt.Errorf("%w: %q", ErrBuiltIn, name)
 	}
 	var spec Spec

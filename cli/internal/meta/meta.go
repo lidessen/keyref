@@ -25,6 +25,7 @@ var ErrNoViewGrant = errors.New("meta: no view grant for item")
 // Entry is one row of list/get output. There is deliberately no value
 // field (design.md §12.2, §15).
 type Entry struct {
+	Source      string `json:"source,omitempty"`
 	Ref         string `json:"ref"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
