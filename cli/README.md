@@ -24,6 +24,7 @@ Commands (design §12.2 and §17, implemented):
 | `keyref session` | Establish or renew a server session (challenge for a token, protocol §6.7) |
 | `keyref status` | Report the selected source (`--all` for every configured one): for `local`, whether the vault file exists, where the master key comes from (OS keyring or `KEYREF_LOCAL_MASTER`) and the lock flag; for `sync`, the server, pairing, session and remaining grant lifetime |
 | `keyref lock` / `keyref unlock` | Set or clear the lock flag (`<data dir>/locked`); while set, no unwrap path runs |
+| `keyref update [--check]` | Check for or install the latest stable CLI release from GitHub, using its SHA-256 manifest |
 | `keyref --version` | Print the CLI version; the MCP `serverInfo.version` is the same value |
 | `keyref sync` | Pull the ciphertext within the granted scope |
 | `keyref server` | View or set the sync server URL |

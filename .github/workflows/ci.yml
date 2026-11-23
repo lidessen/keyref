@@ -4,41 +4,79 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
         with:
-          go-version: stable
-      - name: Vet
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - name: Vet and unit tests
         run: |
-          go vet -C server ./...
-          go vet -C cli ./...
-          go vet -C lib ./...
-          go vet -C proto ./...
-          go vet -C tools/vectordump ./...
-      - name: Unit tests
-        run: |
-          go test -C server ./...
-          go test -C cli ./...
-          go test -C lib ./...
-          go test -C proto ./...
-          go test -C tools/vectordump ./...
+          for module in server cli lib proto tools/vectordump; do
+            go vet -C "$module" ./...
+            go test -C "$module" ./...
+          done
       - name: Modules build outside the workspace
         run: |
-          GOWORK=off go build -C cli ./...
-          GOWORK=off go build -C lib ./...
-          GOWORK=off go build -C server ./...
-          GOWORK=off go build -C tools/vectordump ./...
+          export GOWORK=off
+          for module in cli lib proto server tools/vectordump; do
+            go build -C "$module" ./...
+          done
       - name: End-to-end (CLI against a real server)
         run: go test -C cli -tags=e2e ./e2e
 
+  cli-install:
+    name: CLI installation (${{ matrix.platform }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: macos-15
+            platform: darwin/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - name: Build and install a release candidate
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          bash -n scripts/install.sh
+          ./scripts/build-release.sh v0.0.0 "$RUNNER_TEMP/keyref-release" "$PLATFORM"
+          ./scripts/test-install.sh "$RUNNER_TEMP/keyref-release" v0.0.0
+
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Build the server image (same one the hosted deployment runs)
-        run: docker build -f server/Dockerfile -t keyref-server:ci .
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build and smoke-test the self-hosted server image
+        run: |
+          docker build -f server/Dockerfile -t keyref-server:ci .
+          docker run --rm keyref-server:ci version
+      - name: Build the Vercel server image
+        run: docker build -f Dockerfile.vercel -t keyref-vercel:ci .

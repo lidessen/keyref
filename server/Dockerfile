@@ -6,7 +6,7 @@
 # The builder writes its own go.work with only ./proto and ./server so
 # the image does not depend on the CLI module.
 
-FROM golang:1.27-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 WORKDIR /src
 
 COPY proto/go.mod proto/go.sum ./proto/
@@ -19,12 +19,14 @@ WORKDIR /src
 COPY proto/ ./proto/
 COPY server/ ./server/
 
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
 ARG COMMIT=unknown
 WORKDIR /src/server
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
     -o /out/keyref-server ./cmd/keyref-server
 

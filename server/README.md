@@ -1,5 +1,10 @@
 # server
 
+Versioned self-hosted images are published to
+`ghcr.io/lidessen/keyref-server:vX.Y.Z` when a release tag passes CI. Use a
+specific version when deploying or rolling back. See the
+[release workflow](../.github/workflows/release.yml).
+
 The ciphertext sync service and optional GitHub account vault. For paired sync, the server neither holds the VMK nor can decrypt item plaintext. The account vault has a separate server-managed key model. The hosted service and the self-hosted deployment are the same program.
 
 See the "storage, deployment and cost" and "server API" sections of [docs/design.md](../docs/design.md) for the design; [docs/protocol.md](../docs/protocol.md) is the authority on the wire format.

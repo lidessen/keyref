@@ -127,6 +127,8 @@ func dispatch(cmd string, args []string) int {
 		return cmdExec(args)
 	case "mcp":
 		return cmdMCP(args)
+	case "update":
+		return cmdUpdate(args)
 	case "version", "-v", "--version":
 		fmt.Println("keyref", version)
 		return 0
@@ -168,6 +170,7 @@ commands:
   mcp                     serve list/get/exec over stdio as MCP JSON-RPC
   decider run             auto-approve SMS consumptions inside the owner's
                             delegation policy (design v0.8 §14.8)
+  update [--check]        install or check for the latest stable CLI release
   version                 print the version (also --version)
 
 sources:

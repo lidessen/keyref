@@ -14,6 +14,9 @@ require (
 // builds it from ../lib so GOWORK=off works without a release.
 replace github.com/lidessen/keyref/lib => ../lib
 
+// Use the checkout's wire contract even when the workspace is disabled.
+replace github.com/lidessen/keyref/proto => ../proto
+
 require (
 	github.com/awnumar/memcall v0.4.0 // indirect
 	github.com/cloudflare/circl v1.6.5 // indirect

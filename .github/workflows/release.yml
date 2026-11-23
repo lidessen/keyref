@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify that the release tag is on main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: |
+            **/go.sum
+            go.work.sum
+      - name: Build and verify CLI release assets
+        run: |
+          ./scripts/build-release.sh "$GITHUB_REF_NAME" out/release
+          ./scripts/test-install.sh out/release "$GITHUB_REF_NAME"
+          (cd out/release && sha256sum --check SHA256SUMS)
+      - name: Publish versioned server image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-server:$GITHUB_REF_NAME"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx create --driver docker-container --use
+          docker buildx build --push --platform linux/amd64,linux/arm64 \
+            --file server/Dockerfile --tag "$image" \
+            --build-arg "VERSION=$GITHUB_REF_NAME" --build-arg "COMMIT=$(git rev-parse HEAD)" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.version=$GITHUB_REF_NAME" .
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-server:$GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" out/release/keyref-* out/release/SHA256SUMS \
+            --verify-tag --generate-notes --notes "Server image: $image"

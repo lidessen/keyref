@@ -29,16 +29,57 @@ The agent writes the stable reference `openai-prod`, not the secret itself. `key
 
 ## Install the CLI
 
-On macOS or Linux with Bash and Go 1.26 or newer installed:
+On macOS or Linux (amd64 or arm64), install the latest stable binary:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lidessen/keyref/main/scripts/install.sh | bash
 keyref --version
 ```
 
-The installer builds from GitHub source and installs into `~/.local/bin`.
-Add that directory to `PATH` if needed. Pass `KEYREF_BIN_DIR=/path/to/bin`
-or `KEYREF_REF=<tag-or-commit>` to the `bash` command to override the defaults.
+The installer checks the release's SHA-256 manifest and installs to
+`~/.local/bin`. Add that directory to `PATH` if needed. Go is required
+only for source builds. Set `KEYREF_BIN_DIR` on the `bash` invocation
+for a custom install directory, `KEYREF_VERSION=vX.Y.Z` for a specific
+release, or `KEYREF_REF` for a source build from a branch, tag, or commit.
+
+```bash
+keyref update --check  # report whether a newer stable release is available
+keyref update          # verify and replace the running CLI executable
+```
+
+These commands use [GitHub Releases](https://github.com/lidessen/keyref/releases)
+and require a published stable release. An update needs write access to the
+executable's directory. For a package-managed installation, use its package
+manager to upgrade.
+
+## CI and releases
+
+Pull requests and pushes to `main` run the five Go modules' vet, unit tests
+and standalone builds, the CLI/server end-to-end suite, installer smoke tests
+on Linux and macOS, and both server container builds.
+
+To release, tag a commit on `main` with a new stable version and push that
+tag. For example, with `HEAD` already on the remote `main`:
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin refs/tags/v0.1.0
+```
+
+[The release workflow](.github/workflows/release.yml) reruns CI for the
+tagged commit. It builds four CLI binaries with a shared `SHA256SUMS` file,
+pushes the tagged Linux amd64/arm64 server image to
+`ghcr.io/lidessen/keyref-server`, and publishes the CLI binaries on GitHub
+Releases. Set the GHCR package visibility to public if anonymous pulls are
+needed. Use the exact image tag or digest for self-hosting. Vercel deployment
+uses the separate server setup in the [deployment guide](server/README.md#deploy-on-vercel-with-turso).
+
+To rehearse packaging locally with the current checkout:
+
+```bash
+scripts/build-release.sh v0.1.0 out/release
+scripts/test-install.sh out/release v0.1.0
+```
 
 ## Local development
 
