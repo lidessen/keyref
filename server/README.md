@@ -27,3 +27,34 @@ server/
 ```
 
 Cost (public prices as of 2026-10-20, with the calculation in the design document): the fixed cost of the hosted service is about $18/month, covering a small machine, the domain and the Apple Developer annual fee. The marginal cost of an honest user is budgeted at $0.01/month. The free tier has hard quotas; Plus is recommended at a list price of $6/month or $48/year. Self-hosting is free.
+
+## Deploy on Vercel with Turso
+
+The repository root contains a Vercel Container Runtime entry point,
+`Dockerfile.vercel`. Use the repository root as the Vercel project root
+so the build can read both Go modules. Vercel terminates TLS and routes
+HTTP traffic to port 80 by default. Set the project's `PORT` only if a
+different port is needed.
+
+1. Connect a dedicated **Turso Cloud** database through the Vercel
+   Marketplace. Place the database in the same region as the function
+   where possible. Use separate databases for production and previews.
+2. Check that the integration sets `TURSO_DATABASE_URL` (a
+   `libsql://` endpoint) and `TURSO_AUTH_TOKEN` (a read/write token)
+   in the target environment. Keep the token in Vercel project
+   environment variables. TLS is managed by Vercel, so leave
+   `KEYREF_DOMAIN` unset.
+3. Deploy the root project with Vercel's Container preset. Then request
+   `/v1/healthz` on its public HTTPS origin and check for
+   `"status":"ok"` and `"db_writable":true`.
+
+The first successful startup initializes an empty Turso database.
+Subsequent starts share its schema, ciphertext, device challenges and
+rate limits. Use the provider's backups for this database. The existing
+`keyref-server backup` command covers embedded SQLite deployments.
+
+Vercel's Functions payload limits apply. In particular, keep vaults
+small enough that a full `cursor=0` sync response fits within 4.5 MB.
+The hosted free plan (`KEYREF_ENFORCE_QUOTAS=1`) limits vault storage
+and requires proof of work at registration. The Vercel deployment
+serves the existing paired sync API.

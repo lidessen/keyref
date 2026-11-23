@@ -42,6 +42,10 @@ scripts/docker-up.sh      # builds the image and starts it; scripts/docker-down.
 
 The dev server is for development and for the remote read/write work in progress. The CLI's local source needs no server at all.
 
+The same sync API can run on Vercel Container Runtime with a dedicated
+Turso Cloud database from the Vercel Marketplace. See the
+[server deployment guide](server/README.md#deploy-on-vercel-with-turso).
+
 ## Two sources, one command surface
 
 `keyref` reads and writes **sources**. `local` is a standalone offline vault on this machine and is the default; `sync` is the paired owner vault, which the CLI may read but never write. Every data command takes `--source NAME`, `KEYREF_SOURCE` does the same, and `keyref source default NAME` persists the choice. With the owner app deferred, `sync` is frozen and not a supported end-user path yet.

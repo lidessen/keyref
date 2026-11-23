@@ -41,17 +41,22 @@ func NewIssuer() *Issuer {
 // Issue returns a fresh 32-byte challenge, base64 encoded, with its
 // expiry (§6.1: the 401 pow_required response).
 func (i *Issuer) Issue() (challenge string, expiresAt int64) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		panic("pow: entropy source failed: " + err.Error())
-	}
-	b64 := base64.StdEncoding.EncodeToString(raw)
+	b64 := NewChallenge()
 	exp := i.now().Add(ChallengeTTL)
 	i.mu.Lock()
 	i.pruneLocked()
 	i.challenges[b64] = exp
 	i.mu.Unlock()
 	return b64, exp.UnixMilli()
+}
+
+// NewChallenge returns a fresh 32-byte challenge in wire format.
+func NewChallenge() string {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		panic("pow: entropy source failed: " + err.Error())
+	}
+	return base64.StdEncoding.EncodeToString(raw)
 }
 
 // Verify checks a solution for the given vault id. The challenge comes
@@ -68,6 +73,14 @@ func (i *Issuer) Verify(challengeRaw, nonce []byte, vaultID []byte) bool {
 	exp, ok := i.challenges[challengeB64]
 	i.mu.Unlock()
 	if !ok || i.now().After(exp) {
+		return false
+	}
+	return ValidSolution(challengeRaw, nonce, vaultID)
+}
+
+// ValidSolution checks the proof independently of challenge issuance and expiry.
+func ValidSolution(challengeRaw, nonce, vaultID []byte) bool {
+	if len(nonce) != 8 || len(vaultID) != 16 || len(challengeRaw) != 32 {
 		return false
 	}
 	h := sha256.New()

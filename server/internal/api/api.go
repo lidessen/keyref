@@ -71,6 +71,8 @@ type Config struct {
 	Commit        string
 	Origin        string // fixed public origin; empty means derive per request
 	DataDir       string // for the disk-usage healthz check
+	SharedState   bool   // persist challenges and rate limits across instances
+	Vercel        bool   // TLS and client IP are provided by Vercel
 	StartedAt     int64
 	Now           func() time.Time // injectable clock for tests
 
@@ -409,8 +411,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request, allowRevoked 
 	}
 	ac := &authCtx{device: dev, vault: vault}
 	if s.cfg.EnforceQuotas {
-		if !s.quotaGate(r.Context(), ac, now) {
-			writeError(w, "rate_limited")
+		if !s.quotaGate(w, r, ac, now) {
 			return nil, false
 		}
 	}
@@ -463,7 +464,7 @@ func (s *Server) gateWrite(ctx *authCtx, isDelete bool) string {
 
 // quotaGate applies the per-minute window and increments the daily
 // counter. Returns false when the per-minute ceiling is hit.
-func (s *Server) quotaGate(ctx context.Context, ac *authCtx, now time.Time) bool {
+func (s *Server) quotaGate(w http.ResponseWriter, r *http.Request, ac *authCtx, now time.Time) bool {
 	plan := quotas.EffectivePlan(ac.vault, now.UnixMilli())
 	if plan == quotas.PlanUnlimited {
 		return true
@@ -473,12 +474,30 @@ func (s *Server) quotaGate(ctx context.Context, ac *authCtx, now time.Time) bool
 	if limits.RequestsPerMinute != nil {
 		maxPerMin = *limits.RequestsPerMinute
 	}
-	if !s.windowAllow("vault:"+ac.vault.ID, now.UnixMilli(), maxPerMin, 60_000) {
+	if !s.requestWindowAllow(w, r, "vault:"+ac.vault.ID, now.UnixMilli(), maxPerMin, 60_000) {
 		return false
 	}
 	day := now.UTC().Format("2006-01-02")
-	_, _ = s.st.IncrementUsage(ctx, ac.vault.ID, day)
+	_, _ = s.st.IncrementUsage(r.Context(), ac.vault.ID, day)
 	return true
+}
+
+func (s *Server) requestWindowAllow(w http.ResponseWriter, r *http.Request, key string, now, max, window int64) bool {
+	var allowed bool
+	if s.cfg.SharedState {
+		var err error
+		allowed, err = s.st.AllowRateEvent(r.Context(), key, now, max, window)
+		if err != nil {
+			writeError(w, "internal")
+			return false
+		}
+	} else {
+		allowed = s.windowAllow(key, now, max, window)
+	}
+	if !allowed {
+		writeError(w, "rate_limited")
+	}
+	return allowed
 }
 
 // windowAllow applies one sliding window: at most max events per
@@ -573,7 +592,7 @@ func (s *Server) origin(r *http.Request) string {
 		return s.cfg.Origin
 	}
 	scheme := "http"
-	if r.TLS != nil {
+	if r.TLS != nil || s.cfg.Vercel {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
@@ -581,10 +600,13 @@ func (s *Server) origin(r *http.Request) string {
 
 // clientIPKey normalizes the remote address into a rate-limit key:
 // the /32 for IPv4 and the /64 for IPv6 (design §10.5 item 9).
-func clientIPKey(r *http.Request) string {
+func (s *Server) clientIPKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
+	}
+	if s.cfg.Vercel {
+		host = r.Header.Get("X-Vercel-Forwarded-For")
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
@@ -620,6 +642,13 @@ func (s *Server) approvalPollingFloor(next http.HandlerFunc) http.HandlerFunc {
 		}
 		key := "poll:" + device.ID
 		now := s.cfg.Now()
+		if s.cfg.SharedState {
+			if !s.requestWindowAllow(w, r, key, now.UnixMilli(), 1, ApprovalPollMinInterval.Milliseconds()) {
+				return
+			}
+			next(w, r)
+			return
+		}
 		s.mu.Lock()
 		last, exists := s.pollLast[key]
 		if !exists || now.Sub(last) >= ApprovalPollMinInterval {

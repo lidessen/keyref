@@ -45,8 +45,14 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if err != nil {
 		return fmt.Errorf("store: begin: %w", err)
 	}
+	defer tx.Rollback()
+	if s.remote {
+		// Acquire the write lock before any read-check-write operation.
+		if _, err := tx.ExecContext(ctx, "UPDATE keyref_runtime SET version = version WHERE id = 1"); err != nil {
+			return fmt.Errorf("store: acquire write lock: %w", err)
+		}
+	}
 	if err := fn(tx); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1308,6 +1314,10 @@ FROM items WHERE vault_id = ?`, vaultID).Scan(&itemBytes); err != nil {
 // HealthzWriteProbe verifies the database accepts writes by rewriting the
 // user_version pragma with its current value.
 func (s *Store) HealthzWriteProbe(ctx context.Context) error {
+	if s.remote {
+		_, err := s.db.ExecContext(ctx, "UPDATE keyref_runtime SET version = version WHERE id = 1")
+		return err
+	}
 	var v int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
 		return err

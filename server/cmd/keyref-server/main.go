@@ -88,7 +88,8 @@ func usage(w *os.File) {
        keyref-server version                      print version and commit
 
 environment: KEYREF_DATA, KEYREF_DOMAIN, KEYREF_ACME_EMAIL, KEYREF_LISTEN,
-             KEYREF_ENFORCE_QUOTAS, KEYREF_APN_KEY_PATH, KEYREF_APN_KEY_ID,
+             KEYREF_ENFORCE_QUOTAS, KEYREF_VERCEL, TURSO_DATABASE_URL, TURSO_AUTH_TOKEN,
+             KEYREF_APN_KEY_PATH, KEYREF_APN_KEY_ID,
              KEYREF_TEAM_ID, KEYREF_APN_TOPIC, KEYREF_APN_ENV
 `)
 }
@@ -105,23 +106,40 @@ func openStore(ctx context.Context) (*store.Store, error) {
 }
 
 func serve(args []string) error {
+	vercel := os.Getenv("KEYREF_VERCEL") == "1"
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := fs.String("listen", os.Getenv("KEYREF_LISTEN"), "plain-HTTP listen address (default 127.0.0.1:8080)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *listen == "" {
-		*listen = "127.0.0.1:8080"
-	}
 	ctx := context.Background()
-	st, err := openStore(ctx)
+	dir, domain := dataDir(), os.Getenv("KEYREF_DOMAIN")
+	var st *store.Store
+	var err error
+	if vercel {
+		if domain != "" {
+			return fmt.Errorf("KEYREF_DOMAIN must be empty when Vercel manages TLS")
+		}
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "80"
+		}
+		*listen = ":" + port
+		dir = ""
+		st, err = store.OpenTurso(ctx, os.Getenv("TURSO_DATABASE_URL"), os.Getenv("TURSO_AUTH_TOKEN"))
+	} else {
+		if *listen == "" {
+			*listen = "127.0.0.1:8080"
+		}
+		st, err = openStore(ctx)
+	}
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
 	origin := ""
-	if domain := os.Getenv("KEYREF_DOMAIN"); domain != "" {
+	if domain != "" {
 		origin = "https://" + domain
 	}
 	// APNs credentials are deployment-environment only (design §12.3):
@@ -143,19 +161,24 @@ func serve(args []string) error {
 		Version:               version,
 		Commit:                commit,
 		Origin:                origin,
-		DataDir:               dataDir(),
+		DataDir:               dir,
+		SharedState:           vercel,
+		Vercel:                vercel,
 		Push:                  push,
 	}).Handler()
 
 	return httpserver.Run(handler, st, httpserver.Options{
-		DataDir:    dataDir(),
-		Domain:     os.Getenv("KEYREF_DOMAIN"),
+		DataDir:    dir,
+		Domain:     domain,
 		ACMEEmail:  os.Getenv("KEYREF_ACME_EMAIL"),
 		ListenAddr: *listen,
 	})
 }
 
 func backup(args []string) error {
+	if os.Getenv("KEYREF_VERCEL") == "1" {
+		return fmt.Errorf("backup: use the Turso database backup tools for Vercel deployments")
+	}
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	out := fs.String("out", "", "backup destination file (must not exist)")
 	if err := fs.Parse(args); err != nil {

@@ -26,7 +26,8 @@ const DBFileName = "keyref.db"
 
 // Store wraps the SQLite database handle.
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	remote bool
 }
 
 // Open opens the SQLite database at path (creating parent directories

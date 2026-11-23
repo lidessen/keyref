@@ -28,8 +28,7 @@ func (s *Server) handlePairRegister(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.PairRegisterPerMinute > 0 {
 		limit = int64(s.cfg.PairRegisterPerMinute)
 	}
-	if !s.windowAllow("pair:"+clientIPKey(r), now.UnixMilli(), limit, 60_000) {
-		writeError(w, "rate_limited")
+	if !s.requestWindowAllow(w, r, "pair:"+s.clientIPKey(r), now.UnixMilli(), limit, 60_000) {
 		return
 	}
 	var req wire.PairRegisterRequest

@@ -2,11 +2,14 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/lidessen/keyref/proto/wire"
+	"github.com/lidessen/keyref/server/internal/pow"
 	"github.com/lidessen/keyref/server/internal/quotas"
 	"github.com/lidessen/keyref/server/internal/store"
 )
@@ -30,7 +33,11 @@ func (s *Server) handleCreateVault(w http.ResponseWriter, r *http.Request) {
 		// spent on successful creates below (item 9 counts vaults
 		// created, not attempts).
 		if req.PoW == nil {
-			challenge, expires := s.pow.Issue()
+			challenge, expires, err := s.issuePoW(r, now)
+			if err != nil {
+				writeError(w, "internal")
+				return
+			}
 			writeError(w, "pow_required", map[string]any{
 				"challenge":  challenge,
 				"expires_at": expires,
@@ -42,7 +49,12 @@ func (s *Server) handleCreateVault(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "invalid_field")
 			return
 		}
-		if !s.pow.Verify(req.PoW.Challenge, req.PoW.Nonce, vaultRaw) {
+		valid, err := s.verifyPoW(r, now, req.PoW.Challenge, req.PoW.Nonce, vaultRaw)
+		if err != nil {
+			writeError(w, "internal")
+			return
+		}
+		if !valid {
 			writeError(w, "invalid_field")
 			return
 		}
@@ -96,10 +108,9 @@ func (s *Server) handleCreateVault(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.EnforceQuotas {
 		// Per-IP creation budget, charged only on success path
 		// (design §10.5 item 9).
-		ipKey := clientIPKey(r)
+		ipKey := s.clientIPKey(r)
 		day := now.UTC().Format("2006-01-02")
-		if !s.windowAllow("reg:"+ipKey+":"+day, now.UnixMilli(), s.quota.RegistrationPerIPPerDay, 24*3600*1000) {
-			writeError(w, "rate_limited")
+		if !s.requestWindowAllow(w, r, "reg:"+ipKey+":"+day, now.UnixMilli(), s.quota.RegistrationPerIPPerDay, 24*3600*1000) {
 			return
 		}
 	}
@@ -180,9 +191,8 @@ func (s *Server) handleGetRecoveryMaterials(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	now := s.cfg.Now()
-	if !s.windowAllow("rec-ip:"+clientIPKey(r), now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) ||
-		!s.windowAllow("rec-vault:"+vaultID, now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) {
-		writeError(w, "rate_limited")
+	if !s.requestWindowAllow(w, r, "rec-ip:"+s.clientIPKey(r), now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) ||
+		!s.requestWindowAllow(w, r, "rec-vault:"+vaultID, now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) {
 		return
 	}
 	vault, err := s.st.GetVault(r.Context(), vaultID)
@@ -211,8 +221,7 @@ func (s *Server) handleGetRecoveryMaterials(w http.ResponseWriter, r *http.Reque
 // the new transcript.
 func (s *Server) handleRecoveryTakeover(w http.ResponseWriter, r *http.Request) {
 	now := s.cfg.Now()
-	if !s.windowAllow("takeover-ip:"+clientIPKey(r), now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) {
-		writeError(w, "rate_limited")
+	if !s.requestWindowAllow(w, r, "takeover-ip:"+s.clientIPKey(r), now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) {
 		return
 	}
 	var req wire.RecoveryDirectoryRequest
@@ -232,8 +241,7 @@ func (s *Server) handleRecoveryTakeover(w http.ResponseWriter, r *http.Request) 
 		writeError(w, "internal")
 		return
 	}
-	if !s.windowAllow("takeover-vault:"+req.VaultID, now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) {
-		writeError(w, "rate_limited")
+	if !s.requestWindowAllow(w, r, "takeover-vault:"+req.VaultID, now.UnixMilli(), RecoveryPerKeyPerMinute, 60_000) {
 		return
 	}
 	// Design §8.5: the takeover directory bumps the revision by one.
@@ -379,9 +387,10 @@ func (s *Server) handleDeleteVault(w http.ResponseWriter, r *http.Request) {
 		// Deletion is always allowed, even over quota or frozen (design
 		// §10.5 item 7).
 		challenge := randomBytes(32)
-		s.mu.Lock()
-		s.deleteChal[vaultID] = pendingChallenge{challenge: challenge, expires: now.Add(ChallengeTTL)}
-		s.mu.Unlock()
+		if err := s.putChallenge(r.Context(), "delete:", vaultID, challenge, now, now.Add(ChallengeTTL), s.deleteChal); err != nil {
+			writeError(w, "internal")
+			return
+		}
 		writeError(w, "delete_challenge_required", map[string]any{
 			"challenge":  wire.Blob(challenge),
 			"expires_at": now.Add(ChallengeTTL).UnixMilli(),
@@ -392,15 +401,16 @@ func (s *Server) handleDeleteVault(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "invalid_field")
 		return
 	}
-	s.mu.Lock()
-	pend, exists := s.deleteChal[vaultID]
-	delete(s.deleteChal, vaultID) // single use
-	s.mu.Unlock()
-	if !exists || now.After(pend.expires) || !constantTimeEqual(pend.challenge, *req.Challenge) {
+	challenge, err := s.takeChallenge(r.Context(), "delete:", vaultID, now, s.deleteChal)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, "internal")
+		return
+	}
+	if err != nil || !constantTimeEqual(challenge, *req.Challenge) {
 		writeError(w, "unauthorized")
 		return
 	}
-	tb, err := wire.BuildVaultDeleteTranscript(vaultID, pend.challenge)
+	tb, err := wire.BuildVaultDeleteTranscript(vaultID, challenge)
 	if err != nil {
 		writeError(w, "internal")
 		return
@@ -414,4 +424,25 @@ func (s *Server) handleDeleteVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) issuePoW(r *http.Request, now time.Time) (string, int64, error) {
+	if !s.cfg.SharedState {
+		challenge, expires := s.pow.Issue()
+		return challenge, expires, nil
+	}
+	challenge := pow.NewChallenge()
+	expires := now.Add(pow.ChallengeTTL).UnixMilli()
+	err := s.st.PutChallenge(r.Context(), "pow:"+challenge, []byte(challenge), now.UnixMilli(), expires)
+	return challenge, expires, err
+}
+
+func (s *Server) verifyPoW(r *http.Request, now time.Time, challenge, nonce, vault []byte) (bool, error) {
+	if !s.cfg.SharedState {
+		return s.pow.Verify(challenge, nonce, vault), nil
+	}
+	if !pow.ValidSolution(challenge, nonce, vault) {
+		return false, nil
+	}
+	return s.st.HasChallenge(r.Context(), "pow:"+base64.StdEncoding.EncodeToString(challenge), now.UnixMilli())
 }

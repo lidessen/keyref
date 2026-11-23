@@ -44,9 +44,10 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		}
 		challenge := randomBytes(32)
 		expires := now.Add(ChallengeTTL)
-		s.mu.Lock()
-		s.sessionChal[req.DeviceID] = pendingChallenge{challenge: challenge, expires: expires}
-		s.mu.Unlock()
+		if err := s.putChallenge(r.Context(), "session:", req.DeviceID, challenge, now, expires, s.sessionChal); err != nil {
+			writeError(w, "internal")
+			return
+		}
 		writeJSON(w, http.StatusOK, wire.SessionChallengeResponse{
 			Challenge: challenge,
 			ExpiresAt: expires.UnixMilli(),
@@ -63,15 +64,16 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "device_revoked")
 		return
 	}
-	s.mu.Lock()
-	pend, exists := s.sessionChal[req.DeviceID]
-	delete(s.sessionChal, req.DeviceID) // single use
-	s.mu.Unlock()
-	if !exists || now.After(pend.expires) || !constantTimeEqual(pend.challenge, *req.Challenge) {
+	challenge, err := s.takeChallenge(r.Context(), "session:", req.DeviceID, now, s.sessionChal)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, "internal")
+		return
+	}
+	if err != nil || !constantTimeEqual(challenge, *req.Challenge) {
 		writeError(w, "unauthorized")
 		return
 	}
-	tb, err := wire.BuildSessionTranscript(req.DeviceID, pend.challenge)
+	tb, err := wire.BuildSessionTranscript(req.DeviceID, challenge)
 	if err != nil {
 		writeError(w, "internal")
 		return
