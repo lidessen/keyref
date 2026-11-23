@@ -14,7 +14,7 @@ of a lost key is not provided.
 
 `Put`, `Use`, `Stat` and `Delete` accept a reference; `List` enumerates metadata. `Put` refuses a
 ref outside the design §6.1 grammar (`ValidRef`), takes `PutOptions`
-(description, allowCommands, allowedHosts) and reports whether it created a new
+(description, allowedHosts) and reports whether it created a new
 entry. `Stat` and `List` decrypt only the encrypted meta and never touch the
 secret; `Mask` derives the display mask at write time. `Use` supplies decrypted
 bytes to a trusted callback only and wipes that buffer after it returns. The

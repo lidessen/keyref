@@ -56,9 +56,8 @@ type Item struct {
 }
 
 type Metadata struct {
-	Description   string   `json:"description,omitempty"`
-	AllowCommands []string `json:"allow_commands,omitempty"`
-	Ref           string   `json:"ref"`
-	Mask          string   `json:"masked"`
-	Size          int      `json:"size"`
+	Description string `json:"description,omitempty"`
+	Ref         string `json:"ref"`
+	Mask        string `json:"masked"`
+	Size        int    `json:"size"`
 }

@@ -185,10 +185,9 @@ func TestImportEnvWorkflow(t *testing.T) {
 		t.Fatal("invalid input changed the vault")
 	}
 
-	// A replacement retains the existing restrictions instead of silently
-	// changing an exact command whitelist into the default deny list.
+	// A replacement retains the existing host restrictions.
 	set := localRun(t, env, first, "set", "first", "--source", "local",
-		"--allow-command", filepath.Base(helperBin), "--allow-host", "127.0.0.1")
+		"--allow-host", "127.0.0.1")
 	assertProviderValueAbsent(t, first, set.stdout, set.stderr)
 	if set.code != 0 {
 		t.Fatalf("could not set synthetic policy: exit %d", set.code)
@@ -225,16 +224,6 @@ func TestImportEnvWorkflow(t *testing.T) {
 	assertProviderValueAbsent(t, replacement, run.stdout, run.stderr)
 	if run.code != 0 || accepted.Load() != 2 || !strings.Contains(run.stdout, "credential=<redacted:first>") {
 		t.Fatalf("replacement was not delivered safely: exit %d", run.code)
-	}
-	wrongCommandMarker := filepath.Join(stateDir, "wrong-command-started")
-	wrongCommand := localRun(t, env, "", "exec", "--source", "local", "--env", "TOKEN=first",
-		"--", "/usr/bin/touch", wrongCommandMarker)
-	assertProviderValueAbsent(t, replacement, wrongCommand.stdout, wrongCommand.stderr)
-	if wrongCommand.code != 10 {
-		t.Fatalf("replacement lost the command whitelist: exit %d", wrongCommand.code)
-	}
-	if _, err := os.Stat(wrongCommandMarker); !os.IsNotExist(err) {
-		t.Fatal("disallowed command started")
 	}
 	wrongHostMarker := filepath.Join(stateDir, "wrong-host-started")
 	wrongHost := localRun(t, env, "", "exec", "--source", "local", "--env", "JEV_API_KEY=first",

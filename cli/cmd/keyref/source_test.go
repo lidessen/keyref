@@ -14,9 +14,6 @@ import (
 	"github.com/lidessen/keyref/lib/local"
 )
 
-// A local row without its own allowCommands keeps the built-in deny
-// list; a row that names commands gets exactly that whitelist, and argv
-// injection is never consented to.
 func TestLocalExecPolicy(t *testing.T) {
 	ref := localExecRef(&local.Meta{Ref: "my-ref"})
 	if !ref.Injectable {
@@ -32,21 +29,14 @@ func TestLocalExecPolicy(t *testing.T) {
 		t.Fatal("an ordinary command should be allowed under deny-shells")
 	}
 	if exec.ItemAllowsCommand("sh", ref.Policy) {
-		t.Fatal("sh must stay denied for a local entry without allowCommands")
+		t.Fatal("sh must stay denied for a local entry")
 	}
 	named := localExecRef(&local.Meta{
 		Ref: "my-ref",
 		Policy: local.Policy{
-			AllowCommands: []string{"cat"},
-			AllowedHosts:  []string{"api.openai.com"},
+			AllowedHosts: []string{"api.openai.com"},
 		},
 	})
-	if !exec.ItemAllowsCommand("cat", named.Policy) {
-		t.Fatal("a named allowCommands entry must whitelist that command")
-	}
-	if exec.ItemAllowsCommand("curl", named.Policy) {
-		t.Fatal("a non-empty allowCommands list must allow nothing else")
-	}
 	if len(named.Policy.AllowedHosts) != 1 || named.Policy.AllowedHosts[0] != "api.openai.com" {
 		t.Fatalf("allowedHosts = %v", named.Policy.AllowedHosts)
 	}

@@ -49,7 +49,7 @@ type importPlan struct {
 // secret is ImportUnchanged and is not rewritten at all, including a
 // legacy row with missing or incomplete meta and even when the vault is
 // at its write limit. A replacement keeps the existing description and
-// allowCommands/allowedHosts policy, recomputes the mask, size and
+// host restrictions, recomputes the mask, size and
 // update time, and keeps the meta size bound; a new item gets the
 // default empty policy. A corrupt existing meta or secret fails the
 // whole batch closed.
@@ -208,11 +208,10 @@ func (s *Store) Import(ctx context.Context, items []ImportItem) ([]ImportStatus,
 			Masked:    Mask(plan.value),
 			Bytes:     len(plan.value),
 			UpdatedAt: now,
-			Policy:    Policy{AllowCommands: []string{}, AllowedHosts: []string{}},
+			Policy:    Policy{AllowedHosts: []string{}},
 		}
 		if plan.existing != nil {
 			m.Description = plan.existing.Description
-			m.Policy.AllowCommands = append([]string{}, plan.existing.Policy.AllowCommands...)
 			m.Policy.AllowedHosts = append([]string{}, plan.existing.Policy.AllowedHosts...)
 		}
 		metaBlob, err := s.sealMeta(plan.id, m)

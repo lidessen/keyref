@@ -102,7 +102,6 @@ h1 { margin-bottom: 16px; font-size: clamp(38px, 5vw, 58px); line-height: 1.08; 
 .entry-title strong { font-size: 15px; overflow-wrap: anywhere; }
 .entry-title code { background: var(--chip-bg); border-radius: 5px; padding: 3px 6px; color: var(--chip-ink); font-size: 11px; }
 .entry-main p { margin: 5px 0 3px; color: var(--subdued); font-size: 13px; overflow-wrap: anywhere; }
-.entry-commands { color: var(--soft-text); font-size: 11px; overflow-wrap: anywhere; }
 .entry-actions { display: flex; align-items: center; gap: 5px; }
 .empty { text-align: center; padding: 74px 20px; color: var(--empty-text); }
 .empty-icon { margin: 0 auto 16px; color: var(--entry-ink); font-size: 28px; }

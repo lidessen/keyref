@@ -105,3 +105,8 @@ resolve the authenticated numeric user ID. Keyref stores a digest of
 each 12-hour session token and revokes that session on logout. Removing
 a user ID from the allowlist disables that user's existing sessions.
 The CLI encrypts metadata and values separately before uploading them.
+
+Server startup removes legacy command allowlists from encrypted account
+metadata. Existing credential values stay encrypted throughout the migration.
+Remote CLI injection requires a client that supports per-run terminal
+confirmation.

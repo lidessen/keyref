@@ -12,8 +12,6 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/lidessen/keyref/proto/crypto"
@@ -141,14 +139,6 @@ func (v *Vault) browserAuthorized(next browserAccountHandler) http.HandlerFunc {
 	}
 }
 
-func (v *Vault) browserKey(r *http.Request, account int64) ([]byte, error) {
-	var wrapped []byte
-	if err := v.store.DB().QueryRowContext(r.Context(), "SELECT wrapped_key FROM account_vaults WHERE account = ?", account).Scan(&wrapped); err != nil {
-		return nil, err
-	}
-	return crypto.OpenBlob(v.wrappingKey, []byte("keyref-account-key-v1\x00"+strconv.FormatInt(account, 10)), wrapped)
-}
-
 func (v *Vault) browserLogout(w http.ResponseWriter, r *http.Request, _ int64, digest [32]byte) {
 	if _, err := v.store.DB().ExecContext(r.Context(), "DELETE FROM account_sessions WHERE token_hash = ?", digest[:]); err != nil {
 		failure(w, http.StatusInternalServerError, "internal")
@@ -174,7 +164,7 @@ func decodeBrowserMetadata(key []byte, id string, blob []byte) (remote.Metadata,
 }
 
 func (v *Vault) browserList(w http.ResponseWriter, r *http.Request, account int64, _ [32]byte) {
-	key, err := v.browserKey(r, account)
+	key, err := v.accountKey(r.Context(), account)
 	if err != nil {
 		failure(w, http.StatusInternalServerError, "internal")
 		return
@@ -214,10 +204,9 @@ func (v *Vault) browserList(w http.ResponseWriter, r *http.Request, account int6
 }
 
 type browserWrite struct {
-	Ref           string   `json:"ref"`
-	Description   string   `json:"description"`
-	AllowCommands []string `json:"allow_commands"`
-	Value         string   `json:"value"`
+	Ref         string `json:"ref"`
+	Description string `json:"description"`
+	Value       string `json:"value"`
 }
 
 func (v *Vault) browserCreate(w http.ResponseWriter, r *http.Request, account int64, _ [32]byte) {
@@ -234,13 +223,7 @@ func (v *Vault) browserPut(w http.ResponseWriter, r *http.Request, account int64
 		failure(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	for _, command := range input.AllowCommands {
-		if command == "" || strings.ContainsRune(command, 0) {
-			failure(w, http.StatusBadRequest, "invalid_request")
-			return
-		}
-	}
-	key, err := v.browserKey(r, account)
+	key, err := v.accountKey(r.Context(), account)
 	if err != nil {
 		failure(w, http.StatusInternalServerError, "internal")
 		return
@@ -253,7 +236,7 @@ func (v *Vault) browserPut(w http.ResponseWriter, r *http.Request, account int64
 	}
 	cipherKey := remote.CipherKey(key)
 	defer clear(cipherKey)
-	meta := remote.Metadata{Ref: input.Ref, Description: input.Description, AllowCommands: input.AllowCommands}
+	meta := remote.Metadata{Ref: input.Ref, Description: input.Description}
 	var oldMeta, oldValue []byte
 	if !create {
 		err := v.store.DB().QueryRowContext(r.Context(), "SELECT metadata, value FROM account_items WHERE account=? AND id=?", account, id).Scan(&oldMeta, &oldValue)

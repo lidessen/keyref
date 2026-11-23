@@ -313,40 +313,6 @@ func TestLocalSourceKeepsTheExecPolicy(t *testing.T) {
 	}
 }
 
-// A local row can name its commands: a non-empty list is an exact
-// whitelist, and it replaces the built-in deny list (design §17.4).
-func TestLocalAllowCommandsIsAnExactWhitelist(t *testing.T) {
-	_, _, env := localHome(t)
-	if r := localRun(t, env, "", "init"); r.code != 0 {
-		t.Fatalf("init exit %d: %s", r.code, r.stderr)
-	}
-	if r := localRun(t, env, localSecret, "set", "my-ref", "--allow-command", "cat"); r.code != 0 {
-		t.Fatalf("set exit %d: %s", r.code, r.stderr)
-	}
-
-	// cat is on the built-in deny list, but the row names it explicitly.
-	allowed := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", "/bin/cat", "/dev/null")
-	if allowed.code != 0 {
-		t.Fatalf("explicitly allowed cat exit %d: %s", allowed.code, allowed.stderr)
-	}
-	// The whitelist admits nothing else, even a command the deny list
-	// would allow.
-	tightened := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", helperBin, "print-env")
-	if tightened.code != 10 {
-		t.Fatalf("non-listed command exit %d, want 10: %s", tightened.code, tightened.stderr)
-	}
-	assertNoLocalLeak(t, "local allowCommands", tightened.stdout, tightened.stderr)
-
-	// Replacing without flags clears the old whitelist at the CLI layer.
-	if r := localRun(t, env, localSecret, "set", "my-ref"); r.code != 0 {
-		t.Fatalf("replacement exit %d", r.code)
-	}
-	reset := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", "/bin/cat", "/dev/null")
-	if reset.code != 10 {
-		t.Fatalf("replacement retained old whitelist: exit %d", reset.code)
-	}
-}
-
 func TestLocalAllowedHostsChecksArgv(t *testing.T) {
 	_, _, env := localHome(t)
 	if r := localRun(t, env, "", "init"); r.code != 0 {

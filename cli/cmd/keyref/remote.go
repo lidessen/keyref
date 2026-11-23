@@ -332,18 +332,16 @@ func (c *remoteClient) item(ctx context.Context, ref string, metaOnly bool) (rem
 func (c *remoteClient) set(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("remote set", flag.ContinueOnError)
 	raw := fs.Bool("raw", false, "keep input bytes unchanged")
-	var commands stringList
-	fs.Var(&commands, "allow-command", "exact command name permitted to consume this entry")
 	if err := fs.Parse(args); err != nil {
 		return parseExit(err)
 	}
 	if fs.NArg() != 1 || !local.ValidRef(fs.Arg(0)) {
-		return fatalf(2, "usage: keyref remote set [--raw] [--allow-command NAME] REF")
+		return fatalf(2, "usage: keyref remote set [--raw] REF")
 	}
-	return c.putFromStdin(ctx, fs.Arg(0), *raw, local.PutOptions{AllowCommands: commands})
+	return c.putFromStdin(ctx, fs.Arg(0), *raw, "")
 }
 
-func (c *remoteClient) putFromStdin(ctx context.Context, ref string, raw bool, opts local.PutOptions) int {
+func (c *remoteClient) putFromStdin(ctx context.Context, ref string, raw bool, description string) int {
 	value, err := readLocalSecret(os.Stdin, raw)
 	defer clear(value)
 	if err != nil || len(value) == 0 || len(value) > remote.MaxSecret {
@@ -352,7 +350,7 @@ func (c *remoteClient) putFromStdin(ctx context.Context, ref string, raw bool, o
 	id := remote.ItemID(c.session.VaultKey, ref)
 	key := remote.CipherKey(c.session.VaultKey)
 	defer clear(key)
-	rawMeta, err := json.Marshal(remote.Metadata{Ref: ref, Mask: local.Mask(value), Size: len(value), AllowCommands: opts.AllowCommands, Description: opts.Description})
+	rawMeta, err := json.Marshal(remote.Metadata{Ref: ref, Mask: local.Mask(value), Size: len(value), Description: description})
 	if err != nil || len(rawMeta) > remote.MaxMetadata {
 		return fatalf(2, "remote metadata exceeds size limit")
 	}
@@ -382,7 +380,8 @@ func (c *remoteClient) execute(ctx context.Context, args []string) int {
 	}
 	req := exec.Request{EnvRefs: envs, Argv: fs.Args(), Refs: make(map[string]*exec.ResolvedRef), Stdout: os.Stdout, Stderr: os.Stderr, ParentEnv: os.Environ()}
 	items := map[string]remote.Item{}
-	for _, ref := range exec.CollectRefs(&req) {
+	confirmRefs := exec.CollectRefs(&req)
+	for _, ref := range confirmRefs {
 		if !local.ValidRef(ref) {
 			return fatalf(2, "invalid remote ref")
 		}
@@ -390,14 +389,23 @@ func (c *remoteClient) execute(ctx context.Context, args []string) int {
 		if err != nil {
 			return remoteFail(err)
 		}
-		meta, err := c.metadata(item)
-		if err != nil {
+		if _, err := c.metadata(item); err != nil {
 			return remoteFail(err)
 		}
 		items[ref] = item
-		req.Refs[ref] = &exec.ResolvedRef{Ref: ref, Injectable: true, Policy: exec.Policy{AllowCommands: meta.AllowCommands, RequireAllowList: true}}
+		req.Refs[ref] = &exec.ResolvedRef{Ref: ref, Injectable: true}
+	}
+	var confirmErr error
+	if len(confirmRefs) > 0 {
+		req.OnPolicyPassed = func(resolved *exec.ResolvedCommand) {
+			confirmErr = confirmRemoteUse(confirmRefs, req.Argv, resolved.FirstReal)
+		}
 	}
 	req.ResolveValue = func(ref string) (*secret.Plaintext, int, string) {
+		if confirmErr != nil {
+			fmt.Fprintln(req.Stderr, "keyref:", confirmErr)
+			return nil, exitcode.PolicyRejection, "remote-confirmation"
+		}
 		i := items[ref]
 		key := remote.CipherKey(c.session.VaultKey)
 		defer clear(key)
@@ -413,4 +421,20 @@ func (c *remoteClient) execute(ctx context.Context, args []string) int {
 		return p, 0, ""
 	}
 	return exec.Run(&req)
+}
+
+func confirmRemoteUse(refs, argv []string, executable string) error {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return errors.New("remote credentials require confirmation on a controlling terminal")
+	}
+	defer tty.Close()
+	if _, err := fmt.Fprintf(tty, "allow %q (executable %q) to use remote credentials %q once? [y/N] ", argv, executable, refs); err != nil {
+		return fmt.Errorf("write remote confirmation: %w", err)
+	}
+	answer, err := readConfirmLine(tty)
+	if err != nil || !confirmed(answer) {
+		return errors.New("remote credential use was not confirmed")
+	}
+	return nil
 }

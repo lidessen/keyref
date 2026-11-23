@@ -33,7 +33,7 @@ func TestProviderEnvironmentContract(t *testing.T) {
 	}{
 		{"missing-ref", 11},
 		{"locked", 12},
-		{"wrong-consumer", 10},
+		{"blocked-command", 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			providerContractCase(t, "JEV_API_KEY", tc.name, tc.code)
@@ -65,11 +65,7 @@ func providerContractCase(t *testing.T, envName, scenario string, wantCode int) 
 		t.Fatalf("fixture initialization exit %d", initialized.code)
 	}
 	assertProviderValueAbsent(t, value, initialized.stdout, initialized.stderr)
-	consumer := filepath.Base(helperBin)
-	if scenario == "wrong-consumer" {
-		consumer = "another-consumer"
-	}
-	stored := localRun(t, env, value, "set", ref, "--source", "local", "--allow-command", consumer)
+	stored := localRun(t, env, value, "set", ref, "--source", "local")
 	if stored.code != 0 {
 		t.Fatalf("fixture set exit %d", stored.code)
 	}
@@ -105,9 +101,13 @@ func providerContractCase(t *testing.T, envName, scenario string, wantCode int) 
 	if scenario == "missing-ref" {
 		selected = "missing-provider"
 	}
-	r := localRun(t, env, "", "exec", "--source", "local", "--env", envName+"="+selected,
-		"--pass", "XDG_CONFIG_HOME", "--pass", "NEOWIND_STATE_DIR", "--",
-		helperBin, "provider-env", server.URL, envName, marker)
+	argv := []string{helperBin, "provider-env", server.URL, envName, marker}
+	if scenario == "blocked-command" {
+		argv = []string{"/bin/sh", "-c", "exit 99"}
+	}
+	args := []string{"exec", "--source", "local", "--env", envName + "=" + selected,
+		"--pass", "XDG_CONFIG_HOME", "--pass", "NEOWIND_STATE_DIR", "--"}
+	r := localRun(t, env, "", append(args, argv...)...)
 	assertProviderValueAbsent(t, value, r.stdout, r.stderr)
 	if r.code != wantCode {
 		t.Fatalf("provider exec exit %d, want %d", r.code, wantCode)

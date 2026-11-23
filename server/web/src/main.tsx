@@ -10,7 +10,6 @@ interface Item {
   ref: string;
   masked: string;
   description?: string;
-  allow_commands?: string[];
   size: number;
 }
 type Screen = "loading" | "signed-out" | "ready";
@@ -40,7 +39,7 @@ function message(error: unknown): string {
       item_limit: "This vault is full. Delete an entry before adding another.",
       not_found: "This entry no longer exists. Refresh and try again.",
       conflict: "Could not save this entry. It may already exist, have changed, or the vault may be full.",
-      invalid_request: "Check the reference, value, and allowed commands.",
+      invalid_request: "Check the reference and value.",
     };
     return descriptions[error.code] ?? (error.status === 409 ? "This entry changed. Refresh and try again." : "The server could not complete the request. Try again.");
   }
@@ -128,7 +127,6 @@ function App() {
     form.reset();
     (form.elements.namedItem("ref") as HTMLInputElement).value = item?.ref ?? "";
     (form.elements.namedItem("description") as HTMLInputElement).value = item?.description ?? "";
-    (form.elements.namedItem("allow_commands") as HTMLInputElement).value = (item?.allow_commands ?? []).join(", ");
     editing.value = true;
     requestAnimationFrame(() => {
       if (!form.contains(document.activeElement)) (form.elements.namedItem(item ? "description" : "ref") as HTMLInputElement).focus();
@@ -164,13 +162,12 @@ function App() {
     const fields = new FormData(form);
     const ref = editRef.value || String(fields.get("ref") ?? "").trim();
     const value = String(fields.get("value") ?? "");
-    const allow_commands = String(fields.get("allow_commands") ?? "").split(",").map((command) => command.trim()).filter(Boolean);
     if (!/^(?:[a-z]|[a-z][a-z0-9-]{0,62}[a-z0-9])$/.test(ref)) { error.value = "Use 1–64 lowercase letters, numbers, or hyphens. Start with a letter and end with a letter or number."; return; }
     if (!editRef.value && !value) { error.value = "Enter a value for the new credential."; return; }
     busy.value = true;
     try {
       await request(editRef.value ? "items/" + encodeURIComponent(editID.value) : "items", editRef.value ? "PATCH" : "POST", {
-        ref, description: String(fields.get("description") ?? ""), allow_commands, ...(value ? { value } : {}),
+        ref, description: String(fields.get("description") ?? ""), ...(value ? { value } : {}),
       });
       form.reset();
       closeEditor();
@@ -235,10 +232,9 @@ function App() {
           const name = mapSignal(item, (value) => value.ref);
           const masked = mapSignal(item, (value) => value.masked);
           const description = mapSignal(item, (value) => value.description || "No description");
-          const commands = mapSignal(item, (value) => value.allow_commands?.length ? value.allow_commands.join(", ") : "No commands allowed");
           return <article className="credential">
             <div className="entry-icon" aria-hidden="true">⌘</div>
-            <div className="entry-main"><div className="entry-title"><strong>{name}</strong><code>{masked}</code></div><p>{description}</p><span className="entry-commands">Allowed: {commands}</span></div>
+            <div className="entry-main"><div className="entry-title"><strong>{name}</strong><code>{masked}</code></div><p>{description}</p></div>
             <div className="entry-actions"><Button variant="outline" size="small" onClick={() => openEditor(item.value)}>Edit</Button><Button variant="quiet" size="small" onClick={() => { clearMessages(); opener = document.activeElement as HTMLElement | null; confirmRef.value = item.value.ref; confirmID.value = item.value.id; }}>Delete</Button></div>
           </article>;
         })}</div>
@@ -250,7 +246,6 @@ function App() {
             <label htmlFor="ref">Reference</label><Input id="ref" name="ref" placeholder="e.g. openai-prod" disabled={refDisabled} autocomplete="off" /><small>Lowercase letters, numbers and hyphens.</small>
             <label htmlFor="value">Secret value</label><Input id="value" name="value" type="password" autocomplete="new-password" /><small>{secretHelp}</small>
             <label htmlFor="description">Description <span>optional</span></label><Input id="description" name="description" placeholder="What is this credential for?" />
-            <label htmlFor="allow_commands">Allowed commands <span>optional</span></label><Input id="allow_commands" name="allow_commands" placeholder="curl, my-tool" /><small>Separate command names with commas.</small>
             <div className="dialog-actions"><Button type="button" variant="outline" onClick={closeEditor}>Cancel</Button><Button type="submit" variant="primary" disabled={busy}>Save credential</Button></div>
           </form>
         </section>

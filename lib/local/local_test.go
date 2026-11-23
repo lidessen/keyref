@@ -533,9 +533,8 @@ func TestLocalMetaRoundTripAndListOrder(t *testing.T) {
 	defer s.Close()
 	value := []byte("sk-proj-abcdefghijklmnop")
 	if _, err := s.Put(ctx, "zeta", value, PutOptions{
-		Description:   "the last one",
-		AllowCommands: []string{"curl", "cat"},
-		AllowedHosts:  []string{"api.openai.com"},
+		Description:  "the last one",
+		AllowedHosts: []string{"api.openai.com"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -557,9 +556,6 @@ func TestLocalMetaRoundTripAndListOrder(t *testing.T) {
 	}
 	if m.Bytes != len(value) || m.UpdatedAt <= 0 {
 		t.Fatalf("bytes=%d updated=%d", m.Bytes, m.UpdatedAt)
-	}
-	if len(m.Policy.AllowCommands) != 2 || m.Policy.AllowCommands[0] != "curl" || m.Policy.AllowCommands[1] != "cat" {
-		t.Fatalf("allowCommands = %v", m.Policy.AllowCommands)
 	}
 	if len(m.Policy.AllowedHosts) != 1 || m.Policy.AllowedHosts[0] != "api.openai.com" {
 		t.Fatalf("allowedHosts = %v", m.Policy.AllowedHosts)
@@ -590,8 +586,7 @@ func TestLocalPutReplacesMeta(t *testing.T) {
 	}
 	defer s.Close()
 	if _, err := s.Put(ctx, "tok", []byte("first-value"), PutOptions{
-		Description:   "first",
-		AllowCommands: []string{"cat"},
+		Description: "first",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +597,7 @@ func TestLocalPutReplacesMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Description != "" || len(m.Policy.AllowCommands) != 0 || len(m.Policy.AllowedHosts) != 0 {
+	if m.Description != "" || len(m.Policy.AllowedHosts) != 0 {
 		t.Fatalf("replacement kept options: %+v", m)
 	}
 	if m.Bytes != len("second-value-longer") || m.Masked != Mask([]byte("second-value-longer")) {
@@ -691,8 +686,6 @@ func TestLocalMetaRejectsMalformedPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, plain := range map[string][]byte{
-		"empty command": []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowCommands":[""]}}`),
-		"nul command":   []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowCommands":["curl\u0000"]}}`),
 		"empty host":    []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowedHosts":[""]}}`),
 		"nul host":      []byte(`{"v":1,"ref":"tok","masked":"***","bytes":10,"policy":{"allowedHosts":["api\u0000.example"]}}`),
 		"unknown field": []byte(`{"v":1,"ref":"tok","description":"","masked":"***","bytes":10,"updated_at":0,"policy":{"allowCommands":[],"allowedHosts":[]},"future":true}`),
@@ -725,10 +718,8 @@ func TestLocalPutRejectsInvalidPolicy(t *testing.T) {
 	}
 	defer s.Close()
 	for name, opts := range map[string]PutOptions{
-		"empty command": {AllowCommands: []string{""}},
-		"nul command":   {AllowCommands: []string{"curl\x00"}},
-		"empty host":    {AllowedHosts: []string{""}},
-		"nul host":      {AllowedHosts: []string{"api\x00.example"}},
+		"empty host": {AllowedHosts: []string{""}},
+		"nul host":   {AllowedHosts: []string{"api\x00.example"}},
 	} {
 		if _, err := s.Put(ctx, "tok", []byte("value"), opts); !errors.Is(err, ErrInvalidStore) {
 			t.Errorf("%s: %v", name, err)
@@ -819,7 +810,7 @@ func TestLocalLegacyRowMigratesOnUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Ref != "legacy" || m.Masked != "***" || m.Bytes != 0 || !m.Incomplete || m.UpdatedAt != 0 || len(m.Policy.AllowCommands) != 0 {
+	if m.Ref != "legacy" || m.Masked != "***" || m.Bytes != 0 || !m.Incomplete || m.UpdatedAt != 0 {
 		t.Fatalf("incomplete meta = %+v", m)
 	}
 	metas, err = s.List(ctx)

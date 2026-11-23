@@ -300,8 +300,7 @@ func cmdSet(args []string) int {
 	sourceName := fs.String("source", "", "source to operate on")
 	raw := fs.Bool("raw", false, "store piped stdin byte for byte (default: strip one trailing newline)")
 	description := fs.String("description", "", "description stored in the entry meta")
-	var allowCommands, allowHosts stringList
-	fs.Var(&allowCommands, "allow-command", "allow this command name for this entry (repeatable)")
+	var allowHosts stringList
 	fs.Var(&allowHosts, "allow-host", "allow URL hosts in argv (repeatable)")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
@@ -309,14 +308,14 @@ func cmdSet(args []string) int {
 		return parseExit(err)
 	}
 	if len(rest) != 1 {
-		return fatalf(2, "usage: keyref set <ref> [--raw] [--description TEXT] [--allow-command NAME] [--allow-host HOST] [--source NAME]  (the secret is read from stdin)")
+		return fatalf(2, "usage: keyref set <ref> [--raw] [--description TEXT] [--allow-host HOST] [--source NAME]  (the secret is read from stdin)")
 	}
 	ref := rest[0]
 	if !local.ValidRef(ref) {
 		return fatalf(2, "invalid ref %q: a ref is one lowercase letter, or 2-64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit", ref)
 	}
 	p := mustPaths()
-	opts := local.PutOptions{Description: *description, AllowCommands: allowCommands, AllowedHosts: allowHosts}
+	opts := local.PutOptions{Description: *description, AllowedHosts: allowHosts}
 	spec, client, err := writableSource(p, *sourceName)
 	if err != nil {
 		return fatalf(2, "%v", err)
@@ -328,7 +327,7 @@ func cmdSet(args []string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
-		return client.putFromStdin(ctx, ref, *raw, opts)
+		return client.putFromStdin(ctx, ref, *raw, opts.Description)
 	}
 	if spec.Kind != source.KindLocal {
 		return fatalf(2, "the paired vault is read-only for the CLI; create or edit items on iOS")
@@ -594,11 +593,8 @@ func checkSecretSize(value []byte) ([]byte, error) {
 
 // ---- exec on a local source ----
 
-// localExecRef maps a local row onto the exec engine's own policy. A
-// row that names its own allowCommands gets exactly that whitelist;
-// without one the built-in deny list applies. argv injection stays off:
-// nothing in a local vault records consent to putting a secret in
-// process arguments.
+// localExecRef applies the local command defaults and the entry's host
+// restrictions. Local entries do not permit argv injection.
 func localExecRef(m *local.Meta) *exec.ResolvedRef {
 	return &exec.ResolvedRef{
 		Ref:        m.Ref,
@@ -606,7 +602,6 @@ func localExecRef(m *local.Meta) *exec.ResolvedRef {
 		Policy: exec.Policy{
 			Sensitivity:   "standard",
 			CommandPolicy: "deny-shells",
-			AllowCommands: m.Policy.AllowCommands,
 			AllowedHosts:  m.Policy.AllowedHosts,
 		},
 	}

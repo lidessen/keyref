@@ -209,8 +209,8 @@ exec flags:
 
   On the paired vault an item must name the commands it may run
   (allowCommands on iOS; an empty list allows nothing, and commandPolicy
-  allow-all is the owner's explicit opt-out). A local entry uses its
-  --allow-command whitelist when set, otherwise the built-in deny list.
+  allow-all is the owner's explicit opt-out). Local execution uses the
+  built-in deny list. Remote execution also asks for terminal confirmation.
 `)
 }
 

@@ -11,9 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/lidessen/keyref/proto/crypto"
 	"github.com/lidessen/keyref/proto/remote"
 	"github.com/lidessen/keyref/server/internal/store"
 )
@@ -71,10 +75,14 @@ func TestRemoteCLIFlow(t *testing.T) {
 	defer srv.Close()
 
 	const value = "synthetic-test-token-never-print"
+	env := func(home string) []string {
+		return append(os.Environ(), "KEYREF_SERVER="+srv.URL, "KEYREF_HOME="+filepath.Join(dir, home), "KEYREF_KEYRING_DIR="+filepath.Join(dir, home+"-keys"))
+	}
 	run := func(home, stdin string, args ...string) (string, int) {
 		t.Helper()
 		cmd := exec.Command(binary, append([]string{"remote"}, args...)...)
-		cmd.Env = append(os.Environ(), "KEYREF_SERVER="+srv.URL, "KEYREF_HOME="+filepath.Join(dir, home), "KEYREF_KEYRING_DIR="+filepath.Join(dir, home+"-keys"))
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		cmd.Env = env(home)
 		cmd.Stdin = strings.NewReader(stdin)
 		output, err := cmd.CombinedOutput()
 		if bytes.Contains(output, []byte(value)) {
@@ -98,20 +106,55 @@ func TestRemoteCLIFlow(t *testing.T) {
 		return out
 	}
 	ok("device-a", "", "login")
-	cat := exec.Command("which", "printenv")
-	path, err := cat.Output()
+	command, err := exec.LookPath("true")
 	if err != nil {
 		t.Fatal(err)
 	}
-	printenv := strings.TrimSpace(string(path))
-	ok("device-a", value+"\n", "set", "--allow-command", "printenv", "fixture")
+	ok("device-a", value+"\n", "set", "fixture")
 	ok("device-b", "", "login")
 	if out := ok("device-b", "", "get", "fixture"); !strings.Contains(out, "fixture") {
 		t.Fatal("second device did not find the first device's entry")
 	}
-	if out := ok("device-b", "", "exec", "--env", "REMOTE_FIXTURE=fixture", "--", printenv, "REMOTE_FIXTURE"); !strings.Contains(out, "<redacted:fixture>") {
-		t.Fatal("remote exec did not redact the fixture")
+	if out, code := run("device-b", "yes\n", "exec", "--env", "REMOTE_FIXTURE=fixture", "--", command); code != 10 || !strings.Contains(out, "controlling terminal") {
+		t.Fatal("remote exec accepted piped confirmation")
 	}
+	t.Run("terminal confirmation", func(t *testing.T) {
+		script, err := exec.LookPath("script")
+		if err != nil {
+			t.Skip("script is required to allocate the controlling terminal")
+		}
+		awk, err := exec.LookPath("awk")
+		if err != nil {
+			t.Skip("awk is required to check the injected environment")
+		}
+		const checkEnv = `BEGIN { if (length(ENVIRON["REMOTE_FIXTURE"]) > 0) { print "injected"; print ENVIRON["REMOTE_FIXTURE"] } else { exit 1 } }`
+		args := []string{"-q", "/dev/null", binary, "remote", "exec", "--env", "REMOTE_FIXTURE=fixture", "--", awk, checkEnv}
+		if runtime.GOOS == "linux" {
+			args = []string{"-q", "-e", "-c", `exec "$KEYREF_TEST_BIN" remote exec --env REMOTE_FIXTURE=fixture -- "$KEYREF_TEST_AWK" "$KEYREF_TEST_PROGRAM"`, "/dev/null"}
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, script, args...)
+		cmd.WaitDelay = time.Second
+		cmd.Env = append(env("device-b"), "KEYREF_TEST_BIN="+binary, "KEYREF_TEST_AWK="+awk, "KEYREF_TEST_PROGRAM="+checkEnv)
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		defer writer.Close()
+		cmd.Stdin = reader
+		if _, err := io.WriteString(writer, "y\n"); err != nil {
+			t.Fatal(err)
+		}
+		out, err := cmd.CombinedOutput()
+		if bytes.Contains(out, []byte(value)) {
+			t.Fatal("terminal execution leaked the fixture value")
+		}
+		if err != nil || !bytes.Contains(out, []byte("injected\r\n")) {
+			t.Fatalf("terminal confirmation did not inject the credential: %v, output %q", err, out)
+		}
+	})
 	var metadata, secretCiphertext, wrapped []byte
 	if err := st.DB().QueryRowContext(ctx, "SELECT metadata,value FROM account_items").Scan(&metadata, &secretCiphertext); err != nil {
 		t.Fatal(err)
@@ -167,4 +210,70 @@ func TestRemoteCLIFlow(t *testing.T) {
 	if res.StatusCode != 401 || json.NewDecoder(res.Body).Decode(&failure) != nil || failure.Error != "unauthorized" {
 		t.Fatal("remote server allowed unauthenticated access")
 	}
+}
+
+func TestRemoteCommandPolicyMigration(t *testing.T) {
+	ctx := t.Context()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "metadata.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	wrapping := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	v, err := Open(ctx, db, wrapping, "fixture", "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := v.issue(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(session.VaultKey)
+	cipher := remote.CipherKey(session.VaultKey)
+	defer clear(cipher)
+	id := remote.ItemID(session.VaultKey, "fixture")
+	aad := remote.ItemAAD(id, "meta")
+	blob, err := crypto.SealBlob(cipher, aad, []byte(`{"ref":"fixture","description":"Keep this","allow_commands":["curl"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := crypto.SealBlob(cipher, remote.ItemAAD(id, "value"), []byte("synthetic-value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB().ExecContext(ctx, "INSERT INTO account_items VALUES (42,?,?,?)", id, blob, value); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB().ExecContext(ctx, "DELETE FROM account_vault_migrations"); err != nil {
+		t.Fatal(err)
+	}
+	v, err = Open(ctx, db, wrapping, "fixture", "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func() {
+		t.Helper()
+		var meta, after []byte
+		if err := db.DB().QueryRowContext(ctx, "SELECT metadata,value FROM account_items WHERE account=42 AND id=?", id).Scan(&meta, &after); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := crypto.OpenBlob(cipher, aad, meta)
+		if err != nil || bytes.Contains(raw, []byte("allow_commands")) || !bytes.Contains(raw, []byte("Keep this")) || !bytes.Equal(value, after) {
+			t.Fatal("expected clean metadata with the original description and value ciphertext")
+		}
+	}
+	check()
+
+	body, err := json.Marshal(remote.Item{ID: id, Metadata: blob, Value: value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, remote.Path+"items/"+id, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+session.Token)
+	result := httptest.NewRecorder()
+	v.Handler().ServeHTTP(result, req)
+	if result.Code != http.StatusNoContent {
+		t.Fatalf("legacy write returned %d", result.Code)
+	}
+	check()
 }

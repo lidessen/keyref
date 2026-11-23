@@ -42,13 +42,18 @@ func Open(ctx context.Context, st *store.Store, encodedKey, clientID, ids string
 		`CREATE TABLE IF NOT EXISTS account_vaults (account INTEGER PRIMARY KEY, wrapped_key BLOB NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS account_sessions (token_hash BLOB PRIMARY KEY, account INTEGER NOT NULL, expires INTEGER NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS account_sessions_expiry ON account_sessions (expires)`,
+		`CREATE TABLE IF NOT EXISTS account_vault_migrations (name TEXT PRIMARY KEY)`,
 		`CREATE TABLE IF NOT EXISTS account_items (account INTEGER NOT NULL, id TEXT NOT NULL, metadata BLOB NOT NULL, value BLOB NOT NULL, PRIMARY KEY (account, id))`,
 	} {
 		if _, err := st.DB().ExecContext(ctx, query); err != nil {
 			return nil, errors.New("could not initialize remote vault storage")
 		}
 	}
-	return &Vault{store: st, wrappingKey: key, github: newGitHub(clientID), allowed: allowed}, nil
+	vault := &Vault{store: st, wrappingKey: key, github: newGitHub(clientID), allowed: allowed}
+	if err := vault.migrateCommandPolicy(ctx); err != nil {
+		return nil, errors.New("could not migrate account vault metadata")
+	}
+	return vault, nil
 }
 
 // SetVercel enables secure cookies behind the trusted Vercel proxy.
@@ -124,6 +129,22 @@ func (v *Vault) poll(w http.ResponseWriter, r *http.Request) {
 	respond(w, 200, session)
 }
 
+func accountKeyAAD(account int64) []byte {
+	return []byte("keyref-account-key-v1\x00" + strconv.FormatInt(account, 10))
+}
+
+func (v *Vault) unwrapAccountKey(account int64, wrapped []byte) ([]byte, error) {
+	return crypto.OpenBlob(v.wrappingKey, accountKeyAAD(account), wrapped)
+}
+
+func (v *Vault) accountKey(ctx context.Context, account int64) ([]byte, error) {
+	var wrapped []byte
+	if err := v.store.DB().QueryRowContext(ctx, "SELECT wrapped_key FROM account_vaults WHERE account = ?", account).Scan(&wrapped); err != nil {
+		return nil, err
+	}
+	return v.unwrapAccountKey(account, wrapped)
+}
+
 func (v *Vault) issue(ctx context.Context, account int64) (remote.Session, error) {
 	var key [32]byte
 	var random [32]byte
@@ -137,8 +158,7 @@ func (v *Vault) issue(ctx context.Context, account int64) (remote.Session, error
 	}
 	token := hex.EncodeToString(random[:])
 	digest := sha256.Sum256([]byte(token))
-	aad := []byte("keyref-account-key-v1\x00" + strconv.FormatInt(account, 10))
-	wrapped, err := crypto.SealBlob(v.wrappingKey, aad, key[:])
+	wrapped, err := crypto.SealBlob(v.wrappingKey, accountKeyAAD(account), key[:])
 	if err != nil {
 		return remote.Session{}, err
 	}
@@ -152,7 +172,7 @@ func (v *Vault) issue(ctx context.Context, account int64) (remote.Session, error
 			return err
 		}
 		var err error
-		active, err = crypto.OpenBlob(v.wrappingKey, aad, wrapped)
+		active, err = v.unwrapAccountKey(account, wrapped)
 		if err != nil {
 			return err
 		}
@@ -261,6 +281,19 @@ func (v *Vault) put(w http.ResponseWriter, r *http.Request, account int64, _ [32
 		failure(w, 400, "invalid_request")
 		return
 	}
+	// Older clients can still write items, but cannot restore the retired policy.
+	key, err := v.accountKey(r.Context(), account)
+	if err != nil {
+		failure(w, 500, "internal")
+		return
+	}
+	defer clear(key)
+	metadata, _, err := stripCommandPolicy(key, id, item.Metadata)
+	if err != nil {
+		failure(w, 400, "invalid_request")
+		return
+	}
+	item.Metadata = metadata
 	res, err := v.store.DB().ExecContext(r.Context(), `INSERT INTO account_items (account,id,metadata,value)
 		SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM account_items WHERE account=? AND id=?)
 		OR (SELECT COUNT(*) FROM account_items WHERE account=?) < ?

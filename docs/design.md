@@ -564,7 +564,7 @@ keyref 掌握 pty 主端。子进程的输出先过脱敏器，再交给 agent�
 
 **已配对（sync）source 要求显式白名单**（protocol v2 §H）。argv0 的 basename（大小写不敏感）必须命中条目 `allowCommands` 里的一项，否则退出码 `10`，并提示去 iOS 里设置该条目允许的命令。`allowCommands` 为空时条目**什么都跑不了**——已配对的库不退回下面的内置拒绝名单。唯一的例外是人在 iOS 上明确关闭了「拒绝 shell 与解释器」（`commandPolicy = allow-all`）：那是 owner 的显式放行，等价于「任何命令都能拿到它」。`allowCommands` 非空时仍按白名单收紧，列表只会越写越严；空白或未知的 `commandPolicy` 按默认处理（继续严格）。
 
-**本地 source 保留内置拒绝名单。** 本地库没有逐条目的策略记录，`allowCommands` 无从谈起，所以 `deny-shells` 的内置名单继续生效：argv0 的 basename（大小写不敏感）落在下面的集合里就拒绝执行。
+**本地和 GitHub 账号库统一使用内置命令拒绝名单。** argv0 的 basename（大小写不敏感）落在下面的集合里就拒绝执行。账号库的 CLI 注入还需通过控制终端确认本次执行。
 
 **拒绝名单不是安全边界。** 它挡的是手滑，不是对抗性的 agent：`timeout 5 sh -c …`、`awk`、`find -exec`、`git -c alias.x='!…'` 都能把 env 里的秘密变形输出，脱敏器只认整段秘密值。任何文档都不要把它写成保护；要抗对抗性 agent，靠显式白名单加审批（以及 Phase 3 的沙箱）。
 
@@ -1410,7 +1410,7 @@ A8、B9 两行已并入 §4。残余面在这里写明：被攻破的采集设�
 - 配对完成时授予集合为空，直到人勾选。
 - 撤销一台可能已经泄密的 CLI 时，轮换它能用的 item key。
 - 审批请求必须带 CLI 设备签名；一次性包裹绑定 approval_id、item_id 与请求誊本摘要。
-- 已配对库的 `exec` 要求条目显式列出允许的命令（v2 H）：`allowCommands` 为空则拒绝，除非 owner 明确关闭了 shell 拒绝（`commandPolicy = allow-all`）。内置拒绝名单只在本地源生效，且任何文档都不把它写成安全边界。
+- 已配对库的 `exec` 要求条目显式列出允许的命令（v2 H）：`allowCommands` 为空则拒绝，除非 owner 明确关闭了 shell 拒绝（`commandPolicy = allow-all`）。本地和 GitHub 账号库的内置拒绝名单仅用于防止误操作。
 - 审批是两个正交的轴（v2 I）：条目 meta 写了 `sensitivity = approval`，或本设备没有有效的 `use` 授予，`exec` 就必须走审批。meta 只会收紧规则，永远不会放松；审批投递明文值还是一次性 item key 由条目行决定，不由 meta 决定。
 - 客户端消费的每一条 item 与 grant 行都先验签再入库：item 按四个字段摘要加 `writer_device_id` 的签名（v2 E），grant 按 owner 密钥链逐个试 key（v2 F）；多 owner 时新目录必须由已保存目录里的 active owner 设备签名。验不过的行跳过，验不过的目录中止同步。
 - 恢复码只显示一次，内含 `vault_id`；恢复签名权威只用于重新锚定目录。
@@ -1482,7 +1482,7 @@ v0.9 落地之后，这句话只在名义上成立：`list` 只有 sync 有，`m
   "masked": "sk-****abcd",
   "bytes": 51,
   "updated_at": 1790000000000,
-  "policy": { "allowCommands": [], "allowedHosts": [] }
+  "policy": { "allowedHosts": [] }
 }
 ```
 
@@ -1498,7 +1498,7 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 - stdin 是终端时，不回显地读一行，而不是读到 EOF。
 - 输出说明是新建还是替换：`created "tok"` / `replaced "tok"`。
 - 值短于 8 字节时在 stderr 警告：§7.4 对短值的误伤和漏检都更严重（1 字节的值会把输出里所有同样的字节替换掉）。
-- `--description TEXT`、`--allow-command NAME`（可重复）、`--allow-host HOST`（可重复）写进这一行的 meta。掩码按 §6.1 的规则在这时算好。
+- `--description TEXT` 与 `--allow-host HOST`（可重复）写进这一行的 meta。掩码按 §6.1 的规则在这时算好。
 - **策略只能随一次 `set` 写入**，也就是随一个新的秘密值。没有「只改策略、不换值」的命令：不知道秘密值的调用方（比如 agent）没法在保留秘密的同时放宽它的策略。
 
 **`list` / `get`。** 只解 meta，不碰 secret（§16）。输出字段与 sync 完全相同——`ref`、`name`、`description`、`type`、`masked`、`sensitivity`、`injectable`——本地条目的 `name` 等于 `ref`，`type` 是 `local`，`sensitivity` 是 `standard`，`injectable` 是 `true`。agent 只需要认一种形状。
@@ -1513,8 +1513,7 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 
 **`exec`。** 与 `sync` 同一套代码路径——同样的注入形态、同样的脱敏器、同样的 spawn 前检查；没有授予、没有审批、没有远程审计。命令策略（§7.3）：
 
-- 行的 `allowCommands` 非空：精确白名单，与 sync 条目同义，只会收紧。
-- 为空：内置拒绝名单（滑倒保护，不是边界）。本地 source 的默认值保持拒绝名单不变。
+- 所有条目使用内置命令拒绝名单。升级时从加密 meta 中移除旧命令白名单，保留原值的密文。
 - `allowedHosts` 非空时做与 sync 相同的参数检查。
 - argv 注入在本地库上仍然不可用。
 
@@ -1530,7 +1529,7 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 
 - **挡的是意外。** 秘密不出现在命令行、shell 历史、`list` / `get` 的输出和 keyref 转发的子进程输出里。一个配合的 agent 不会「不小心」把明文带进上下文。
 - **不挡对抗性的 agent。** 主密钥在同一用户的密钥环里；无头环境下 `KEYREF_LOCAL_MASTER` 就在调用 keyref 的那个进程的环境里，也就是在 agent harness 的环境里。内置拒绝名单拦不住 `awk`、`sed`、`curl` 这类把秘密变形输出或直接发走的命令，脱敏器只认整串和几种固定编码。这些都是 B1 / B2，不是待修的 bug。
-- **收紧的手段只有两个**：给条目写 `allowCommands`（§17.4），或者把秘密放进已配对的库并设 `sensitivity = approval`。需要「人点头才能用」的秘密不属于本地 source。
+- 需要每次使用时确认的凭据可以存入 GitHub 账号库。配对库可通过 `sensitivity = approval` 请求 owner 审批。
 
 其余不变：明文只进子进程（除非人在终端上确认 `--reveal`），`exec` 先做策略检查再 spawn，不经过 shell，输出脱敏。
 
@@ -1562,7 +1561,7 @@ meta 与 secret 用不同的钥匙、不同的 AAD 标签（都绑定 `store id`
 | 本地 source 遵守 `keyref lock` | 已实现（标志是数据目录里的 `locked` 文件，本地 source 不依赖 sync 的任何文件） |
 | 密钥环条目绑定 `store id`、`init` 不覆盖 | 已实现（issue #2） |
 | `sources.json` 原子替换 | 已实现（issue #6；`server.conf` 一并改为原子替换） |
-| 行的加密 meta；local 的 `list`；`get` 不解密 secret；本地 `allowCommands` / `allowedHosts` | 已实现（2026-11-14） |
+| 行的加密 meta；local 的 `list`；`get` 不解密 secret；本地 `allowedHosts` | 已实现 |
 | `set` 默认去末尾换行、`--raw`、终端不回显、新建/替换、短值警告、ref 语法 | 已实现（2026-11-13） |
 | local `import-env` 显式映射、批量事务与同值幂等 | 已实现限定赋值语法；真实 shell 凭证文件的格式兼容性未验，见 [K1](k1.md) |
 | §7.4 对去掉首尾空白的值建立匹配；只扣留可能成为匹配前缀的尾部 | 已实现（2026-11-13） |
@@ -1587,3 +1586,5 @@ Server 用 GitHub 返回的稳定数字账号 ID 判断允许登录的身份，�
 HMAC 和加密密钥，分别加密元数据和值。条目标识与字段类型绑定到 AEAD
 附加数据，Server 数据库只接收密文及不透明条目标识。多设备共享同一个账号
 库，更新同一条目以最后提交的写入为准。CLI 登录态存于系统密钥环。
+
+添加凭据时只填写凭据内容和可选描述。迁移会从加密元数据中删除已有命令白名单，并保留凭据值密文。CLI 在命令检查通过后，通过控制终端确认本次注入，再读取明文。没有控制终端或拒绝确认时退出码为 `10`。

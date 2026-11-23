@@ -6,6 +6,8 @@ import (
 	"errors"
 	"sync"
 	"testing"
+
+	keycrypto "github.com/lidessen/keyref/proto/crypto"
 )
 
 func legacyStoreForTest(t *testing.T) (*Store, string) {
@@ -19,7 +21,7 @@ func legacyStoreForTest(t *testing.T) (*Store, string) {
 	if _, err := s.Put(context.Background(), "legacy", []byte("synthetic-value"), PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("ALTER TABLE entries DROP COLUMN meta"); err != nil {
+	if _, err := s.db.Exec("ALTER TABLE entries DROP COLUMN meta; PRAGMA user_version=0;"); err != nil {
 		t.Fatal(err)
 	}
 	return s, path
@@ -96,7 +98,7 @@ func TestLegacyBackfillDoesNotOverwriteNewerRow(t *testing.T) {
 			if action == "delete" {
 				err = other.Delete(ctx, "legacy")
 			} else {
-				_, err = other.Put(ctx, "legacy", []byte("replacement-value"), PutOptions{AllowCommands: []string{"curl"}})
+				_, err = other.Put(ctx, "legacy", []byte("replacement-value"), PutOptions{})
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -110,7 +112,7 @@ func TestLegacyBackfillDoesNotOverwriteNewerRow(t *testing.T) {
 				if !errors.Is(err, ErrNotFound) || m != nil {
 					t.Fatalf("backfill resurrected a deleted row: %+v, %v", m, err)
 				}
-			} else if err != nil || m.Incomplete || m.Bytes != len("replacement-value") || len(m.Policy.AllowCommands) != 1 || m.Policy.AllowCommands[0] != "curl" {
+			} else if err != nil || m.Incomplete || m.Bytes != len("replacement-value") {
 				t.Fatalf("backfill overwrote newer metadata: %+v, %v", m, err)
 			}
 		})
@@ -125,7 +127,7 @@ func TestLegacyBackfillRepairsPersistedIncompleteMeta(t *testing.T) {
 	ctx := context.Background()
 	id, _ := s.entryID("legacy")
 	incomplete := &Meta{V: 1, Ref: "legacy", Masked: "***", UpdatedAt: 1,
-		Policy: Policy{AllowCommands: []string{"curl"}}}
+		Policy: Policy{}}
 	sealed, err := s.sealMeta(id, incomplete)
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +148,7 @@ func TestLegacyBackfillRepairsPersistedIncompleteMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, err := s.Stat(ctx, "legacy")
-	if err != nil || m.Incomplete || m.Bytes != len("synthetic-value") || m.Masked != Mask([]byte("synthetic-value")) || m.UpdatedAt != 0 || len(m.Policy.AllowCommands) != 1 || m.Policy.AllowCommands[0] != "curl" {
+	if err != nil || m.Incomplete || m.Bytes != len("synthetic-value") || m.Masked != Mask([]byte("synthetic-value")) || m.UpdatedAt != 0 {
 		t.Fatalf("repaired meta = %+v, %v", m, err)
 	}
 }
@@ -169,5 +171,63 @@ func TestLegacyBackfillHonorsWriteLimit(t *testing.T) {
 	var missing bool
 	if err := s.db.QueryRow("SELECT meta IS NULL FROM entries").Scan(&missing); err != nil || !missing {
 		t.Fatalf("failed migration changed the row: missing=%v err=%v", missing, err)
+	}
+}
+
+func TestRemoveStoredCommandPolicy(t *testing.T) {
+	path := pathForTest(t)
+	key := keyForTest()
+	s, err := Create(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if s != nil {
+			_ = s.Close()
+		}
+	}()
+	if _, err := s.Put(t.Context(), "fixture", []byte("synthetic-value"), PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.entryID("fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad, err := keycrypto.MetaAAD(s.id, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := keycrypto.SealBlob(s.metaKey, aad, []byte(`{"v":1,"ref":"fixture","bytes":15,"masked":"***","policy":{"allowCommands":["curl"],"allowedHosts":["example.com"]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value []byte
+	if err := s.db.QueryRow("SELECT blob FROM entries WHERE id=?", id).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("UPDATE entries SET meta=? WHERE id=?", old, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("PRAGMA user_version=0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta, after []byte
+	if err := s.db.QueryRow("SELECT meta,blob FROM entries WHERE id=?", id).Scan(&meta, &after); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := keycrypto.OpenBlob(s.metaKey, aad, meta)
+	if err != nil || bytes.Contains(raw, []byte("allowCommands")) || !bytes.Equal(value, after) {
+		t.Fatal("migration did not clean metadata while preserving value ciphertext")
+	}
+	entry, err := s.Stat(t.Context(), "fixture")
+	if err != nil || len(entry.Policy.AllowedHosts) != 1 || entry.Policy.AllowedHosts[0] != "example.com" {
+		t.Fatal("migration did not preserve host policy")
 	}
 }

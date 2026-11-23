@@ -178,7 +178,7 @@ func listSources(p config.Paths, override, format string) int {
 			entries = append(entries, meta.Entry{
 				Ref: m.Ref, Name: m.Ref, Type: "remote", Source: source.RemoteName,
 				Masked: m.Mask, Description: m.Description, Sensitivity: "standard",
-				Injectable: len(m.AllowCommands) > 0,
+				Injectable: true,
 			})
 		}
 	}

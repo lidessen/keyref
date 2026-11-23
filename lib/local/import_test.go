@@ -96,16 +96,14 @@ func TestImportMixedStatusesAndPreservedPolicy(t *testing.T) {
 	keepValue := importValue(t, 24)
 
 	if _, err := s.Put(ctx, "keep", keepValue, PutOptions{
-		Description:   "keep description",
-		AllowCommands: []string{"cat"},
-		AllowedHosts:  []string{"keep.example"},
+		Description:  "keep description",
+		AllowedHosts: []string{"keep.example"},
 	}); err != nil {
 		t.Fatal("seed keep failed")
 	}
 	if _, err := s.Put(ctx, "replace", oldValue, PutOptions{
-		Description:   "replace description",
-		AllowCommands: []string{"curl", "git"},
-		AllowedHosts:  []string{"api.example"},
+		Description:  "replace description",
+		AllowedHosts: []string{"api.example"},
 	}); err != nil {
 		t.Fatal("seed replace failed")
 	}
@@ -173,7 +171,7 @@ func TestImportMixedStatusesAndPreservedPolicy(t *testing.T) {
 		t.Fatal("fresh stat failed")
 	}
 	if freshMeta.Ref != "fresh" || freshMeta.V != 1 || freshMeta.Description != "" ||
-		len(freshMeta.Policy.AllowCommands) != 0 || len(freshMeta.Policy.AllowedHosts) != 0 {
+		len(freshMeta.Policy.AllowedHosts) != 0 {
 		t.Fatal("new item did not use the default identity and policy")
 	}
 	if freshMeta.Masked != Mask(freshValue) || freshMeta.Bytes != len(freshValue) ||
@@ -186,7 +184,6 @@ func TestImportMixedStatusesAndPreservedPolicy(t *testing.T) {
 		t.Fatal("replace stat failed")
 	}
 	if replaceMeta.Description != "replace description" ||
-		len(replaceMeta.Policy.AllowCommands) != 2 || replaceMeta.Policy.AllowCommands[0] != "curl" || replaceMeta.Policy.AllowCommands[1] != "git" ||
 		len(replaceMeta.Policy.AllowedHosts) != 1 || replaceMeta.Policy.AllowedHosts[0] != "api.example" {
 		t.Fatal("replacement lost the existing description or policy")
 	}
@@ -219,8 +216,7 @@ func TestImportUnchangedDoesNotRewriteRowOrCounter(t *testing.T) {
 	s := importStore(t)
 	value := importValue(t, 26)
 	if _, err := s.Put(ctx, "stable", value, PutOptions{
-		Description:   "stable description",
-		AllowCommands: []string{"git"},
+		Description: "stable description",
 	}); err != nil {
 		t.Fatal("seed failed")
 	}
@@ -347,7 +343,7 @@ func TestImportMetaBoundFailureRollsBack(t *testing.T) {
 	// persist it. A new value with a longer mask and size no longer
 	// fits, so sealing the replacement meta fails inside the batch.
 	base := Meta{V: 1, Ref: "limit", Masked: "***",
-		Policy: Policy{AllowCommands: []string{}, AllowedHosts: []string{}}}
+		Policy: Policy{AllowedHosts: []string{}}}
 	var largest []byte
 	lo, hi := 0, maxMeta
 	for lo <= hi {
@@ -449,7 +445,7 @@ func TestImportCorruptionFailsClosedWholeBatch(t *testing.T) {
 		}},
 		{"ref mismatch meta", func(t *testing.T, s *Store, badID string) {
 			m := &Meta{V: 1, Ref: "other", Masked: "***", Bytes: 1, UpdatedAt: 1,
-				Policy: Policy{AllowCommands: []string{}, AllowedHosts: []string{}}}
+				Policy: Policy{AllowedHosts: []string{}}}
 			sealed, err := s.sealMeta(badID, m)
 			if err != nil {
 				t.Fatal("mismatched meta seal failed")
@@ -632,7 +628,7 @@ func TestImportLegacyRows(t *testing.T) {
 		if err != nil {
 			t.Fatal("legacy stat failed")
 		}
-		if m.Description != "" || len(m.Policy.AllowCommands) != 0 || len(m.Policy.AllowedHosts) != 0 {
+		if m.Description != "" || len(m.Policy.AllowedHosts) != 0 {
 			t.Fatal("replaced legacy row did not get the default policy")
 		}
 		if m.Masked != Mask(replacement) || m.Bytes != len(replacement) || m.UpdatedAt <= 0 || m.Incomplete {
@@ -667,7 +663,7 @@ func TestImportLegacyRows(t *testing.T) {
 			t.Fatal("ref id failed")
 		}
 		m := &Meta{V: 1, Ref: "legacy", Description: "legacy description", Masked: "***", UpdatedAt: 5,
-			Policy: Policy{AllowCommands: []string{"curl"}, AllowedHosts: []string{"legacy.example"}}}
+			Policy: Policy{AllowedHosts: []string{"legacy.example"}}}
 		sealed, err := s.sealMeta(id, m)
 		if err != nil {
 			t.Fatal("incomplete meta seal failed")
@@ -711,7 +707,6 @@ func TestImportLegacyRows(t *testing.T) {
 			t.Fatal("incomplete stat failed")
 		}
 		if m.Description != "legacy description" ||
-			len(m.Policy.AllowCommands) != 1 || m.Policy.AllowCommands[0] != "curl" ||
 			len(m.Policy.AllowedHosts) != 1 || m.Policy.AllowedHosts[0] != "legacy.example" {
 			t.Fatal("replaced incomplete row lost its description or policy")
 		}

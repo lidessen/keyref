@@ -131,20 +131,15 @@ const maxMeta = 64 << 10
 const writeCap = int64(4294967295)
 const checkText = "keyref-local-v1"
 
-// Policy is the per-entry execution policy stored in the encrypted
-// meta (design.md §17.4). An empty AllowCommands keeps the built-in
-// deny list for a local source; a non-empty list is an exact whitelist.
+// Policy holds the URL host restriction for local execution.
 type Policy struct {
-	AllowCommands []string `json:"allowCommands"`
-	AllowedHosts  []string `json:"allowedHosts"`
+	AllowedHosts []string `json:"allowedHosts"`
 }
 
 func (p Policy) valid() bool {
-	for _, list := range [][]string{p.AllowCommands, p.AllowedHosts} {
-		for _, v := range list {
-			if v == "" || strings.ContainsRune(v, 0) {
-				return false
-			}
+	for _, host := range p.AllowedHosts {
+		if host == "" || strings.ContainsRune(host, 0) {
+			return false
 		}
 	}
 	return true
@@ -171,9 +166,8 @@ type Meta struct {
 // the description and policy, because a caller that does not know the
 // value must not be able to widen its policy (design.md §17.4).
 type PutOptions struct {
-	Description   string
-	AllowCommands []string
-	AllowedHosts  []string
+	Description  string
+	AllowedHosts []string
 }
 
 // maskPrefixes is the §6.1 longest-prefix table used for non-password
@@ -372,7 +366,7 @@ func open(path string, key []byte, create bool) (*Store, error) {
 			return fail(classify(ErrInvalidStore, "invalid local vault: could not initialize a new vault", e))
 		}
 		defer tx.Rollback()
-		if _, e = tx.Exec(`CREATE TABLE metadata (id TEXT NOT NULL, check_blob BLOB NOT NULL, writes INTEGER NOT NULL); CREATE TABLE entries (id TEXT PRIMARY KEY, meta BLOB NOT NULL, blob BLOB NOT NULL);`); e == nil {
+		if _, e = tx.Exec(`CREATE TABLE metadata (id TEXT NOT NULL, check_blob BLOB NOT NULL, writes INTEGER NOT NULL); CREATE TABLE entries (id TEXT PRIMARY KEY, meta BLOB NOT NULL, blob BLOB NOT NULL); PRAGMA user_version = 1;`); e == nil {
 			_, e = tx.Exec("INSERT INTO metadata(id,check_blob,writes) VALUES (?,?,1)", s.id, blob)
 		}
 		if e == nil {
@@ -415,6 +409,10 @@ func open(path string, key []byte, create bool) (*Store, error) {
 		if e := ensureMetaColumn(db); e != nil {
 			wipe()
 			return fail(classify(ErrCorruptStore, "corrupt local vault: could not migrate the schema", e))
+		}
+		if e := s.migrateCommandPolicy(); e != nil {
+			wipe()
+			return fail(classify(ErrCorruptStore, "could not migrate local credential metadata", e))
 		}
 	}
 	return s, nil
@@ -530,7 +528,7 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 	if len(value) == 0 || len(value) > maxValue {
 		return false, ErrInvalidValueSize
 	}
-	if !(Policy{AllowCommands: opts.AllowCommands, AllowedHosts: opts.AllowedHosts}).valid() {
+	if !(Policy{AllowedHosts: opts.AllowedHosts}).valid() {
 		return false, ErrInvalidStore
 	}
 	id, err := s.entryID(ref)
@@ -545,8 +543,7 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 		Bytes:       len(value),
 		UpdatedAt:   time.Now().UnixMilli(),
 		Policy: Policy{
-			AllowCommands: append([]string{}, opts.AllowCommands...),
-			AllowedHosts:  append([]string{}, opts.AllowedHosts...),
+			AllowedHosts: append([]string{}, opts.AllowedHosts...),
 		},
 	}
 	metaBlob, err := s.sealMeta(id, m)
@@ -719,7 +716,7 @@ func (s *Store) Stat(ctx context.Context, ref string) (*Meta, error) {
 	}
 	return &Meta{
 		V: 1, Ref: ref, Masked: "***", Incomplete: true,
-		Policy: Policy{AllowCommands: []string{}, AllowedHosts: []string{}},
+		Policy: Policy{AllowedHosts: []string{}},
 	}, nil
 }
 
@@ -787,7 +784,7 @@ func (s *Store) backfillMeta(ctx context.Context, ref, id string, blob, oldMeta,
 	if !ValidRef(ref) {
 		return nil // legacy refs remain usable, but cannot enter the new index
 	}
-	m := &Meta{V: 1, Ref: ref, Policy: Policy{AllowCommands: []string{}, AllowedHosts: []string{}}}
+	m := &Meta{V: 1, Ref: ref, Policy: Policy{AllowedHosts: []string{}}}
 	if oldMeta != nil {
 		stored, err := s.openMeta(id, oldMeta)
 		if err != nil || !stored.Incomplete {

@@ -142,7 +142,7 @@ func TestBrowserAccountVault(t *testing.T) {
 	if headers.Get("Location") != "/manage/" {
 		t.Fatal("OAuth did not return to the vault")
 	}
-	status, body, _ = request("POST", "/manage/api/items", `{"ref":"api-key","value":"fixture-secret-value","description":"first","allow_commands":["curl"]}`, "", true)
+	status, body, _ = request("POST", "/manage/api/items", `{"ref":"api-key","value":"fixture-secret-value","description":"first"}`, "", true)
 	check(status, 204, body)
 	status, body, _ = request("POST", "/manage/api/items", `{"ref":"api-key","value":"replacement"}`, "", true)
 	check(status, 409, body)
@@ -155,7 +155,7 @@ func TestBrowserAccountVault(t *testing.T) {
 	if err := json.Unmarshal(body, &rows); err != nil || len(rows) != 1 || rows[0].Ref != "api-key" || rows[0].Mask != "***" || rows[0].Description != "first" {
 		t.Fatalf("unexpected metadata: %s %v", body, err)
 	}
-	key, err := v.browserKey(httptest.NewRequest("GET", "/", nil), 42)
+	key, err := v.accountKey(t.Context(), 42)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestBrowserAccountVault(t *testing.T) {
 	check(status, 400, body)
 	status, body, _ = request("DELETE", "/manage/api/items/api-key", "", "", true)
 	check(status, 400, body)
-	status, body, _ = request("PATCH", itemPath, `{"ref":"api-key","description":"updated","allow_commands":["git"]}`, "", true)
+	status, body, _ = request("PATCH", itemPath, `{"ref":"api-key","description":"updated"}`, "", true)
 	check(status, 204, body)
 	var encryptedAfter []byte
 	if err := st.DB().QueryRowContext(ctx, "SELECT value FROM account_items WHERE account=? AND id=?", 42, id).Scan(&encryptedAfter); err != nil || !bytes.Equal(encryptedBefore, encryptedAfter) {
