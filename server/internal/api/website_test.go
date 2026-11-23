@@ -22,11 +22,11 @@ func TestPublicHomepageWithAccountVault(t *testing.T) {
 	}
 
 	home := request("/")
-	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/manage/"`) {
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/vault/"`) {
 		t.Fatalf("homepage with account vault returned status %d or omitted the vault link", home.Code)
 	}
-	if manage := request("/manage/"); manage.Code != http.StatusNoContent {
-		t.Fatalf("account vault route returned %d", manage.Code)
+	if vault := request("/vault/"); vault.Code != http.StatusNoContent {
+		t.Fatalf("account vault route returned %d", vault.Code)
 	}
 	installer := request("/install.sh")
 	const target = "https://raw.githubusercontent.com/lidessen/keyref/main/scripts/install.sh"

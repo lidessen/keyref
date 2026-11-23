@@ -175,6 +175,8 @@ func (s *Server) Handler() http.Handler {
 			s.cfg.AccountVault.ServeHTTP(w, r)
 		})
 		mux.Handle("/v1/remote/", accountHandler)
+		mux.Handle("/vault/", accountHandler)
+		mux.Handle("/manage", accountHandler)
 		mux.Handle("/manage/", accountHandler)
 	}
 

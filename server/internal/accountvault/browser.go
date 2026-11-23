@@ -22,12 +22,18 @@ import (
 //go:embed all:web
 var browserAssets embed.FS
 
-const browserSession = "keyref_session"
+const (
+	browserPath    = "/vault/"
+	browserSession = "keyref_session"
+)
 
 var browserRef = regexp.MustCompile(`^(?:[a-z]|[a-z][a-z0-9-]{0,62}[a-z0-9])$`)
 
 func (v *Vault) registerBrowser(mux *http.ServeMux) {
-	mux.HandleFunc("GET /manage/{$}", v.browserPage)
+	mux.HandleFunc("GET "+browserPath+"{$}", v.browserPage)
+	mux.HandleFunc("GET /manage", redirectToVault)
+	mux.HandleFunc("GET /manage/{$}", redirectToVault)
+	mux.HandleFunc("GET "+browserPath+"assets/{asset}", v.browserAsset)
 	mux.HandleFunc("GET /manage/assets/{asset}", v.browserAsset)
 	mux.HandleFunc("POST /manage/api/login/github", v.oauthStart)
 	mux.HandleFunc("GET "+OAuthCallbackPath, v.oauthCallback)
@@ -38,11 +44,16 @@ func (v *Vault) registerBrowser(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /manage/api/items/{id}", v.browserAuthorized(v.browserDelete))
 }
 
+func redirectToVault(w http.ResponseWriter, r *http.Request) {
+	destination := url.URL{Path: browserPath, RawQuery: r.URL.RawQuery}
+	http.Redirect(w, r, destination.String(), http.StatusFound)
+}
+
 func browserHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 }
 
 func (v *Vault) browserPage(w http.ResponseWriter, r *http.Request) {

@@ -1,7 +1,7 @@
 import { createRuntime, keyed } from "meowjsx";
 import { derived, mapSignal, signal } from "meowjsx/signal";
 import { createWebRenderer } from "meowjsx/web";
-import { Button, Input, Text, createMeowUI } from "meowtail";
+import { Button, Input, createMeowUI } from "meowtail";
 import { standardTheme } from "meowtail/theme";
 import { createMeowUITheme } from "meowtail/web";
 
@@ -46,6 +46,10 @@ function message(error: unknown): string {
   return "Could not reach the server. Check your connection and try again.";
 }
 
+function Icon({ name }: { name: string }) {
+  return <svg className="icon" aria-hidden="true"><use href={`/assets/icons.svg#${name}`} /></svg>;
+}
+
 function App() {
   const screen = signal<Screen>("loading");
   const items = signal<Item[]>([]);
@@ -63,17 +67,21 @@ function App() {
   const loggedIn = derived(() => screen.value !== "ready");
   const loading = derived(() => screen.value !== "loading");
   const errorHidden = derived(() => error.value === "");
+  const pageErrorHidden = derived(() => errorHidden.value || editing.value || confirmRef.value !== "");
   const noticeHidden = derived(() => notice.value === "");
   const editorHidden = derived(() => !editing.value);
   const confirmHidden = derived(() => confirmRef.value === "");
   const editorTitle = derived(() => editRef.value ? "Edit credential" : "New credential");
   const secretHelp = derived(() => editRef.value ? "Leave blank to keep the current value." : "The value is encrypted before it is stored.");
   const refDisabled = derived(() => editRef.value !== "");
+  const dialogOpen = derived(() => editing.value || confirmRef.value !== "");
   const visibleItems = derived(() => {
     const search = query.value.trim().toLowerCase();
     return [...items.value].sort((a, b) => a.ref.localeCompare(b.ref)).filter((item) => !search || item.ref.toLowerCase().includes(search) || (item.description ?? "").toLowerCase().includes(search));
   });
-  const empty = derived(() => visibleItems.value.length !== 0);
+  const emptyVaultHidden = derived(() => items.value.length !== 0);
+  const emptySearchHidden = derived(() => items.value.length === 0 || visibleItems.value.length !== 0);
+  const listHidden = derived(() => visibleItems.value.length === 0);
   const count = derived(() => `${visibleItems.value.length} ${visibleItems.value.length === 1 ? "credential" : "credentials"}`);
   const deleteMessage = derived(() => `Delete “${confirmRef.value}” from this vault? This cannot be undone.`);
 
@@ -81,6 +89,7 @@ function App() {
   function fail(cause: unknown) {
     if (cause instanceof APIError && cause.status === 401) {
       items.value = [];
+      document.querySelector<HTMLFormElement>("#credential-form")?.reset();
       editing.value = false;
       confirmRef.value = "";
       screen.value = "signed-out";
@@ -114,7 +123,7 @@ function App() {
     try { await request("session", "DELETE"); }
     catch (cause) { if (!(cause instanceof APIError && cause.status === 401)) { fail(cause); return; } }
     items.value = [];
-    query.value = "";
+    resetSearch();
     editing.value = false;
     screen.value = "signed-out";
   }
@@ -133,19 +142,45 @@ function App() {
     });
   }
   function closeEditor() {
+    error.value = "";
     editing.value = false;
     document.querySelector<HTMLFormElement>("#credential-form")?.reset();
-    opener?.focus();
+    restoreFocus();
   }
   function closeConfirmation() {
+    error.value = "";
     confirmRef.value = "";
-    opener?.focus();
+    restoreFocus();
+  }
+  function restoreFocus() {
+    const target = opener;
+    requestAnimationFrame(() => {
+      if (target?.isConnected) target.focus();
+    });
+  }
+  function openConfirmation(item: Item) {
+    clearMessages();
+    opener = document.activeElement as HTMLElement | null;
+    confirmRef.value = item.ref;
+    confirmID.value = item.id;
+    requestAnimationFrame(() => document.querySelector<HTMLElement>("#cancel-delete")?.focus());
+  }
+  function resetSearch() {
+    query.value = "";
+    const input = document.querySelector<HTMLInputElement>("#search");
+    if (input) input.value = "";
+  }
+  function clearSearch() {
+    resetSearch();
+    document.querySelector<HTMLInputElement>("#search")?.focus();
   }
   document.addEventListener("keydown", (event) => {
     const modal = document.querySelector<HTMLElement>('.overlay:not([hidden]) .dialog');
     if (!modal) return;
     if (event.key === "Escape") {
-      if (editing.value) closeEditor(); else closeConfirmation();
+      if (!busy.value) {
+        if (editing.value) closeEditor(); else closeConfirmation();
+      }
       return;
     }
     if (event.key !== "Tab") return;
@@ -169,7 +204,6 @@ function App() {
       await request(editRef.value ? "items/" + encodeURIComponent(editID.value) : "items", editRef.value ? "PATCH" : "POST", {
         ref, description: String(fields.get("description") ?? ""), ...(value ? { value } : {}),
       });
-      form.reset();
       closeEditor();
       await refresh();
       notice.value = editRef.value ? "Credential updated." : "Credential added.";
@@ -184,13 +218,14 @@ function App() {
       await request("items/" + encodeURIComponent(confirmID.value), "DELETE");
       closeConfirmation();
       await refresh();
+      document.querySelector<HTMLElement>(".add-button")?.focus();
       notice.value = "Credential deleted.";
     } catch (cause) { fail(cause); }
     finally { busy.value = false; }
   }
   const loginStatus = new URLSearchParams(location.search).get("login");
   if (loginStatus) {
-    history.replaceState(null, "", "/manage/");
+    history.replaceState(null, "", "/vault/");
     error.value = loginStatus === "forbidden"
       ? "This GitHub account does not have access to this vault."
       : loginStatus === "cancelled" ? "GitHub sign-in was cancelled." : "GitHub sign-in failed. Please try again.";
@@ -198,67 +233,125 @@ function App() {
   void refresh();
 
   return <div className="app">
-    <header className="topbar">
+    <header className="topbar" inert={dialogOpen}>
       <div className="topbar-inner">
-        <a href="/manage/" className="brand" aria-label="Keyref home"><img src="/manage/assets/logo.png" alt="" /><span>keyref</span></a>
-        <div hidden={loggedIn}><Button variant="quiet" size="small" onClick={logout}>Sign out</Button></div>
+        <div className="topbar-context">
+          <a href="/" className="brand" aria-label="Keyref home"><img src="/assets/logo.png" alt="" width="32" height="32" /><span>keyref</span></a>
+          <span className="topbar-location">Vault</span>
+        </div>
+        <div hidden={loggedIn}>
+          <Button variant="quiet" size="small" onClick={logout}><Icon name="sign-out" />Sign out</Button>
+        </div>
       </div>
     </header>
-    <main>
-      <div className="alert error" role="alert" hidden={errorHidden}>{error}</div>
-      <div className="alert notice" role="status" hidden={noticeHidden}>{notice}</div>
-      <section className="loading" hidden={loading}><Text variant="secondary">Opening your vault…</Text></section>
+    <main className="workspace" inert={dialogOpen}>
+      <div className="feedback" hidden={derived(() => pageErrorHidden.value && noticeHidden.value)}>
+        <div className="alert error" role="alert" hidden={pageErrorHidden}>{error}</div>
+        <div className="alert notice" role="status" hidden={noticeHidden}>{notice}</div>
+      </div>
+      <p className="loading" role="status" hidden={loading}>Opening your vault…</p>
       <section className="login-layout" hidden={signedOut}>
         <div className="login-copy">
-          <h1>Sign in to Keyref</h1>
-          <p className="lead">Manage your remote vault credentials with GitHub.</p>
-          <Button variant="primary" disabled={busy} onClick={login}>Continue with GitHub <span aria-hidden="true">↗</span></Button>
+          <h1>Open your vault.</h1>
+          <p className="lead">Sign in with GitHub to manage the credentials you use with Keyref.</p>
+          <Button className="login-button" variant="primary" disabled={busy} onClick={login}>Continue with GitHub <Icon name="arrow-right" /></Button>
         </div>
         <div className="login-art" aria-hidden="true">
-          <img src="/manage/assets/login-illustration.webp" alt="" width="1000" height="1000" decoding="async" />
+          <img src="/vault/assets/login-illustration.webp" alt="" width="1000" height="1000" decoding="async" />
         </div>
       </section>
       <section className="vault" hidden={loggedIn}>
         <div className="vault-heading">
           <h1>Credentials</h1>
-          <Button variant="primary" onClick={() => openEditor()}>＋ Add credential</Button>
+          <Button className="add-button" variant="primary" onClick={() => openEditor()}><Icon name="plus" />Add credential</Button>
         </div>
-        <div className="toolbar">
-          <div className="search"><label className="sr-only" htmlFor="search">Search credentials</label><span aria-hidden="true">⌕</span><Input id="search" type="search" placeholder="Search credentials" onInput={(event: Event) => { query.value = (event.target as HTMLInputElement).value; }} /></div>
-          <Text variant="caption">{count}</Text>
+        <div className="vault-panel">
+          <div className="toolbar">
+            <div className="search">
+              <label className="sr-only" htmlFor="search">Search credentials</label>
+              <Icon name="search" />
+              <Input id="search" type="search" placeholder="Search by reference or description" onInput={(event: Event) => { query.value = (event.target as HTMLInputElement).value; }} />
+            </div>
+            <span className="count" role="status">{count}</span>
+          </div>
+          <div className="empty" hidden={emptyVaultHidden}>
+            <span className="empty-icon"><Icon name="lock" /></span>
+            <h2>Your vault is empty</h2>
+            <p>Add a credential to use it by reference from the CLI.</p>
+          </div>
+          <div className="empty" hidden={emptySearchHidden}>
+            <span className="empty-icon"><Icon name="search" /></span>
+            <h2>No matching credentials</h2>
+            <p>Try a different reference or description.</p>
+            <Button variant="outline" size="small" onClick={clearSearch}>Clear search</Button>
+          </div>
+          <ul className="credential-list" role="list" hidden={listHidden}>
+            {keyed(visibleItems, (item) => item.id, (item) => {
+              const name = mapSignal(item, (value) => value.ref);
+              const masked = mapSignal(item, (value) => value.masked);
+              const description = mapSignal(item, (value) => value.description ?? "");
+              const descriptionHidden = mapSignal(item, (value) => !value.description);
+              const editLabel = mapSignal(item, (value) => `Edit ${value.ref}`);
+              const deleteLabel = mapSignal(item, (value) => `Delete ${value.ref}`);
+              return <li className="credential">
+                <span className="entry-icon"><Icon name="key" /></span>
+                <div className="entry-main">
+                  <strong>{name}</strong>
+                  <p hidden={descriptionHidden}>{description}</p>
+                </div>
+                <code className="entry-mask"><span className="sr-only">Masked value </span>{masked}</code>
+                <div className="entry-actions">
+                  <Button variant="quiet" size="small" aria-label={editLabel} onClick={() => openEditor(item.value)}>Edit</Button>
+                  <Button className="delete-button" variant="quiet" size="small" aria-label={deleteLabel} onClick={() => openConfirmation(item.value)}>Delete</Button>
+                </div>
+              </li>;
+            })}
+          </ul>
         </div>
-        <div className="empty" hidden={empty}><div className="empty-icon">✳</div><h2>No credentials found</h2><p>Add a credential or try a different search.</p><Button variant="outline" onClick={() => openEditor()}>Add credential</Button></div>
-        <div className="credential-list">{keyed(visibleItems, (item) => item.ref, (item) => {
-          const name = mapSignal(item, (value) => value.ref);
-          const masked = mapSignal(item, (value) => value.masked);
-          const description = mapSignal(item, (value) => value.description || "No description");
-          return <article className="credential">
-            <div className="entry-icon" aria-hidden="true">⌘</div>
-            <div className="entry-main"><div className="entry-title"><strong>{name}</strong><code>{masked}</code></div><p>{description}</p></div>
-            <div className="entry-actions"><Button variant="outline" size="small" onClick={() => openEditor(item.value)}>Edit</Button><Button variant="quiet" size="small" onClick={() => { clearMessages(); opener = document.activeElement as HTMLElement | null; confirmRef.value = item.value.ref; confirmID.value = item.value.id; }}>Delete</Button></div>
-          </article>;
-        })}</div>
       </section>
-      <div className="overlay" hidden={editorHidden}>
-        <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="editor-title">
-          <div className="dialog-header"><h2 id="editor-title">{editorTitle}</h2><button className="close" aria-label="Close" onClick={closeEditor}>×</button></div>
-          <form id="credential-form" onSubmit={save}>
-            <label htmlFor="ref">Reference</label><Input id="ref" name="ref" placeholder="e.g. openai-prod" disabled={refDisabled} autocomplete="off" /><small>Lowercase letters, numbers and hyphens.</small>
-            <label htmlFor="value">Secret value</label><Input id="value" name="value" type="password" autocomplete="new-password" /><small>{secretHelp}</small>
-            <label htmlFor="description">Description <span>optional</span></label><Input id="description" name="description" placeholder="What is this credential for?" />
-            <div className="dialog-actions"><Button type="button" variant="outline" onClick={closeEditor}>Cancel</Button><Button type="submit" variant="primary" disabled={busy}>Save credential</Button></div>
-          </form>
-        </section>
-      </div>
-      <div className="overlay" hidden={confirmHidden}>
-        <section className="dialog confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-          <h2 id="confirm-title">Delete credential?</h2><p>{deleteMessage}</p>
-          <div className="dialog-actions"><Button variant="outline" onClick={closeConfirmation}>Cancel</Button><Button variant="danger" disabled={busy} onClick={remove}>Delete credential</Button></div>
-        </section>
-      </div>
     </main>
+    <div className="overlay" hidden={editorHidden}>
+      <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+        <div className="dialog-header">
+          <h2 id="editor-title">{editorTitle}</h2>
+          <Button className="dialog-close" type="button" variant="quiet" size="small" aria-label="Close" disabled={busy} onClick={closeEditor}><Icon name="close" /></Button>
+        </div>
+        <form id="credential-form" onSubmit={save}>
+          <div className="form-field">
+            <label htmlFor="ref">Reference</label>
+            <Input id="ref" name="ref" placeholder="e.g. openai-prod" disabled={refDisabled} autocomplete="off" aria-describedby="ref-help" />
+            <small id="ref-help">Lowercase letters, numbers and hyphens.</small>
+          </div>
+          <div className="form-field">
+            <label htmlFor="value">Secret value</label>
+            <Input id="value" name="value" type="password" autocomplete="new-password" aria-describedby="value-help" />
+            <small id="value-help">{secretHelp}</small>
+          </div>
+          <div className="form-field">
+            <label htmlFor="description">Description <span>optional</span></label>
+            <Input id="description" name="description" />
+          </div>
+          <div className="alert error" role="alert" hidden={errorHidden}>{error}</div>
+          <div className="dialog-actions">
+            <Button type="button" variant="outline" disabled={busy} onClick={closeEditor}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={busy}>Save credential</Button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <div className="overlay" hidden={confirmHidden}>
+      <section className="dialog confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="delete-message">
+        <h2 id="confirm-title">Delete credential?</h2>
+        <p id="delete-message">{deleteMessage}</p>
+        <div className="alert error" role="alert" hidden={errorHidden}>{error}</div>
+        <div className="dialog-actions">
+          <Button id="cancel-delete" variant="outline" disabled={busy} onClick={closeConfirmation}>Cancel</Button>
+          <Button variant="danger" disabled={busy} onClick={remove}>Delete credential</Button>
+        </div>
+      </section>
+    </div>
   </div>;
 }
 
-const runtime = createRuntime({ plugins: [createMeowUI({ components: [Button, Input, Text] }), createMeowUITheme({ theme: standardTheme, page: false })] });
+const runtime = createRuntime({ plugins: [createMeowUI({ components: [Button, Input] }), createMeowUITheme({ theme: standardTheme, page: false })] });
 createWebRenderer(runtime).render(<App />, document.querySelector<HTMLElement>("#app")!);

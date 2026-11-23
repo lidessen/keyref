@@ -58,7 +58,7 @@ can still send or write the credentials it receives.
 | Local | Encrypted offline storage on your machine. The CLI uses your OS keyring to store the master key. |
 | GitHub account | Shared across your devices after sign-in to a configured server. The server operator manages the encryption keys, and sign-in is restricted to approved accounts. |
 
-Open the [hosted account vault](https://keyref.sh/manage/) in a browser, or
+Open the [hosted account vault](https://keyref.sh/vault/) in a browser, or
 follow the [CLI sign-in guide](cli/README.md#github-account-vault). When several
 writable vaults are configured, pick one with `keyref set REF --vault NAME`.
 

@@ -100,6 +100,13 @@ func TestBrowserAccountVault(t *testing.T) {
 			t.Fatal("response exposed a credential")
 		}
 	}
+	for _, oldPath := range []string{"/manage", "/manage/"} {
+		status, body, headers := request("GET", oldPath+"?login=cancelled", "", "", false)
+		check(status, http.StatusFound, body)
+		if got := headers.Get("Location"); got != "/vault/?login=cancelled" {
+			t.Fatalf("old vault entry redirects to %q", got)
+		}
+	}
 	status, body, _ := request("GET", "/manage/api/items", "", "", false)
 	check(status, 401, body)
 	start := "/manage/api/login/github"
@@ -133,13 +140,13 @@ func TestBrowserAccountVault(t *testing.T) {
 	begin()
 	status, body, headers := request("GET", OAuthCallbackPath+"?state=wrong&code=fixture-code", "", "", false)
 	check(status, 303, body)
-	if headers.Get("Location") != "/manage/?login=failed" {
+	if headers.Get("Location") != "/vault/?login=failed" {
 		t.Fatal("mismatched state was accepted")
 	}
 	state := begin()
 	status, body, headers = request("GET", OAuthCallbackPath+"?state="+state+"&code=fixture-code", "", "", false)
 	check(status, 303, body)
-	if headers.Get("Location") != "/manage/" {
+	if headers.Get("Location") != "/vault/" {
 		t.Fatal("OAuth did not return to the vault")
 	}
 	status, body, _ = request("POST", "/manage/api/items", `{"ref":"api-key","value":"fixture-secret-value","description":"first"}`, "", true)

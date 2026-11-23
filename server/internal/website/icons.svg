@@ -27,4 +27,17 @@
     <rect x="8" y="8" width="12" height="12" rx="2"/>
     <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>
   </symbol>
+  <symbol id="search" viewBox="0 0 24 24">
+    <circle cx="10.5" cy="10.5" r="5.5"/>
+    <path d="m15 15 4 4"/>
+  </symbol>
+  <symbol id="plus" viewBox="0 0 24 24">
+    <path d="M12 5v14M5 12h14"/>
+  </symbol>
+  <symbol id="close" viewBox="0 0 24 24">
+    <path d="m6 6 12 12M18 6 6 18"/>
+  </symbol>
+  <symbol id="sign-out" viewBox="0 0 24 24">
+    <path d="M10 5H5v14h5m3-7h7m-3-3 3 3-3 3"/>
+  </symbol>
 </svg>

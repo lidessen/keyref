@@ -69,7 +69,7 @@ serves the existing paired sync API.
 The server serves the public project homepage at `/` and redirects
 `/install.sh` to the installer in the Keyref repository.
 
-When the account vault is enabled, visit `/manage/` on the server's HTTPS
+When the account vault is enabled, visit `/vault/` on the server's HTTPS
 origin. Configure browser sign-in on the same GitHub OAuth App by setting its
 authorization callback to `https://<host>/v1/remote/oauth/callback`.
 Set the server-only `KEYREF_GITHUB_CLIENT_SECRET` and set

@@ -84,7 +84,7 @@ func (v *Vault) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	failed := func(status string) {
-		http.Redirect(w, r, "/manage/?login="+status, http.StatusSeeOther)
+		http.Redirect(w, r, browserPath+"?login="+status, http.StatusSeeOther)
 	}
 	cookie, err := r.Cookie(v.oauthCookie(nil, "", 0))
 	v.oauthCookie(w, "", -1)
@@ -134,5 +134,5 @@ func (v *Vault) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	clear(session.VaultKey)
 	v.cookie(w, r, browserSession, session.Token, int((12 * time.Hour).Seconds()))
-	http.Redirect(w, r, "/manage/", http.StatusSeeOther)
+	http.Redirect(w, r, browserPath, http.StatusSeeOther)
 }
