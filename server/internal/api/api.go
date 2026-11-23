@@ -150,23 +150,32 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /v1/healthz", s.handleHealthz)
 	if s.cfg.AccountVault != nil {
-		mux.Handle("/v1/remote/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accountHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			host, _, _ := net.SplitHostPort(r.RemoteAddr)
 			if !s.cfg.Vercel && r.TLS == nil && !net.ParseIP(host).IsLoopback() {
 				writeError(w, "forbidden")
 				return
 			}
-			if strings.HasPrefix(r.URL.Path, "/v1/remote/login/") {
+			loginPath := r.URL.Path
+			switch r.URL.Path {
+			case "/manage/api/login/device":
+				loginPath = "/v1/remote/login/device"
+			case "/manage/api/login/poll":
+				loginPath = "/v1/remote/login/poll"
+			}
+			if strings.HasPrefix(loginPath, "/v1/remote/login/") {
 				limit := int64(30)
-				if r.URL.Path == "/v1/remote/login/device" {
+				if loginPath == "/v1/remote/login/device" {
 					limit = 5
 				}
-				if !s.requestWindowAllow(w, r, "account:"+r.URL.Path+":"+s.clientIPKey(r), s.cfg.Now().UnixMilli(), limit, 60_000) {
+				if !s.requestWindowAllow(w, r, "account:"+loginPath+":"+s.clientIPKey(r), s.cfg.Now().UnixMilli(), limit, 60_000) {
 					return
 				}
 			}
 			s.cfg.AccountVault.ServeHTTP(w, r)
-		}))
+		})
+		mux.Handle("/v1/remote/", accountHandler)
+		mux.Handle("/manage/", accountHandler)
 	}
 
 	mux.HandleFunc("POST /v1/vaults", s.handleCreateVault)
@@ -269,7 +278,12 @@ func (s *Server) bodyLimit(r *http.Request) int64 {
 
 // redactPath strips query strings for logging; ids may appear in paths,
 // names and refs never do (they are encrypted, design §15).
-func redactPath(r *http.Request) string { return r.URL.Path }
+func redactPath(r *http.Request) string {
+	if strings.HasPrefix(r.URL.Path, "/manage/api/items/") {
+		return "/manage/api/items/{ref}"
+	}
+	return r.URL.Path
+}
 
 // ---------------------------------------------------------------------------
 // error responses (protocol §1.3)

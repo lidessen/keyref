@@ -163,6 +163,7 @@ func serve(args []string) error {
 		if err != nil {
 			return err
 		}
+		vault.SetVercel(vercel)
 		managedVault = vault.Handler()
 	}
 	handler := api.New(st, quotas.NewManager(st), pow.NewIssuer(), api.Config{

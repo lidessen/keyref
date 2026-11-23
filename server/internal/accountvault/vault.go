@@ -25,6 +25,7 @@ type Vault struct {
 	wrappingKey []byte
 	github      githubProvider
 	allowed     map[int64]bool
+	vercel      bool
 }
 
 func Open(ctx context.Context, st *store.Store, encodedKey, clientID, ids string) (*Vault, error) {
@@ -49,8 +50,12 @@ func Open(ctx context.Context, st *store.Store, encodedKey, clientID, ids string
 	return &Vault{store: st, wrappingKey: key, github: newGitHub(clientID), allowed: allowed}, nil
 }
 
+// SetVercel enables secure cookies behind the trusted Vercel proxy.
+func (v *Vault) SetVercel(enabled bool) { v.vercel = enabled }
+
 func (v *Vault) Handler() http.Handler {
 	mux := http.NewServeMux()
+	v.registerBrowser(mux)
 	mux.HandleFunc("POST /v1/remote/login/device", v.begin)
 	mux.HandleFunc("POST /v1/remote/login/poll", v.poll)
 	mux.HandleFunc("DELETE /v1/remote/session", v.authorize(v.logout))
