@@ -56,8 +56,8 @@ var denyList = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "dash": true, "fish": true,
 	"ksh": true, "csh": true, "tcsh": true, "busybox": true,
 	"env": true, "printenv": true,
-	"echo": true, "printf": true,
-	"cat": true, "tee": true, "dd": true, "od": true, "xxd": true,
+	"printf": true,
+	"cat":    true, "tee": true, "dd": true, "od": true, "xxd": true,
 	"hexdump": true, "base64": true, "base32": true,
 	"openssl": true,
 	"python":  true, "python2": true, "python3": true, "node": true,
@@ -145,7 +145,7 @@ func commandDenial(ref, layer string, policy Policy) error {
 			"%s allows no commands: an empty allowCommands list allows nothing on the paired vault; set the commands it may run on iOS", item)}
 	default:
 		return &PolicyError{Reason: fmt.Sprintf(
-			"command %q is denied by the built-in deny list", layer)}
+			"command %q is denied by the built-in deny list; an item allowCommands policy overrides it when supported by the source", layer)}
 	}
 }
 

@@ -50,24 +50,33 @@ func writeScript(t *testing.T, dir, name, content string, mode os.FileMode) stri
 func TestDenyListRejectsShellsAndDumps(t *testing.T) {
 	// Use the test binary's own directory structure: resolve real
 	// system tools through PATH.
-	for _, name := range []string{"sh", "echo", "cat", "env", "base64"} {
+	for _, name := range []string{"sh", "cat", "env", "base64"} {
 		_, err := CheckCommand([]string{name}, os.Getenv("PATH"), localPolicy())
-		if !isPolicyErr(err) {
+		var pe *PolicyError
+		if !errors.As(err, &pe) || !strings.Contains(pe.Reason, "allowCommands") || !strings.Contains(pe.Reason, "overrides") {
 			t.Fatalf("%s: expected policy rejection, got %v", name, err)
 		}
+	}
+	for _, name := range []string{"bash", "python", "node", "printenv", "xxd", "hexdump", "od", "openssl", "printf", "tee", "dd"} {
+		if ItemAllowsCommand(name, localPolicy()) {
+			t.Errorf("%s passed the default deny list", name)
+		}
+	}
+	if _, err := CheckCommand([]string{"echo", "hi"}, os.Getenv("PATH"), localPolicy()); err != nil {
+		t.Fatalf("echo rejected: %v", err)
 	}
 }
 
 func TestAllowCommandsWhitelistOverridesDeny(t *testing.T) {
 	// A whitelisted name overrides the default denial
 	// (design.md §7.3).
-	echoOnly := Policy{AllowCommands: []string{"echo"}}
-	_, err := CheckCommand([]string{"echo"}, os.Getenv("PATH"), echoOnly)
+	shOnly := Policy{AllowCommands: []string{"sh"}}
+	_, err := CheckCommand([]string{"sh"}, os.Getenv("PATH"), shOnly)
 	if err != nil {
-		t.Fatalf("whitelisted echo rejected: %v", err)
+		t.Fatalf("whitelisted sh rejected: %v", err)
 	}
 	// A non-empty whitelist excludes everything else.
-	_, err = CheckCommand([]string{"ls"}, os.Getenv("PATH"), echoOnly)
+	_, err = CheckCommand([]string{"ls"}, os.Getenv("PATH"), shOnly)
 	if !isPolicyErr(err) {
 		t.Fatalf("non-whitelisted ls accepted: %v", err)
 	}

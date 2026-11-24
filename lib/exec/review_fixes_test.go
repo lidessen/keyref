@@ -16,7 +16,7 @@ func TestRejectionProducesDenyOutcome(t *testing.T) {
 	var got *Outcome
 	req := &Request{
 		EnvRefs: []string{"K=openai-prod"},
-		Argv:    []string{"echo", "hi"},
+		Argv:    []string{"sh", "-c", "echo hi"},
 		Refs: map[string]*ResolvedRef{
 			"openai-prod": mkRef(t, "openai-prod", fxSecret, true, false),
 		},
@@ -82,7 +82,7 @@ func TestLazyResolutionSkippedOnPolicyRejection(t *testing.T) {
 	resolved := false
 	req := &Request{
 		EnvRefs: []string{"K=openai-prod"},
-		Argv:    []string{"echo", "hi"}, // policy-rejected below
+		Argv:    []string{"sh", "-c", "echo hi"}, // policy-rejected below
 		Refs:    map[string]*ResolvedRef{"openai-prod": metaOnly(t, "openai-prod")},
 		ResolveValue: func(ref string) (*secret.Plaintext, int, string) {
 			resolved = true
@@ -123,14 +123,14 @@ func TestLazyResolutionUsedOnSuccess(t *testing.T) {
 // ---- review fix: per-item policy intersection (§7.3) ----
 
 func TestMultiItemCommandPolicyIsIntersection(t *testing.T) {
-	// Item a whitelists echo; item b has the default deny-shells
-	// policy. Both secrets injected → echo must be rejected: a's
+	// Item a whitelists sh; item b has the default deny-shells
+	// policy. Both secrets injected → sh must be rejected: a's
 	// whitelist never unlocks b's secret.
 	req := &Request{
 		EnvRefs: []string{"KA=a", "KB=b"},
-		Argv:    []string{"echo", "hi"},
+		Argv:    []string{"sh", "-c", "echo hi"},
 		Refs: map[string]*ResolvedRef{
-			"a": mkRefPolicy(t, "a", fxSecret, []string{"echo"}, nil),
+			"a": mkRefPolicy(t, "a", fxSecret, []string{"sh"}, nil),
 			"b": mkRefPolicy(t, "b", fxSecret, nil, nil),
 		},
 	}
@@ -141,9 +141,9 @@ func TestMultiItemCommandPolicyIsIntersection(t *testing.T) {
 	// (design.md §7.3).
 	req2 := &Request{
 		EnvRefs: []string{"KA=a"},
-		Argv:    []string{"echo"},
+		Argv:    []string{"sh", "-c", "echo hi"},
 		Refs: map[string]*ResolvedRef{
-			"a": mkRefPolicy(t, "a", fxSecret, []string{"echo"}, nil),
+			"a": mkRefPolicy(t, "a", fxSecret, []string{"sh"}, nil),
 		},
 	}
 	if code, _, _ := runReq(req2); code != 0 {

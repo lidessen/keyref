@@ -118,7 +118,7 @@ The default server is the official hosted service. `keyref server set https://ke
 
 - The language is **Go** (since design v0.4, the same language as the server; the earlier "Rust + zeroize" decision was overturned and memory hygiene was downgraded to guarded allocation plus explicit zeroing — see design §12.2).
 - Private keys go into the OS keyring (macOS Keychain, Linux Secret Service). Unwrapped item keys and secret plaintext live only in guarded memory (memguard: mlock, invisible to the GC, explicitly zeroed at `lock` and on exit).
-- Never run user commands through a shell. `sh -c`, `echo`, `env` and the like are rejected by default.
+- Never run user commands through a shell. The local built-in deny list rejects `sh -c`, `env` and similar commands; it permits `echo`.
 - Machine-readable output uses English headers so agents can parse it.
 
 Directory layout (actual tree, checked 2026-11-19):

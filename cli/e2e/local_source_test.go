@@ -302,9 +302,14 @@ func TestLocalSourceKeepsTheExecPolicy(t *testing.T) {
 	if run := localRun(t, env, localSecret, "set", "my-ref"); run.code != 0 {
 		t.Fatalf("set exit %d: %s", run.code, run.stderr)
 	}
+	echo := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", "echo", "$K")
+	if echo.code != 0 || echo.stdout != "$K\n" {
+		t.Fatalf("echo exit %d, stdout %q, stderr %q", echo.code, echo.stdout, echo.stderr)
+	}
+	assertNoLocalLeak(t, "echo", echo.stdout, echo.stderr)
 	shell := localRun(t, env, "", "exec", "--env", "K=my-ref", "--", "/bin/sh", "-c", "echo hi")
-	if shell.code != 10 {
-		t.Fatalf("exec through a shell exit %d, want 10", shell.code)
+	if shell.code != 10 || !strings.Contains(shell.stderr, "allowCommands") || !strings.Contains(shell.stderr, "overrides") {
+		t.Fatalf("exec through a shell exit %d, stderr %q", shell.code, shell.stderr)
 	}
 	argv := localRun(t, env, "", "exec", "--allow-argv", "--env", "K=my-ref", "--",
 		helperBin, "{{keyref:my-ref}}")

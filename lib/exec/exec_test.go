@@ -363,7 +363,7 @@ func TestRunExitCodePassthrough(t *testing.T) {
 func TestRunPolicyRefusalNeverStartsChild(t *testing.T) {
 	req := &Request{
 		EnvRefs: []string{"K=openai-prod"},
-		Argv:    []string{"echo", "SHOULD-NOT-RUN"},
+		Argv:    []string{"sh", "-c", "echo SHOULD-NOT-RUN"},
 		Refs: map[string]*ResolvedRef{
 			"openai-prod": mkRef(t, "openai-prod", fxSecret, true, false),
 		},
@@ -375,6 +375,22 @@ func TestRunPolicyRefusalNeverStartsChild(t *testing.T) {
 	if strings.Contains(stdout, "SHOULD-NOT-RUN") {
 		t.Fatal("denied command ran")
 	}
+}
+
+func TestRunEchoRedactsInjectedArgv(t *testing.T) {
+	req := &Request{
+		AllowArgv: true,
+		Argv:      []string{"echo", "{{keyref:openai-prod}}"},
+		Refs: map[string]*ResolvedRef{
+			"openai-prod": mkRef(t, "openai-prod", fxSecret, true, true),
+		},
+	}
+	code, stdout, stderr := runReq(req)
+	if code != 0 || stdout != "<redacted:openai-prod>\n" {
+		t.Fatalf("echo exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	assertNoLeak(t, stdout)
+	assertNoLeak(t, stderr)
 }
 
 func TestRunUnknownRef(t *testing.T) {
