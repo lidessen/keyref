@@ -153,7 +153,9 @@ func doctorSchema(path string, kind source.Kind) (string, string) {
 		return "invalid or legacy local schema", id
 	}
 	rows.Close()
-	if version != 1 {
+	// Version 0 is the pre-migration format; opening the vault upgrades its
+	// encrypted metadata to version 1. Doctor must remain read-only.
+	if version != 0 && version != 1 {
 		return fmt.Sprintf("unsupported schema version %d", version), id
 	}
 	return "ok (metadata only; key not verified)", id

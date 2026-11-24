@@ -81,6 +81,52 @@ func TestDoctorLocalMetadataAndPermissions(t *testing.T) {
 	}
 }
 
+func TestDoctorLocalSchemaVersionsAndColumns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"version 0", "PRAGMA user_version = 0", "ok (metadata only; key not verified)"},
+		{"version 1", "PRAGMA user_version = 1", "ok (metadata only; key not verified)"},
+		{"unknown version", "PRAGMA user_version = 2", "unsupported schema version 2"},
+		{"missing entries table", "PRAGMA user_version = 0; DROP TABLE entries", "invalid or legacy local schema"},
+		{"missing entries column", "PRAGMA user_version = 0; ALTER TABLE entries DROP COLUMN meta", "invalid or legacy local schema"},
+		{"missing metadata column", "PRAGMA user_version = 0; ALTER TABLE metadata DROP COLUMN writes", "invalid local schema or metadata"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := doctorFixture(t)
+			path := filepath.Join(p.Dir, "local.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(tc.sql); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := doctorSchema(path, source.KindLocal)
+			if got != tc.want {
+				t.Fatalf("schema = %q; want %q", got, tc.want)
+			}
+			if tc.name == "version 0" {
+				db, err := readOnlyDB(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				var version int
+				if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 0 {
+					t.Fatalf("doctor changed version: %d, %v", version, err)
+				}
+			}
+		})
+	}
+}
+
 func TestDoctorResolutionPrecedenceAndMissing(t *testing.T) {
 	p := doctorFixture(t)
 	if err := os.WriteFile(source.Path(p), []byte(`{"default":"sync"}`), 0600); err != nil {
