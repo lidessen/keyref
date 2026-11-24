@@ -622,10 +622,18 @@ func statusSource(p config.Paths, spec source.Spec) int {
 // and the lock flag. A missing key is a state to report, not a command
 // failure.
 func statusLocal(p config.Paths, spec source.Spec) int {
+	var envErr error
+	if _, present := os.LookupEnv(localvault.EnvMaster); present {
+		_, envErr = localvault.KeySource(secretStore(), spec.Path, os.LookupEnv)
+	}
 	switch _, err := os.Stat(spec.Path); {
 	case errors.Is(err, os.ErrNotExist):
 		fmt.Printf("vault: %s (not created yet; run keyref init --vault %s)\n", spec.Path, spec.Name)
-		fmt.Println("key: none")
+		if envErr != nil {
+			fmt.Printf("key: invalid (%v)\n", envErr)
+		} else {
+			fmt.Println("key: none")
+		}
 	case err != nil:
 		return fatalf(1, "%v", err)
 	default:
@@ -634,6 +642,8 @@ func statusLocal(p config.Paths, spec source.Spec) int {
 		switch {
 		case err == nil:
 			fmt.Printf("key: %s\n", src)
+		case errors.Is(err, localvault.ErrInvalidEnvKey):
+			fmt.Printf("key: invalid (%v)\n", err)
 		case errors.Is(err, localvault.ErrKey):
 			fmt.Printf("key: missing (no keyring entry for this vault; set %s)\n", localvault.EnvMaster)
 		default:

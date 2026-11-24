@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,72 @@ func TestLocalExecPolicy(t *testing.T) {
 	})
 	if len(named.Policy.AllowedHosts) != 1 || named.Policy.AllowedHosts[0] != "api.openai.com" {
 		t.Fatalf("allowedHosts = %v", named.Policy.AllowedHosts)
+	}
+}
+
+func TestLocalExecUnsupportedInjectionHints(t *testing.T) {
+	cases := []struct {
+		name string
+		opts execOptions
+		want []string
+	}{
+		{"allow argv", execOptions{AllowArgv: true}, []string{"--allow-argv", "local sources", "--env", "--stdin", "--fd"}},
+		{"argv placeholder", execOptions{Argv: []string{"tool", "{{keyref:ref}}"}}, []string{"argv placeholders", "local sources", "--env"}},
+		{"reply", execOptions{Replies: []exec.Reply{{Ref: "ref"}}}, []string{"--reply", "local sources", "--stdin", "approval item"}},
+		{"stdin login", execOptions{LoginRef: "ref"}, []string{"--stdin-login", "local sources", "--stdin", "synchronized item"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			tc.opts.Stderr = &stderr
+			if code := runLocalExec(config.Paths{}, tc.opts, source.Spec{}); code != 10 {
+				t.Fatalf("exit %d, want 10", code)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("diagnostic %q missing %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestStatusLocalReportsEnvironmentKeyValidity(t *testing.T) {
+	dir := t.TempDir()
+	vault := filepath.Join(dir, "vault")
+	if err := os.WriteFile(vault, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	valid := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	for _, tc := range []struct {
+		name, value, path, want string
+	}{
+		{"empty", "", vault, "key: invalid"},
+		{"invalid base64", strings.Repeat("!", 44), vault, "key: invalid"},
+		{"wrong length", base64.StdEncoding.EncodeToString(make([]byte, 31)), vault, "key: invalid"},
+		{"missing vault", "", filepath.Join(dir, "missing"), "key: invalid"},
+		{"valid", valid, vault, "key: KEYREF_LOCAL_MASTER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KEYREF_LOCAL_MASTER", tc.value)
+			old := os.Stdout
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.Stdout = w
+			code := statusLocal(config.Paths{LockFile: filepath.Join(dir, "locked")}, source.Spec{Name: "local", Path: tc.path})
+			w.Close()
+			os.Stdout = old
+			out, err := io.ReadAll(r)
+			r.Close()
+			if err != nil || code != 0 || !strings.Contains(string(out), tc.want) {
+				t.Fatalf("status code %d output %q read error %v; want %q", code, out, err, tc.want)
+			}
+			if tc.want == "key: invalid" && !strings.Contains(string(out), "KEYREF_LOCAL_MASTER is empty or invalid") {
+				t.Fatalf("invalid override lacks diagnostic: %q", out)
+			}
+		})
 	}
 }
 

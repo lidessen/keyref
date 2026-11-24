@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lidessen/keyref/cli/internal/keyring"
@@ -186,6 +187,14 @@ func TestKeySourceReportsWhereTheKeyLives(t *testing.T) {
 	spec := newSpec(t)
 	if _, err := KeySource(ks, spec.Path, noEnv); !errors.Is(err, ErrKey) {
 		t.Fatalf("missing vault source = %v", err)
+	}
+}
+
+func TestKeySourceRejectsInvalidEnvironmentOverride(t *testing.T) {
+	for _, value := range []string{"", "not-base64", base64.StdEncoding.EncodeToString(make([]byte, 31)), strings.Repeat("!", 44)} {
+		if src, err := KeySource(newFakeKeyring(), "unused", constLookup(value)); src != "" || !errors.Is(err, ErrInvalidEnvKey) {
+			t.Fatalf("invalid override: source %q, error %v", src, err)
+		}
 	}
 }
 

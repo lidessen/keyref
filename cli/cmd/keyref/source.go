@@ -301,7 +301,7 @@ func cmdSet(args []string) int {
 	raw := fs.Bool("raw", false, "store piped stdin byte for byte (default: strip one trailing newline)")
 	description := fs.String("description", "", "description stored in the entry meta")
 	var allowHosts stringList
-	fs.Var(&allowHosts, "allow-host", "allow URL hosts in argv (repeatable)")
+	fs.Var(&allowHosts, "allow-host", "allow hosts of HTTP(S) URLs passed in argv (repeatable)")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
@@ -613,7 +613,13 @@ func localExecRef(m *local.Meta) *exec.ResolvedRef {
 // are decrypted only after the policy checks pass.
 func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 	if opts.LoginRef != "" {
-		return fatalf(exitcode.PolicyRejection, "--stdin-login reads a synced item's username and value; it is not available on a local source")
+		return fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--stdin-login is not supported by local sources; use --stdin for a local secret, or a synchronized item for username and value")
+	}
+	if opts.AllowArgv || exec.HasArgvPlaceholder(opts.Argv) {
+		return fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--allow-argv and argv placeholders are not supported by local sources; use --env, --stdin, or --fd to inject a local secret")
+	}
+	if len(opts.Replies) > 0 {
+		return fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--reply is not supported by local sources; use --stdin for a local secret, or an approval item from a synchronized source")
 	}
 	vault, err := openLocal(p, spec)
 	if err != nil {

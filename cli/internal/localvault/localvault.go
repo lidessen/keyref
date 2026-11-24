@@ -37,6 +37,9 @@ const (
 // ErrKey means no usable master key was found for the vault.
 var ErrKey = errors.New("local master key unavailable")
 
+// ErrInvalidEnvKey identifies an explicitly set but malformed override.
+var ErrInvalidEnvKey = errors.New("invalid local master key environment variable")
+
 // ErrKeyExists means the keyring already holds a key for the vault's
 // store id. init never replaces an existing entry.
 var ErrKeyExists = errors.New("a master key already exists for this vault")
@@ -75,7 +78,12 @@ func Key(ks keyring.SecretStore, vaultPath string, lookup func(string) (string, 
 // installation can tell why a key is (not) available (design v0.10
 // §17.8).
 func KeySource(ks keyring.SecretStore, vaultPath string, lookup func(string) (string, bool)) (string, error) {
-	if _, present := lookup(EnvMaster); present {
+	if encoded, present := lookup(EnvMaster); present {
+		key, err := decode(encoded)
+		if err != nil {
+			return "", fmt.Errorf("%w: %s is empty or invalid; it must be standard base64 encoding of 32 bytes", ErrInvalidEnvKey, EnvMaster)
+		}
+		keycrypto.WipeKey(key)
 		return EnvMaster, nil
 	}
 	id, err := local.ReadStoreID(vaultPath)
@@ -160,6 +168,7 @@ func decode(encoded string) ([]byte, error) {
 	key := make([]byte, base64.StdEncoding.DecodedLen(len(encoded)))
 	n, err := base64.StdEncoding.Strict().Decode(key, []byte(encoded))
 	if err != nil || n != 32 {
+		keycrypto.WipeKey(key)
 		return nil, ErrKey
 	}
 	return key[:n], nil
