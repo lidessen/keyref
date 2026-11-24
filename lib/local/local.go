@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,7 +24,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/lidessen/keyref/lib/secret"
 	keycrypto "github.com/lidessen/keyref/proto/crypto"
 	_ "modernc.org/sqlite"
 )
@@ -131,13 +134,15 @@ const maxMeta = 64 << 10
 const writeCap = int64(4294967295)
 const checkText = "keyref-local-v1"
 
-// Policy holds the URL host restriction for local execution.
+// Policy holds the command, argv and URL host restrictions for local execution.
 type Policy struct {
-	AllowedHosts []string `json:"allowedHosts"`
+	AllowedHosts  []string `json:"allowedHosts"`
+	AllowCommands []string `json:"allowCommands,omitempty"`
+	AllowArgv     bool     `json:"allowArgv,omitempty"`
 }
 
 func (p Policy) valid() bool {
-	for _, host := range p.AllowedHosts {
+	for _, host := range append(append([]string{}, p.AllowedHosts...), p.AllowCommands...) {
 		if host == "" || strings.ContainsRune(host, 0) {
 			return false
 		}
@@ -156,6 +161,9 @@ type Meta struct {
 	Bytes       int    `json:"bytes"`
 	UpdatedAt   int64  `json:"updated_at"`
 	Policy      Policy `json:"policy"`
+	Type        string `json:"type,omitempty"`
+	Username    string `json:"username,omitempty"`
+	URL         string `json:"url,omitempty"`
 	// Incomplete marks legacy metadata whose mask and size are unknown.
 	// It is derived on read and is never stored in the encrypted JSON.
 	Incomplete bool `json:"-"`
@@ -166,8 +174,12 @@ type Meta struct {
 // the description and policy, because a caller that does not know the
 // value must not be able to widen its policy (design.md §17.4).
 type PutOptions struct {
-	Description  string
-	AllowedHosts []string
+	Description   string
+	AllowedHosts  []string
+	AllowCommands []string
+	AllowArgv     bool
+	Username      *string
+	URL           string
 }
 
 // maskPrefixes is the §6.1 longest-prefix table used for non-password
@@ -528,7 +540,7 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 	if len(value) == 0 || len(value) > maxValue {
 		return false, ErrInvalidValueSize
 	}
-	if !(Policy{AllowedHosts: opts.AllowedHosts}).valid() {
+	if !(Policy{AllowedHosts: opts.AllowedHosts, AllowCommands: opts.AllowCommands}).valid() || (opts.Username == nil && opts.URL != "") {
 		return false, ErrInvalidStore
 	}
 	id, err := s.entryID(ref)
@@ -543,8 +555,22 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 		Bytes:       len(value),
 		UpdatedAt:   time.Now().UnixMilli(),
 		Policy: Policy{
-			AllowedHosts: append([]string{}, opts.AllowedHosts...),
+			AllowedHosts:  append([]string{}, opts.AllowedHosts...),
+			AllowCommands: append([]string(nil), opts.AllowCommands...),
+			AllowArgv:     opts.AllowArgv,
 		},
+	}
+	stored := value
+	if opts.Username != nil {
+		if !utf8.Valid(value) || !utf8.ValidString(*opts.Username) {
+			return false, ErrInvalidStore
+		}
+		m.Type, m.Username, m.URL = "login", *opts.Username, opts.URL
+		stored, err = encodeLogin(m.Username, value)
+		if err != nil {
+			return false, err
+		}
+		defer keycrypto.WipeKey(stored)
 	}
 	metaBlob, err := s.sealMeta(id, m)
 	if err != nil {
@@ -557,7 +583,7 @@ func (s *Store) Put(ctx context.Context, ref string, value []byte, opts PutOptio
 	if err != nil {
 		return false, classify(ErrInvalidStore, "", err)
 	}
-	blob, err := keycrypto.SealBlob(s.key, aad, value)
+	blob, err := keycrypto.SealBlob(s.key, aad, stored)
 	if err != nil {
 		return false, classify(ErrInvalidStore, "", err)
 	}
@@ -637,6 +663,9 @@ func (s *Store) openMeta(id string, blob []byte) (*Meta, error) {
 	var extra any
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, classify(ErrCorruptStore, "", err)
+	}
+	if (m.Type != "" && m.Type != "login") || (m.Type == "" && (m.Username != "" || m.URL != "")) {
+		return nil, ErrCorruptStore
 	}
 	if m.V != 1 || !ValidRef(m.Ref) || m.Bytes < 0 || m.Bytes > maxValue || m.Masked == "" || !m.Policy.valid() {
 		return nil, ErrCorruptStore
@@ -727,7 +756,7 @@ func (s *Store) Use(ctx context.Context, ref string, fn func([]byte) error) erro
 	if fn == nil {
 		return ErrInvalidStore
 	}
-	plain, err := s.read(ctx, ref)
+	plain, m, err := s.read(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -735,45 +764,156 @@ func (s *Store) Use(ctx context.Context, ref string, fn func([]byte) error) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if m != nil && m.Type == "login" {
+		username, value, err := decodeLogin(plain, m)
+		if err != nil {
+			return err
+		}
+		defer keycrypto.WipeKey(username)
+		defer keycrypto.WipeKey(value)
+		return fn(value)
+	}
 	return fn(plain)
 }
 
-func (s *Store) read(ctx context.Context, ref string) ([]byte, error) {
+// UseLogin decrypts a structured login only for the callback.
+func (s *Store) UseLogin(ctx context.Context, ref string, fn func(username, value []byte) error) error {
+	if fn == nil {
+		return ErrInvalidStore
+	}
+	plain, m, err := s.read(ctx, ref)
+	if err != nil {
+		return err
+	}
+	defer keycrypto.WipeKey(plain)
+	if m == nil || m.Type != "login" {
+		return ErrNotLogin
+	}
+	username, value, err := decodeLogin(plain, m)
+	if err != nil {
+		return err
+	}
+	defer keycrypto.WipeKey(username)
+	defer keycrypto.WipeKey(value)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fn(username, value)
+}
+
+// ErrNotLogin reports a request for login fields on an ordinary entry.
+var ErrNotLogin = errors.New("local item is not a login")
+
+// Version 2 stores base64-encoded byte fields. Version 1 is still read so
+// vaults created by earlier development builds remain usable.
+func encodeLogin(username string, value []byte) ([]byte, error) {
+	const prefix = `{"v":2,"username":"`
+	const middle = `","value":"`
+	const suffix = `"}`
+	size := len(prefix) + base64.StdEncoding.EncodedLen(len(username)) + len(middle) + base64.StdEncoding.EncodedLen(len(value)) + len(suffix)
+	if size > maxValue {
+		return nil, ErrInvalidValueSize
+	}
+	data := make([]byte, 0, size)
+	data = append(data, prefix...)
+	data = base64.StdEncoding.AppendEncode(data, []byte(username))
+	data = append(data, middle...)
+	data = base64.StdEncoding.AppendEncode(data, value)
+	data = append(data, suffix...)
+	return data, nil
+}
+
+func decodeLogin(plain []byte, m *Meta) ([]byte, []byte, error) {
+	var header struct {
+		V int `json:"v"`
+	}
+	if err := json.Unmarshal(plain, &header); err != nil || (header.V != 1 && header.V != 2) {
+		return nil, nil, ErrCorruptStore
+	}
+	userField, err := secret.ExtractStringField(plain, "username")
+	if err != nil {
+		return nil, nil, ErrCorruptStore
+	}
+	defer userField.Destroy()
+	valueField, err := secret.ExtractStringField(plain, "value")
+	if err != nil {
+		return nil, nil, ErrCorruptStore
+	}
+	defer valueField.Destroy()
+	decode := func(field []byte) ([]byte, error) {
+		if header.V == 1 {
+			return append([]byte(nil), field...), nil
+		}
+		out := make([]byte, base64.StdEncoding.DecodedLen(len(field)))
+		n, err := base64.StdEncoding.Strict().Decode(out, field)
+		if err != nil {
+			keycrypto.WipeKey(out)
+			return nil, err
+		}
+		return out[:n], nil
+	}
+	username, err := decode(userField.Bytes())
+	if err != nil {
+		return nil, nil, ErrCorruptStore
+	}
+	value, err := decode(valueField.Bytes())
+	if err != nil {
+		keycrypto.WipeKey(username)
+		return nil, nil, ErrCorruptStore
+	}
+	if !bytes.Equal(username, []byte(m.Username)) || len(value) == 0 || len(value) != m.Bytes || !utf8.Valid(username) || !utf8.Valid(value) {
+		keycrypto.WipeKey(username)
+		keycrypto.WipeKey(value)
+		return nil, nil, ErrCorruptStore
+	}
+	return username, value, nil
+}
+
+func (s *Store) read(ctx context.Context, ref string) ([]byte, *Meta, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.db == nil {
-		return nil, ErrClosed
+		return nil, nil, ErrClosed
 	}
 	id, err := s.entryID(ref)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var blob, metaBlob []byte
 	var blobLen int64
 	if err = s.db.QueryRowContext(ctx, "SELECT substr(blob,1,?),length(blob),substr(meta,1,?) FROM entries WHERE id = ?", maxValue+29, maxMeta+1, id).Scan(&blob, &blobLen, &metaBlob); errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	} else if err != nil {
-		return nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entry", err)
+		return nil, nil, sqlFailure(ctx, ErrInvalidStore, "invalid local vault: could not read the entry", err)
 	}
 	if blobLen < 28 || blobLen > maxValue+28 {
 		// The stored ciphertext is outside the format's size bounds.
-		return nil, ErrCorruptStore
+		return nil, nil, ErrCorruptStore
 	}
 	aad, err := keycrypto.SecretAAD(s.id, id)
 	if err != nil {
-		return nil, classify(ErrInvalidStore, "", err)
+		return nil, nil, classify(ErrInvalidStore, "", err)
 	}
 	plain, err := keycrypto.OpenBlob(s.key, aad, blob)
 	if err != nil {
 		// Opening proved the key against this vault, so a failure here is
 		// the row, not the caller's key (design §17.7).
-		return nil, classify(ErrCorruptStore, "", err)
+		return nil, nil, classify(ErrCorruptStore, "", err)
 	}
 	if err := s.backfillMeta(ctx, ref, id, blob, metaBlob, plain); err != nil {
 		keycrypto.WipeKey(plain)
-		return nil, err
+		return nil, nil, err
 	}
-	return plain, nil
+	var m *Meta
+	if metaBlob != nil {
+		m, err = s.openMeta(id, metaBlob)
+		// Preserve legacy Use behavior when metadata cannot be decoded.
+		// Callers that require metadata, including the CLI, validate it first.
+		if err != nil {
+			m = nil
+		}
+	}
+	return plain, m, nil
 }
 
 // backfillMeta runs only after an authorized secret read. The old format

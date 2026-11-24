@@ -300,7 +300,11 @@ func cmdSet(args []string) int {
 	sourceName := fs.String("vault", "", "vault to operate on")
 	raw := fs.Bool("raw", false, "store piped stdin byte for byte (default: strip one trailing newline)")
 	description := fs.String("description", "", "description stored in the entry meta")
-	var allowHosts stringList
+	var allowHosts, allowCommands stringList
+	allowArgv := fs.Bool("allow-argv", false, "allow secret injection into arguments")
+	username := fs.String("username", "", "store a login with this username")
+	loginURL := fs.String("url", "", "login URL (requires --username)")
+	fs.Var(&allowCommands, "allow-command", "allow a command (repeatable)")
 	fs.Var(&allowHosts, "allow-host", "allow hosts of HTTP(S) URLs passed in argv (repeatable)")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
@@ -308,22 +312,30 @@ func cmdSet(args []string) int {
 		return parseExit(err)
 	}
 	if len(rest) != 1 {
-		return fatalf(2, "usage: keyref set <ref> [--raw] [--description TEXT] [--allow-host HOST] [--vault NAME]  (the secret is read from stdin)")
+		return fatalf(2, "usage: keyref set <ref> [--raw] [--description TEXT] [--allow-host HOST] [--allow-command CMD] [--allow-argv] [--username USER] [--url URL] [--vault NAME]  (the secret is read from stdin)")
 	}
 	ref := rest[0]
 	if !local.ValidRef(ref) {
 		return fatalf(2, "invalid ref %q: a ref is one lowercase letter, or 2-64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit", ref)
 	}
 	p := mustPaths()
-	opts := local.PutOptions{Description: *description, AllowedHosts: allowHosts}
+	opts := local.PutOptions{Description: *description, AllowedHosts: allowHosts, AllowCommands: allowCommands, AllowArgv: *allowArgv, URL: *loginURL}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "username" {
+			opts.Username = username
+		}
+	})
+	if opts.Username == nil && *loginURL != "" {
+		return fatalf(2, "--url requires --username")
+	}
 	spec, client, err := writableSource(p, *sourceName)
 	if err != nil {
 		return fatalf(2, "%v", err)
 	}
 	if client != nil {
 		defer clear(client.session.VaultKey)
-		if len(allowHosts) > 0 {
-			return fatalf(2, "--allow-host is available for local sources")
+		if len(allowHosts) > 0 || len(allowCommands) > 0 || *allowArgv || opts.Username != nil || *loginURL != "" {
+			return fatalf(2, "local policy and login flags are available for local sources")
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer stop()
@@ -443,6 +455,12 @@ func runLocalGet(p config.Paths, spec source.Spec, ref, format string, reveal bo
 	}
 	defer vault.Close()
 	if reveal {
+		if _, err := vault.Stat(context.Background(), ref); err != nil {
+			if errors.Is(err, local.ErrNotFound) {
+				return fatalf(exitcode.UnknownRef, "unknown ref %q", ref)
+			}
+			return fatalf(1, "could not read %q: %v", ref, err)
+		}
 		// Deliberate, explicitly requested plaintext path. It exists
 		// for local sources only: the paired vault has no reveal at
 		// all (design.md §16). The confirmation runs on the controlling
@@ -477,11 +495,16 @@ func runLocalGet(p config.Paths, spec source.Spec, ref, format string, reveal bo
 // localEntry renders a local row in the same shape as a synced entry,
 // so an agent only has to understand one list/get format (design §17.4).
 func localEntry(m local.Meta) meta.Entry {
+	entryType := "local"
+	if m.Type == "login" {
+		entryType = "login"
+	}
 	return meta.Entry{
+		Username: m.Username, URL: m.URL,
 		Ref:         m.Ref,
 		Name:        m.Ref,
 		Description: m.Description,
-		Type:        "local",
+		Type:        entryType,
 		Masked:      m.Masked,
 		Sensitivity: "standard",
 		Injectable:  true,
@@ -593,8 +616,7 @@ func checkSecretSize(value []byte) ([]byte, error) {
 
 // ---- exec on a local source ----
 
-// localExecRef applies the local command defaults and the entry's host
-// restrictions. Local entries do not permit argv injection.
+// localExecRef applies local defaults and the entry's execution policy.
 func localExecRef(m *local.Meta) *exec.ResolvedRef {
 	return &exec.ResolvedRef{
 		Ref:        m.Ref,
@@ -603,6 +625,8 @@ func localExecRef(m *local.Meta) *exec.ResolvedRef {
 			Sensitivity:   "standard",
 			CommandPolicy: "deny-shells",
 			AllowedHosts:  m.Policy.AllowedHosts,
+			AllowCommands: m.Policy.AllowCommands,
+			AllowArgv:     m.Policy.AllowArgv,
 		},
 	}
 }
@@ -612,12 +636,6 @@ func localExecRef(m *local.Meta) *exec.ResolvedRef {
 // no server, no grants, no approval round and no remote audit. Values
 // are decrypted only after the policy checks pass.
 func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
-	if opts.LoginRef != "" {
-		return fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--stdin-login is not supported by local sources; use --stdin for a local secret, or a synchronized item for username and value")
-	}
-	if opts.AllowArgv || exec.HasArgvPlaceholder(opts.Argv) {
-		return fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--allow-argv and argv placeholders are not supported by local sources; use --env, --stdin, or --fd to inject a local secret")
-	}
 	if len(opts.Replies) > 0 {
 		return fatalfTo(opts.Stderr, exitcode.PolicyRejection, "--reply is not supported by local sources; use --stdin for a local secret, or an approval item from a synchronized source")
 	}
@@ -631,7 +649,7 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 	defer vault.Close()
 
 	req := &exec.Request{
-		EnvRefs: opts.EnvRefs, PassNames: opts.PassNames, StdinRef: opts.StdinRef,
+		EnvRefs: opts.EnvRefs, PassNames: opts.PassNames, StdinRef: opts.StdinRef, LoginRef: opts.LoginRef,
 		FdRefs: opts.FdRefs, FdTemplate: opts.FdTemplate, FdRaw: opts.FdRaw,
 		AllowArgv: opts.AllowArgv, Argv: opts.Argv,
 		Pty: opts.Pty, Stdin: opts.Stdin, Replies: opts.Replies,
@@ -654,18 +672,34 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 	}
 	req.ResolveValue = func(ref string) (*secret.Plaintext, int, string) {
 		var out *secret.Plaintext
-		err := vault.Use(context.Background(), ref, func(value []byte) error {
+		resolve := func(value []byte) error {
 			pt, err := secret.NewPlaintextFromBytes(value)
 			if err != nil {
 				return err
 			}
 			out = pt
 			return nil
-		})
+		}
+		var err error
+		if ref == opts.LoginRef {
+			err = vault.UseLogin(context.Background(), ref, func(username, value []byte) error {
+				user, err := secret.NewPlaintextFromBytes(username)
+				if err != nil {
+					return err
+				}
+				req.Refs[ref].Username = user
+				return resolve(value)
+			})
+		} else {
+			err = vault.Use(context.Background(), ref, resolve)
+		}
 		switch {
 		case errors.Is(err, local.ErrNotFound):
 			fmt.Fprintf(opts.Stderr, "keyref: unknown ref %q in source %q\n", ref, spec.Name)
 			return nil, exitcode.UnknownRef, "unknown-ref"
+		case errors.Is(err, local.ErrNotLogin):
+			fmt.Fprintln(opts.Stderr, "keyref: --stdin-login requires a login item")
+			return nil, exitcode.InjectionInvalid, "login-fields"
 		case err != nil || out == nil:
 			fmt.Fprintf(opts.Stderr, "keyref: could not decrypt %q: %v\n", ref, err)
 			return nil, exitcode.UnwrapFailed, "unwrap"

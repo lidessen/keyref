@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	keycrypto "github.com/lidessen/keyref/proto/crypto"
 )
@@ -167,7 +168,20 @@ func (s *Store) Import(ctx context.Context, items []ImportItem) ([]ImportStatus,
 			keycrypto.WipeKey(plain)
 			return nil, ErrCorruptStore
 		}
-		unchanged := subtle.ConstantTimeCompare(plain, item.Value) == 1
+		comparison := plain
+		if plans[i].existing != nil && plans[i].existing.Type == "login" {
+			u, value, err := decodeLogin(plain, plans[i].existing)
+			keycrypto.WipeKey(u)
+			if err != nil {
+				keycrypto.WipeKey(plain)
+				return nil, err
+			}
+			comparison = value
+		}
+		unchanged := subtle.ConstantTimeCompare(comparison, item.Value) == 1
+		if plans[i].existing != nil && plans[i].existing.Type == "login" {
+			keycrypto.WipeKey(comparison)
+		}
 		keycrypto.WipeKey(plain)
 		if unchanged {
 			plans[i].status = ImportUnchanged
@@ -212,7 +226,8 @@ func (s *Store) Import(ctx context.Context, items []ImportItem) ([]ImportStatus,
 		}
 		if plan.existing != nil {
 			m.Description = plan.existing.Description
-			m.Policy.AllowedHosts = append([]string{}, plan.existing.Policy.AllowedHosts...)
+			m.Policy = plan.existing.Policy
+			m.Type, m.Username, m.URL = plan.existing.Type, plan.existing.Username, plan.existing.URL
 		}
 		metaBlob, err := s.sealMeta(plan.id, m)
 		if err != nil {
@@ -225,7 +240,20 @@ func (s *Store) Import(ctx context.Context, items []ImportItem) ([]ImportStatus,
 		if err != nil {
 			return nil, ErrInvalidStore
 		}
-		blob, err := keycrypto.SealBlob(s.key, aad, plan.value)
+		stored := plan.value
+		if m.Type == "login" {
+			if !utf8.Valid(plan.value) {
+				return nil, ErrInvalidStore
+			}
+			stored, err = encodeLogin(m.Username, plan.value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		blob, err := keycrypto.SealBlob(s.key, aad, stored)
+		if m.Type == "login" {
+			keycrypto.WipeKey(stored)
+		}
 		if err != nil {
 			return nil, ErrInvalidStore
 		}

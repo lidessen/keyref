@@ -50,10 +50,7 @@ func TestLocalExecUnsupportedInjectionHints(t *testing.T) {
 		opts execOptions
 		want []string
 	}{
-		{"allow argv", execOptions{AllowArgv: true}, []string{"--allow-argv", "local sources", "--env", "--stdin", "--fd"}},
-		{"argv placeholder", execOptions{Argv: []string{"tool", "{{keyref:ref}}"}}, []string{"argv placeholders", "local sources", "--env"}},
 		{"reply", execOptions{Replies: []exec.Reply{{Ref: "ref"}}}, []string{"--reply", "local sources", "--stdin", "approval item"}},
-		{"stdin login", execOptions{LoginRef: "ref"}, []string{"--stdin-login", "local sources", "--stdin", "synchronized item"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,5 +208,17 @@ func TestResolveSourceFailsClosedOnUnreadableCache(t *testing.T) {
 	}
 	if _, err := os.Stat(source.Path(mustPaths())); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the default source was written despite the error: %v", err)
+	}
+}
+
+func TestLocalExecOptInAndLoginEntry(t *testing.T) {
+	m := local.Meta{Ref: "login", Type: "login", Username: "person", URL: "https://example.test", Policy: local.Policy{AllowCommands: []string{"python3"}, AllowArgv: true}}
+	r := localExecRef(&m)
+	if !r.Policy.AllowArgv || !exec.ItemAllowsCommand("python3", r.Policy) || exec.ItemAllowsCommand("sh", r.Policy) {
+		t.Fatalf("policy: %+v", r.Policy)
+	}
+	e := localEntry(m)
+	if e.Type != "login" || e.Username != m.Username || e.URL != m.URL {
+		t.Fatalf("entry: %+v", e)
 	}
 }

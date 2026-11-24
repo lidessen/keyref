@@ -30,6 +30,8 @@ type Entry struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Type        string `json:"type"`
+	Username    string `json:"username,omitempty"`
+	URL         string `json:"url,omitempty"`
 	Masked      string `json:"masked"`
 	Sensitivity string `json:"sensitivity"`
 	Injectable  bool   `json:"injectable"`

@@ -189,7 +189,7 @@ exec flags:
   --env NAME=REF            inject the secret as an environment variable
   --pass NAME               forward NAME from the caller environment
   --stdin REF               write the secret to the child's stdin
-  --stdin-login REF         write a synced item's username and value as two
+  --stdin-login REF         write a login item's username and value as two
                             stdin lines, in that order, to an absolute command
   --fd N=REF --fd-template T | --fd-raw
                             write the (rendered) secret to fd N
