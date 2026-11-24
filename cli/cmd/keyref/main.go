@@ -125,6 +125,8 @@ func dispatch(cmd string, args []string) int {
 		return cmdUnlock(args)
 	case "exec":
 		return cmdExec(args)
+	case "doctor":
+		return cmdDoctor(args)
 	case "mcp":
 		return cmdMCP(args)
 	case "update":
@@ -156,6 +158,7 @@ commands:
   delete <ref>            delete an entry from a local source
   list [--format json]    refs, names, masks and sources across configured vaults
   exec [flags] -- <argv>  run a command with injected secrets
+  doctor [--json]         diagnose the selected vault without changing it
   source <list|default|add|remove>
                           show or configure credential sources
   remote <login|logout|list|get|set|delete|exec>
@@ -186,6 +189,7 @@ sources:
   "list" and masked "get" read it without decrypting the secret.
 
 exec flags:
+  --dry-run                 check metadata and policy without starting a child
   --env NAME=REF            inject the secret as an environment variable
   --pass NAME               forward NAME from the caller environment
   --stdin REF               write the secret to the child's stdin
@@ -782,6 +786,7 @@ func cmdExec(args []string) int {
 	fdTemplate := fs.String("fd-template", "", "template with one {{keyref}} token (RFC 7230 header-value charset)")
 	fdRaw := fs.Bool("fd-raw", false, "write the fd payload raw, without a template")
 	allowArgv := fs.Bool("allow-argv", false, "allow {{keyref:REF}} placeholders in argv (needs item policy; args visible to ps / Activity Monitor)")
+	dryRun := fs.Bool("dry-run", false, "check policy without resolving secret values or starting a child")
 	pty := fs.Bool("pty", false, "run the child on a pty owned by keyref (output still redacted)")
 	replies := multiFlag{}
 	fs.Var(&replies, "reply", "REGEX=REF type REF into the pty input when REGEX matches the pre-redaction output (needs --pty, approval item, allowCommands)")
@@ -820,6 +825,7 @@ func cmdExec(args []string) int {
 		EnvRefs: envs, PassNames: passes, StdinRef: *stdinRef, LoginRef: loginRef,
 		FdRefs: fds, FdTemplate: *fdTemplate, FdRaw: *fdRaw,
 		AllowArgv: *allowArgv, Pty: *pty, Replies: parsedReplies,
+		DryRun:  *dryRun,
 		Timeout: time.Duration(*timeoutSecs) * time.Second,
 		Argv:    argv,
 		Source:  *sourceName,
@@ -832,6 +838,7 @@ func cmdExec(args []string) int {
 // to the CLI and reuses the same implementation layer — one policy, one
 // spawn path, one redactor).
 type execOptions struct {
+	DryRun     bool
 	EnvRefs    []string
 	PassNames  []string
 	StdinRef   string
@@ -970,7 +977,7 @@ func runExecCore(opts execOptions) int {
 	injection := injectionModes(opts)
 	appr := &approvalAudit{}
 	auditAttempt := func(code int, state string, refs []string) int {
-		if paired && len(auditRecips) > 0 {
+		if !opts.DryRun && paired && len(auditRecips) > 0 {
 			o := &exec.Outcome{
 				ChildExit:   -1,
 				PolicyState: "deny:" + state,
@@ -1087,6 +1094,7 @@ func runExecCore(opts execOptions) int {
 	}
 
 	req := &exec.Request{
+		DryRun:       opts.DryRun,
 		EnvRefs:      opts.EnvRefs,
 		PassNames:    opts.PassNames,
 		StdinRef:     opts.StdinRef,
@@ -1108,7 +1116,7 @@ func runExecCore(opts execOptions) int {
 		Stdout:    opts.Stdout,
 		Stderr:    opts.Stderr,
 		OnOutcome: func(o *exec.Outcome) {
-			if !paired || len(auditRecips) == 0 {
+			if opts.DryRun || !paired || len(auditRecips) == 0 {
 				return
 			}
 			o.ApprovalResult = approvalResultOf(o.PolicyState, appr.used)

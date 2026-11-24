@@ -649,6 +649,7 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 	defer vault.Close()
 
 	req := &exec.Request{
+		DryRun:  opts.DryRun,
 		EnvRefs: opts.EnvRefs, PassNames: opts.PassNames, StdinRef: opts.StdinRef, LoginRef: opts.LoginRef,
 		FdRefs: opts.FdRefs, FdTemplate: opts.FdTemplate, FdRaw: opts.FdRaw,
 		AllowArgv: opts.AllowArgv, Argv: opts.Argv,
@@ -662,6 +663,9 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 		case err == nil:
 			req.Refs[ref] = localExecRef(m)
 		case errors.Is(err, local.ErrNotFound):
+			if opts.DryRun {
+				return fatalfTo(opts.Stderr, exitcode.UnknownRef, "unknown ref %q in source %q", ref, spec.Name)
+			}
 			// An unknown ref still needs a policy for the pass; it
 			// resolves to exit 11 before any value is read.
 			req.Refs[ref] = localExecRef(&local.Meta{Ref: ref})

@@ -98,6 +98,8 @@ type ValueResolver func(ref string) (*secret.Plaintext, int, string)
 
 // Request is one `keyref exec` invocation.
 type Request struct {
+	// DryRun stops after metadata-based policy checks, before resolving values.
+	DryRun     bool
 	EnvRefs    []string // NAME=REF
 	PassNames  []string // NAME from the caller environment
 	StdinRef   string
@@ -410,6 +412,48 @@ func run(req *Request) (int, *Outcome) {
 		// §7.1: the local-visibility warning must accompany the argv
 		// injection decision; it never names the secret.
 		fmt.Fprintln(req.Stderr, "keyref: warning: secrets injected into process arguments are visible to other local users (ps, Activity Monitor)")
+	}
+
+	if req.DryRun {
+		for _, spec := range req.FdRefs {
+			if _, _, err := splitFdSpec(spec); err != nil {
+				fmt.Fprintln(req.Stderr, "keyref:", err)
+				return deny(10, "fd-spec")
+			}
+		}
+		if len(req.FdRefs) > 0 && (req.FdRaw == (req.FdTemplate != "")) {
+			fmt.Fprintln(req.Stderr, "keyref: --fd requires exactly one of --fd-raw or --fd-template")
+			return deny(10, "fd-mode")
+		}
+		forwarded := make([]string, 0, len(baseEnv))
+		for _, pair := range baseEnv {
+			name, _, _ := strings.Cut(pair, "=")
+			forwarded = append(forwarded, name)
+		}
+		sort.Strings(forwarded)
+		injected := make([]string, 0, len(envPairs))
+		for name := range envPairs {
+			injected = append(injected, name)
+		}
+		sort.Strings(injected)
+		kept := make(map[string]bool, len(forwarded))
+		for _, name := range forwarded {
+			kept[name] = true
+		}
+		scrubbedSet := map[string]bool{}
+		for _, pair := range req.ParentEnv {
+			name, _, ok := strings.Cut(pair, "=")
+			if ok && name != "" && !kept[name] {
+				scrubbedSet[name] = true
+			}
+		}
+		scrubbed := make([]string, 0, len(scrubbedSet))
+		for name := range scrubbedSet {
+			scrubbed = append(scrubbed, name)
+		}
+		sort.Strings(scrubbed)
+		fmt.Fprintf(req.Stdout, "command policy: allowed\nexecutable: %s\nrefs / redaction targets: %s\nenvironment forwarded: %s\nenvironment injected: %s\nenvironment scrubbed: %s\nvalidation: secret-dependent checks and approvals are not performed\n", resolved.First, strings.Join(outcome.Refs, ", "), strings.Join(forwarded, ", "), strings.Join(injected, ", "), strings.Join(scrubbed, ", "))
+		return 0, outcome
 	}
 
 	// ---- policy passed: from here on, secret bytes are touched ----
