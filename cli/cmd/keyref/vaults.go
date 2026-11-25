@@ -139,7 +139,7 @@ func writableSource(p config.Paths, override string) (source.Spec, *remoteClient
 	}
 }
 
-func listSources(p config.Paths, override, format string) int {
+func listSources(p config.Paths, override, format string, filter listFilter) int {
 	var specs []source.Spec
 	var c *remoteClient
 	var err error
@@ -204,5 +204,5 @@ func listSources(p config.Paths, override, format string) int {
 		}
 		return entries[i].Ref < entries[j].Ref
 	})
-	return printEntries(entries, format)
+	return printEntries(filterEntries(entries, filter), format)
 }

@@ -93,7 +93,7 @@ func mcpTools() []mcpTool {
 			Name: "list",
 			Description: "List the items of the selected source: ref, name, description, type, masked value, sensitivity. " +
 				refNotSecret + " Use a returned ref with get or exec.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"type":{"type":"string","description":"filter by entry type"},"url":{"type":"string","description":"filter by URL or hostname"}},"additionalProperties":false}`),
 		},
 		{
 			Name: "get",
@@ -276,7 +276,7 @@ func (s *mcpServer) toolsCall(params json.RawMessage) (result any, rpcErr *mcpEr
 	}
 	switch p.Name {
 	case "list":
-		return s.toolList()
+		return s.toolList(p.Arguments)
 	case "get":
 		return s.toolGet(p.Arguments)
 	case "exec":
@@ -325,9 +325,17 @@ func (s *mcpServer) ensureInit() error {
 
 // toolList mirrors `keyref list --format json` for the session's
 // source: the same meta layer on both backends, never a secret.
-func (s *mcpServer) toolList() (any, *mcpError) {
+func (s *mcpServer) toolList(args json.RawMessage) (any, *mcpError) {
+	var filter listFilter
+	if len(args) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(args))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&filter); err != nil {
+			return textResult("keyref: invalid list arguments: "+err.Error()+"\nexit_code: 2", true), nil
+		}
+	}
 	if s.spec.Kind == source.KindLocal {
-		return s.toolListLocal()
+		return s.toolListLocal(filter)
 	}
 	if err := s.ensureInit(); err != nil {
 		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
@@ -339,13 +347,13 @@ func (s *mcpServer) toolList() (any, *mcpError) {
 	if err != nil {
 		return textResult("keyref: "+err.Error()+"\nexit_code: 1", true), nil
 	}
-	return encodeEntries(entries)
+	return encodeEntries(filterEntries(entries, filter))
 }
 
 // toolListLocal lists a local source's encrypted meta. The vault is
 // opened and closed per tool call, so `keyref lock` takes effect inside
 // a running session and the master key is fetched only while needed.
-func (s *mcpServer) toolListLocal() (any, *mcpError) {
+func (s *mcpServer) toolListLocal(filter listFilter) (any, *mcpError) {
 	vault, err := openLocal(s.p, s.spec)
 	if err != nil {
 		return localToolError(err), nil
@@ -359,7 +367,7 @@ func (s *mcpServer) toolListLocal() (any, *mcpError) {
 	for i, m := range metas {
 		entries[i] = localEntry(m)
 	}
-	return encodeEntries(entries)
+	return encodeEntries(filterEntries(entries, filter))
 }
 
 // encodeEntries renders one list result in the indented JSON shape both

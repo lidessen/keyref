@@ -156,7 +156,7 @@ commands:
                           one entry; masked by default, --reveal prints the
                           raw secret bytes (local sources only)
   delete <ref>            delete an entry from a local source
-  list [--format json]    refs, names, masks and sources across configured vaults
+  list [--type TYPE] [--url HOST] [--format json]  list entries across configured vaults
   exec [flags] -- <argv>  run a command with injected secrets
   doctor [--json]         diagnose the selected vault without changing it
   source <list|default|add|remove>
@@ -423,15 +423,17 @@ func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	format := fs.String("format", "text", "text | json")
 	sourceName := fs.String("vault", "", "vault to operate on")
+	entryType := fs.String("type", "", "filter by entry type")
+	entryURL := fs.String("url", "", "filter by URL or hostname")
 	prepareHelp(fs, args)
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return parseExit(err)
 	}
 	if len(rest) != 0 || (*format != "text" && *format != "json") {
-		return fatalf(2, "usage: keyref list [--format text|json] [--vault NAME]")
+		return fatalf(2, "usage: keyref list [--format text|json] [--vault NAME] [--type TYPE] [--url HOST]")
 	}
-	return listSources(mustPaths(), *sourceName, *format)
+	return listSources(mustPaths(), *sourceName, *format, listFilter{Type: *entryType, URL: *entryURL})
 }
 
 func syncList(p config.Paths) ([]meta.Entry, int) {

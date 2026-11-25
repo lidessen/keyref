@@ -34,7 +34,7 @@ On the paired vault there is no `reveal`, no `export` and no `--print`; the JSON
 
 ### Sources
 
-By default, `keyref list` shows entries across initialized local vaults, the signed-in account vault, and the paired vault if present. Output identifies each source, including when a ref appears in multiple vaults. `keyref list --vault NAME` filters the results.
+By default, `keyref list` shows entries across initialized local vaults, the signed-in account vault, and the paired vault if present. Output identifies each source, including when a ref appears in multiple vaults. `keyref list --vault NAME` selects a source. Use `--type login` to match an entry type and `--url github.com` (or a full URL) to match a hostname. Hostnames are case-insensitive; a filter with a port requires that port, while a filter without one matches any port. Both filters can be combined and work with `--format json`. The MCP `list` tool accepts the same optional `type` and `url` filters. Entries without a URL do not match a URL filter.
 
 `keyref set REF` writes to the only initialized writable vault. With several writable vaults, choose one with `--vault NAME`. The `KEYREF_SOURCE` environment variable also selects a source for either command. Other source-aware commands use the configured default when neither override is provided.
 
