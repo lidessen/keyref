@@ -22,10 +22,11 @@ import (
 )
 
 const (
-	repository = "lidessen/keyref"
-	latestURL  = "https://api.github.com/repos/" + repository + "/releases/latest"
-	assetBase  = "https://github.com/" + repository + "/releases/download/"
-	maxBinary  = 64 << 20
+	repository   = "lidessen/keyref"
+	latestURL    = "https://api.github.com/repos/" + repository + "/releases/latest"
+	webLatestURL = "https://github.com/" + repository + "/releases/latest"
+	assetBase    = "https://github.com/" + repository + "/releases/download/"
+	maxBinary    = 64 << 20
 )
 
 var stableTag = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -45,6 +46,14 @@ func HTTPClient() *http.Client {
 func Latest(ctx context.Context, client *http.Client) (string, error) {
 	data, err := getSmall(ctx, client, latestURL, 1<<20)
 	if err != nil {
+		var statusErr *httpStatusError
+		if errors.As(err, &statusErr) && (statusErr.code == http.StatusForbidden || statusErr.code == http.StatusTooManyRequests) {
+			tag, fallbackErr := latestFromWeb(ctx, client)
+			if fallbackErr != nil {
+				return "", fmt.Errorf("check for a release: %w", fallbackErr)
+			}
+			return tag, nil
+		}
 		return "", fmt.Errorf("check for a release: %w", err)
 	}
 	var release struct {
@@ -56,6 +65,32 @@ func Latest(ctx context.Context, client *http.Client) (string, error) {
 		return "", errors.New("GitHub did not return a published stable Keyref version")
 	}
 	return release.Tag, nil
+}
+
+func latestFromWeb(ctx context.Context, client *http.Client) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, webLatestURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "keyref-updater")
+	res, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", &httpStatusError{code: res.StatusCode}
+	}
+	if res.Request == nil || res.Request.URL == nil {
+		return "", errors.New("GitHub did not return a final release URL")
+	}
+	u := res.Request.URL
+	prefix := "/" + repository + "/releases/tag/"
+	tag, ok := strings.CutPrefix(u.Path, prefix)
+	if u.Scheme != "https" || u.Host != "github.com" || !ok || !stableTag.MatchString(tag) {
+		return "", errors.New("GitHub did not redirect to a stable Keyref release")
+	}
+	return tag, nil
 }
 
 // IsNewer allows a checkout build to move to a stable release. Stable
@@ -221,7 +256,11 @@ func get(ctx context.Context, client *http.Client, url string) (*http.Response, 
 	}
 	if res.StatusCode != http.StatusOK {
 		res.Body.Close()
-		return nil, fmt.Errorf("GitHub returned HTTP %d", res.StatusCode)
+		return nil, &httpStatusError{code: res.StatusCode}
 	}
 	return res, nil
 }
+
+type httpStatusError struct{ code int }
+
+func (e *httpStatusError) Error() string { return fmt.Sprintf("GitHub returned HTTP %d", e.code) }

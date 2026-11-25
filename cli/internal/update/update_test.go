@@ -120,6 +120,51 @@ func TestLatest(t *testing.T) {
 	}
 }
 
+func TestLatestWebFallback(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		status   int
+		location string
+		want     string
+	}{
+		{"forbidden", http.StatusForbidden, "https://github.com/lidessen/keyref/releases/tag/v0.3.0", "v0.3.0"},
+		{"rate limited", http.StatusTooManyRequests, "https://github.com/lidessen/keyref/releases/tag/v0.3.0", "v0.3.0"},
+		{"prerelease", http.StatusForbidden, "https://github.com/lidessen/keyref/releases/tag/v0.3.0-rc.1", ""},
+		{"wrong host", http.StatusForbidden, "https://example.com/lidessen/keyref/releases/tag/v0.3.0", ""},
+		{"wrong repository", http.StatusForbidden, "https://github.com/other/keyref/releases/tag/v0.3.0", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.String() {
+				case latestURL:
+					if req.Method != http.MethodGet {
+						t.Fatalf("API method = %s", req.Method)
+					}
+					return response(tt.status, "rate limited"), nil
+				case webLatestURL:
+					if req.Method != http.MethodHead {
+						t.Fatalf("web method = %s", req.Method)
+					}
+					res := response(http.StatusFound, "")
+					res.Header = http.Header{"Location": []string{tt.location}}
+					return res, nil
+				case tt.location:
+					res := response(http.StatusOK, "")
+					res.Request = req
+					return res, nil
+				default:
+					t.Fatalf("unexpected request %s", req.URL)
+					return nil, nil
+				}
+			})}
+			got, err := Latest(t.Context(), client)
+			if got != tt.want || (err == nil) != (tt.want != "") {
+				t.Fatalf("Latest = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestInstall(t *testing.T) {
 	const original = "current executable"
 	const newer = "new executable"
