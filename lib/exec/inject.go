@@ -148,7 +148,7 @@ func ValidateHeaderValue(b []byte) error {
 // argvPlaceholderRe matches the {{keyref:REF}} argv placeholder (design
 // §7.1). The keyref:// URI form was removed in v0.6: one notation, one
 // parser. The keyref://pair QR scheme (§8.1) is unrelated and unchanged.
-var argvPlaceholderRe = regexp.MustCompile(`\{\{keyref:([a-z][a-z0-9-]{0,62}[a-z0-9]|[a-z])\}\}`)
+var argvPlaceholderRe = regexp.MustCompile(`\{\{keyref:(([a-z][a-z0-9-]{0,62}[a-z0-9]|[a-z])(\.(username|password))?)\}\}`)
 
 // HasArgvPlaceholder reports whether any argv element carries a
 // placeholder.

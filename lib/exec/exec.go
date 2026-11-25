@@ -37,13 +37,23 @@ type ResolvedRef struct {
 	Ref      string
 	Policy   Policy
 	Value    *secret.Plaintext // guarded; destroyed by Run
-	Username *secret.Plaintext // guarded; only resolved for --stdin-login
+	Username *secret.Plaintext // guarded; the other login field for redaction
 	// Injectable marks a ref whose value may be injected at all.
 	Injectable bool
 	// Message marks an sms:<message_id> ref (design v0.8 §14.5). Such a
 	// ref has no item policy: its only gate is the per-consumption
 	// approval round, so every item-level check below skips it.
 	Message bool
+}
+
+// SplitRefField recognizes a login field suffix and returns the base ref.
+func SplitRefField(ref string) (baseRef, field string, ok bool) {
+	for _, field := range []string{"username", "password"} {
+		if base, found := strings.CutSuffix(ref, "."+field); found && base != "" && !strings.Contains(base, ".") {
+			return base, field, true
+		}
+	}
+	return ref, "", false
 }
 
 // MessageRefPrefix introduces an SMS consumption reference. Message
@@ -572,12 +582,13 @@ func run(req *Request) (int, *Outcome) {
 	for _, ref := range outcome.Refs {
 		if rr, ok := req.Refs[ref]; ok && rr.Value != nil {
 			secrets[ref] = rr.Value.Bytes()
+			if rr.Username != nil {
+				secrets[ref+".other"] = rr.Username.Bytes()
+			}
 		}
 	}
 	var replacement []byte
 	if req.LoginRef != "" {
-		// A CLI argument cannot carry a NUL, so this key cannot collide with a ref.
-		secrets["\x00"] = req.Refs[req.LoginRef].Username.Bytes()
 		replacement = []byte("***")
 	}
 	stdoutRed := newRedactor(secrets, replacement)
@@ -864,6 +875,9 @@ func loginPreflight(req *Request) string {
 	if req.StdinRef != "" || req.Pty {
 		return "--stdin-login cannot be combined with --stdin or --pty"
 	}
+	if _, _, ok := SplitRefField(req.LoginRef); ok {
+		return "--stdin-login requires a base ref"
+	}
 	if strings.HasPrefix(req.LoginRef, MessageRefPrefix) {
 		return "--stdin-login requires a synchronized item"
 	}
@@ -873,18 +887,22 @@ func loginPreflight(req *Request) string {
 	if rr := req.Refs[req.LoginRef]; rr != nil && len(rr.Policy.AllowCommands) == 0 {
 		return "--stdin-login requires an explicit allowCommands policy for the item"
 	}
+	sameLogin := func(ref string) bool {
+		base, _, _ := SplitRefField(ref)
+		return base == req.LoginRef
+	}
 	for _, spec := range req.EnvRefs {
-		if _, ref, err := splitEnvSpec(spec); err == nil && ref == req.LoginRef {
+		if _, ref, err := splitEnvSpec(spec); err == nil && sameLogin(ref) {
 			return "--stdin-login cannot also inject the login item through --env"
 		}
 	}
 	for _, spec := range req.FdRefs {
-		if _, ref, err := splitFdSpec(spec); err == nil && ref == req.LoginRef {
+		if _, ref, err := splitFdSpec(spec); err == nil && sameLogin(ref) {
 			return "--stdin-login cannot also inject the login item through --fd"
 		}
 	}
 	for _, ref := range ArgvPlaceholderRefs(req.Argv) {
-		if ref == req.LoginRef {
+		if sameLogin(ref) {
 			return "--stdin-login cannot also inject the login item in argv"
 		}
 	}

@@ -69,3 +69,56 @@ func TestLocalLoginAndPolicyOptIn(t *testing.T) {
 		t.Fatalf("non-login: %d %s", r.code, r.stderr)
 	}
 }
+
+func TestLocalLoginFields(t *testing.T) {
+	_, _, env := localHome(t)
+	if r := localRun(t, env, "", "init"); r.code != 0 {
+		t.Fatal(r.stderr)
+	}
+	const user, password = "fixture-user", "fixture-password"
+	if r := localRun(t, env, password, "set", "login", "--type", "login", "--username", user, "--url", "https://example.test", "--allow-command", filepath.Base(helperBin), "--allow-argv"); r.code != 0 {
+		t.Fatal(r.stderr)
+	}
+	r := localRun(t, env, "", "get", "login")
+	if r.code != 0 || !strings.Contains(r.stdout, "username: "+user) || !strings.Contains(r.stdout, "url: https://example.test") {
+		t.Fatalf("get: %d %q %q", r.code, r.stdout, r.stderr)
+	}
+	digest := sha256.Sum256([]byte(user + "\n" + password))
+	hash := hex.EncodeToString(digest[:])
+	for _, args := range [][]string{
+		{"exec", "--env", "USER=login.username", "--env", "PASS=login.password", "--", helperBin, "fields", "env", hash},
+		{"exec", "--fd", "3=login.username", "--fd", "4=login.password", "--fd-raw", "--", helperBin, "fields", "fd", hash},
+		{"exec", "--stdin", "login.username", "--env", "PASS=login.password", "--", helperBin, "fields", "stdin", hash},
+		{"exec", "--allow-argv", "--", helperBin, "fields-argv", "{{keyref:login.username}}", "{{keyref:login.password}}", hash},
+	} {
+		r := localRun(t, env, "", args...)
+		if r.code != 0 || strings.Contains(r.stdout+r.stderr, user) || strings.Contains(r.stdout+r.stderr, password) || !strings.Contains(r.stdout, "redacted") || !strings.Contains(r.stderr, "redacted") {
+			t.Fatalf("%v: exit %d stdout %q stderr %q", args, r.code, r.stdout, r.stderr)
+		}
+	}
+	// Even a field not selected for injection must be a redaction target.
+	one := localRun(t, env, "", "exec", "--env", "USER=login.username", "--", helperBin, "echo-env-and-arg", password)
+	if one.code != 0 || strings.Contains(one.stdout+one.stderr, user) || strings.Contains(one.stdout+one.stderr, password) || !strings.Contains(one.stdout, "redacted") || !strings.Contains(one.stderr, "redacted") {
+		t.Fatalf("single field: %d %q %q", one.code, one.stdout, one.stderr)
+	}
+	if r := localRun(t, env, password, "set", "plain", "--allow-command", filepath.Base(helperBin)); r.code != 0 {
+		t.Fatal(r.stderr)
+	}
+	for _, field := range []string{"username", "password"} {
+		r := localRun(t, env, "", "exec", "--env", "K=plain."+field, "--", helperBin, "exit42")
+		if r.code != 15 || !strings.Contains(r.stderr, "requires a login item") {
+			t.Fatalf("non-login %s: %d %q", field, r.code, r.stderr)
+		}
+	}
+	for _, args := range [][]string{{"set", "invalid", "--type", "unknown"}, {"set", "invalid", "--type", "login"}, {"set", "invalid", "--type", "secret", "--username", user}} {
+		if r := localRun(t, env, password, args...); r.code != 2 {
+			t.Fatalf("%v: %d %q", args, r.code, r.stderr)
+		}
+	}
+	m := startLocalMCP(t, env)
+	m.call(t, "initialize", map[string]any{"protocolVersion": "2024-11-05"})
+	text := mcpText(t, m.tool(t, "exec", map[string]any{"argv": []any{helperBin, "fields", "env", hash}, "env": map[string]any{"USER": "login.username", "PASS": "login.password"}}))
+	if !strings.Contains(text, "exit_code: 0") || strings.Contains(text, user) || strings.Contains(text, password) {
+		t.Fatalf("MCP exec: %q", text)
+	}
+}

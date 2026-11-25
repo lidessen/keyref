@@ -302,6 +302,7 @@ func cmdSet(args []string) int {
 	description := fs.String("description", "", "description stored in the entry meta")
 	var allowHosts, allowCommands stringList
 	allowArgv := fs.Bool("allow-argv", false, "allow secret injection into arguments")
+	entryType := fs.String("type", "", "entry type: secret or login")
 	username := fs.String("username", "", "store a login with this username")
 	loginURL := fs.String("url", "", "login URL (requires --username)")
 	fs.Var(&allowCommands, "allow-command", "allow a command (repeatable)")
@@ -318,16 +319,45 @@ func cmdSet(args []string) int {
 	if !local.ValidRef(ref) {
 		return fatalf(2, "invalid ref %q: a ref is one lowercase letter, or 2-64 lowercase letters, digits and hyphens starting with a letter and ending with a letter or digit", ref)
 	}
-	p := mustPaths()
+	if *entryType != "" && *entryType != "secret" && *entryType != "login" {
+		return fatalf(2, "--type must be secret or login")
+	}
 	opts := local.PutOptions{Description: *description, AllowedHosts: allowHosts, AllowCommands: allowCommands, AllowArgv: *allowArgv, URL: *loginURL}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "username" {
 			opts.Username = username
 		}
 	})
+	if *entryType == "secret" && (opts.Username != nil || *loginURL != "") {
+		return fatalf(2, "--type secret cannot be combined with login flags")
+	}
+	if *entryType == "login" && opts.Username == nil {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return fatalf(2, "--type login requires --username when stdin is not a terminal")
+		}
+		fmt.Fprint(os.Stderr, "username: ")
+		// Read one byte at a time so no password input is buffered ahead.
+		var line []byte
+		var b [1]byte
+		for {
+			n, err := os.Stdin.Read(b[:])
+			if n > 0 && b[0] == '\n' {
+				break
+			}
+			if n > 0 {
+				line = append(line, b[0])
+			}
+			if err != nil {
+				return fatalf(2, "could not read username")
+			}
+		}
+		name := strings.TrimSuffix(string(line), "\r")
+		opts.Username = &name
+	}
 	if opts.Username == nil && *loginURL != "" {
 		return fatalf(2, "--url requires --username")
 	}
+	p := mustPaths()
 	spec, client, err := writableSource(p, *sourceName)
 	if err != nil {
 		return fatalf(2, "%v", err)
@@ -349,6 +379,9 @@ func cmdSet(args []string) int {
 		return localOpenError(err)
 	}
 	defer vault.Close()
+	if *entryType == "login" && term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprint(os.Stderr, "password: ")
+	}
 	value, err := readLocalSecret(os.Stdin, *raw)
 	if err != nil {
 		return fatalf(1, "%v", err)
@@ -658,7 +691,8 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 		ParentEnv: os.Environ(), Stdout: opts.Stdout, Stderr: opts.Stderr,
 	}
 	for _, ref := range exec.CollectRefs(req) {
-		m, err := vault.Stat(context.Background(), ref)
+		base, _, _ := exec.SplitRefField(ref)
+		m, err := vault.Stat(context.Background(), base)
 		switch {
 		case err == nil:
 			req.Refs[ref] = localExecRef(m)
@@ -685,14 +719,19 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 			return nil
 		}
 		var err error
-		if ref == opts.LoginRef {
-			err = vault.UseLogin(context.Background(), ref, func(username, value []byte) error {
-				user, err := secret.NewPlaintextFromBytes(username)
+		base, field, isField := exec.SplitRefField(ref)
+		if ref == opts.LoginRef || isField {
+			err = vault.UseLogin(context.Background(), base, func(username, value []byte) error {
+				selected, other := value, username
+				if field == "username" {
+					selected, other = username, value
+				}
+				user, err := secret.NewPlaintextFromBytes(other)
 				if err != nil {
 					return err
 				}
 				req.Refs[ref].Username = user
-				return resolve(value)
+				return resolve(selected)
 			})
 		} else {
 			err = vault.Use(context.Background(), ref, resolve)
@@ -702,7 +741,11 @@ func runLocalExec(p config.Paths, opts execOptions, spec source.Spec) int {
 			fmt.Fprintf(opts.Stderr, "keyref: unknown ref %q in source %q\n", ref, spec.Name)
 			return nil, exitcode.UnknownRef, "unknown-ref"
 		case errors.Is(err, local.ErrNotLogin):
-			fmt.Fprintln(opts.Stderr, "keyref: --stdin-login requires a login item")
+			if ref == opts.LoginRef {
+				fmt.Fprintln(opts.Stderr, "keyref: --stdin-login requires a login item")
+			} else {
+				fmt.Fprintln(opts.Stderr, "keyref: login field injection requires a login item")
+			}
 			return nil, exitcode.InjectionInvalid, "login-fields"
 		case err != nil || out == nil:
 			fmt.Fprintf(opts.Stderr, "keyref: could not decrypt %q: %v\n", ref, err)

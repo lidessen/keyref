@@ -54,3 +54,22 @@ func TestCollectRefsSeesArgvPlaceholders(t *testing.T) {
 		t.Fatalf("CollectRefs = %v, want %v", got, want)
 	}
 }
+
+func TestSplitRefField(t *testing.T) {
+	for _, tc := range []struct {
+		in, base, field string
+		ok              bool
+	}{
+		{"login.username", "login", "username", true}, {"login.password", "login", "password", true},
+		{"login", "login", "", false}, {"login.other", "login.other", "", false}, {"a.b.username", "a.b.username", "", false},
+	} {
+		base, field, ok := SplitRefField(tc.in)
+		if base != tc.base || field != tc.field || ok != tc.ok {
+			t.Errorf("SplitRefField(%q) = %q, %q, %v", tc.in, base, field, ok)
+		}
+	}
+	got := ArgvPlaceholderRefs([]string{"tool", "{{keyref:login.username}}", "{{keyref:login.password}}"})
+	if !reflect.DeepEqual(got, []string{"login.username", "login.password"}) {
+		t.Fatalf("field placeholders = %v", got)
+	}
+}

@@ -27,6 +27,47 @@ func main() {
 		fmt.Printf("K=%s\n", os.Getenv("K"))
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "echo-env-and-arg" {
+		fmt.Fprintln(os.Stdout, os.Getenv("USER"), os.Args[2])
+		fmt.Fprintln(os.Stderr, os.Getenv("USER"), os.Args[2])
+		return
+	}
+	if len(os.Args) == 4 && os.Args[1] == "fields" {
+		var a, b string
+		switch os.Args[2] {
+		case "env":
+			a, b = os.Getenv("USER"), os.Getenv("PASS")
+		case "fd":
+			first, err1 := io.ReadAll(os.NewFile(3, "first"))
+			second, err2 := io.ReadAll(os.NewFile(4, "second"))
+			if err1 != nil || err2 != nil {
+				os.Exit(40)
+			}
+			a, b = string(first), string(second)
+		case "stdin":
+			first, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				os.Exit(40)
+			}
+			a, b = strings.TrimSuffix(string(first), "\n"), os.Getenv("PASS")
+		}
+		digest := sha256.Sum256([]byte(a + "\n" + b))
+		if hex.EncodeToString(digest[:]) != os.Args[3] {
+			os.Exit(41)
+		}
+		fmt.Fprintln(os.Stdout, a, b)
+		fmt.Fprintln(os.Stderr, a, b)
+		return
+	}
+	if len(os.Args) == 5 && os.Args[1] == "fields-argv" {
+		digest := sha256.Sum256([]byte(os.Args[2] + "\n" + os.Args[3]))
+		if hex.EncodeToString(digest[:]) != os.Args[4] {
+			os.Exit(41)
+		}
+		fmt.Fprintln(os.Stdout, os.Args[2], os.Args[3])
+		fmt.Fprintln(os.Stderr, os.Args[2], os.Args[3])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "exit42" {
 		os.Exit(42)
 	}

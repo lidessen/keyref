@@ -507,6 +507,12 @@ func printEntry(e *meta.Entry, format string) int {
 	}
 	fmt.Printf("ref: %s\nname: %s\ndescription: %s\ntype: %s\nmasked: %s\nsensitivity: %s\ninjectable: %v\n",
 		e.Ref, e.Name, e.Description, e.Type, e.Masked, e.Sensitivity, e.Injectable)
+	if e.Username != "" {
+		fmt.Printf("username: %s\n", e.Username)
+	}
+	if e.URL != "" {
+		fmt.Printf("url: %s\n", e.URL)
+	}
 	return 0
 }
 
@@ -1054,13 +1060,17 @@ func runExecCore(opts execOptions) int {
 			messageIDs[ref] = messageID
 			continue
 		}
-		itemID, m, err := metaByRef(st, id, vaultID, ownerPub, ref)
+		base, _, isField := exec.SplitRefField(ref)
+		itemID, m, err := metaByRef(st, id, vaultID, ownerPub, base)
 		if err != nil {
 			if errors.Is(err, meta.ErrUnknownRef) || errors.Is(err, meta.ErrNoViewGrant) {
 				fmt.Fprintf(opts.Stderr, "keyref: unknown ref %q\n", ref)
 				return auditAttempt(exitcode.UnknownRef, "unknown-ref", []string{ref})
 			}
 			return auditAttempt(unwrapOrGeneric(opts.Stderr, err), "unwrap-meta", []string{ref})
+		}
+		if isField && m.Type != "login" {
+			return auditAttempt(fatalfTo(opts.Stderr, exitcode.InjectionInvalid, "login field injection requires a login item"), "login-fields", []string{ref})
 		}
 		refs[ref] = &exec.ResolvedRef{Ref: ref, Policy: syncExecPolicy(m.Policy), Injectable: m.Injectable}
 		itemIDs[ref] = itemID
@@ -1090,7 +1100,8 @@ func runExecCore(opts execOptions) int {
 			return resolveViaApproval(st, vaultID, string(deviceID), id, cl, auditRecips, dirDevices, refreshDevices,
 				opts, cwd, resolvedCmd, refs[ref], itemIDs[ref], appr)
 		}
-		return resolveValueFor(opts.Stderr, st, id, vaultID, ownerPub, refs[ref], itemIDs[ref], ref == opts.LoginRef)
+		_, _, isField := exec.SplitRefField(ref)
+		return resolveValueFor(opts.Stderr, st, id, vaultID, ownerPub, refs[ref], itemIDs[ref], ref == opts.LoginRef || isField)
 	}
 
 	req := &exec.Request{
@@ -1221,9 +1232,14 @@ func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Id
 	}
 	// Local item: the unwrap result IS the secret value (guarded); it is
 	// used once and wiped by exec.Run (design §6.6: 解开即用、即清).
+	_, _, isField := exec.SplitRefField(rr.Ref)
 	if len(it.SecretCiphertext) == 0 {
-		if rr.Ref == opts.LoginRef {
-			fmt.Fprintln(opts.Stderr, "keyref: --stdin-login requires a synchronized item")
+		if rr.Ref == opts.LoginRef || isField {
+			if isField {
+				fmt.Fprintln(opts.Stderr, "keyref: login field injection requires a synchronized item")
+			} else {
+				fmt.Fprintln(opts.Stderr, "keyref: --stdin-login requires a synchronized item")
+			}
 			return nil, exitcode.InjectionInvalid, "login-not-synced"
 		}
 		base := approvalBaseOptions(vaultID, deviceID, id, cl, auditRecips, dirDevices, refreshDevices,
@@ -1249,7 +1265,7 @@ func resolveViaApproval(st *cache.Store, vaultID, deviceID string, id *device.Id
 		return nil, code, state
 	}
 	defer key.Destroy()
-	return decryptExecValue(opts.Stderr, key, it.SecretCiphertext, vaultID, itemID, rr, rr.Ref == opts.LoginRef)
+	return decryptExecValue(opts.Stderr, key, it.SecretCiphertext, vaultID, itemID, rr, rr.Ref == opts.LoginRef || isField)
 }
 
 // resolveMessageViaApproval runs the §14.5 consumption round for one
@@ -1369,11 +1385,21 @@ func decryptExecValue(stderr io.Writer, key *secret.Key, blob []byte, vaultID, i
 	if login {
 		rr.Username, value, err = itemcrypt.DecryptLoginFields(key, blob, vaultID, itemID)
 		if errors.Is(err, secret.ErrFieldNotFound) || errors.Is(err, secret.ErrNotAString) {
-			fmt.Fprintln(stderr, "keyref: --stdin-login requires string username and value fields")
+			if _, _, isField := exec.SplitRefField(rr.Ref); isField {
+				fmt.Fprintln(stderr, "keyref: login field injection requires string username and value fields")
+			} else {
+				fmt.Fprintln(stderr, "keyref: --stdin-login requires string username and value fields")
+			}
 			return nil, exitcode.InjectionInvalid, "login-fields"
 		}
 	} else {
 		value, err = itemcrypt.DecryptSecretValue(key, blob, vaultID, itemID)
+	}
+	if err == nil && login {
+		_, field, _ := exec.SplitRefField(rr.Ref)
+		if field == "username" {
+			rr.Username, value = value, rr.Username
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "keyref: cannot decrypt secret for %s\n", rr.Ref)
