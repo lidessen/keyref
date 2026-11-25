@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -19,6 +20,55 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { re
 
 func response(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+func TestInstallWithProgress(t *testing.T) {
+	const binary = "new executable"
+	const tag = "v1.2.3"
+	name := "keyref-" + runtime.GOOS + "-" + runtime.GOARCH
+	checksum := fmt.Sprintf("%x  %s\n", sha256.Sum256([]byte(binary)), name)
+	for _, total := range []int64{int64(len(binary)), -1, 0} {
+		t.Run(fmt.Sprintf("content-length-%d", total), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "keyref")
+			if err := os.WriteFile(path, []byte("old"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(req.URL.Path, "/SHA256SUMS") {
+					return response(http.StatusOK, checksum), nil
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(iotest.OneByteReader(strings.NewReader(binary))), ContentLength: total}, nil
+			})}
+			var counts []int64
+			verified := false
+			wantTotal := total
+			if wantTotal <= 0 {
+				wantTotal = -1
+			}
+			err = InstallWithProgress(context.Background(), client, tag, path, expected, func(downloaded, size int64) {
+				if verified || size != wantTotal || downloaded != int64(len(counts)+1) {
+					t.Errorf("progress = (%d, %d), verified = %t", downloaded, size, verified)
+				}
+				counts = append(counts, downloaded)
+			}, func() {
+				verified = true
+				if len(counts) != len(binary) {
+					t.Errorf("verification started after %d of %d bytes", len(counts), len(binary))
+				}
+			})
+			if err != nil || !verified || len(counts) != len(binary) {
+				t.Fatalf("InstallWithProgress = %v, verified = %t, counts = %v", err, verified, counts)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != binary {
+				t.Fatalf("installed executable = %q, %v", data, err)
+			}
+		})
+	}
 }
 
 func TestIsNewer(t *testing.T) {

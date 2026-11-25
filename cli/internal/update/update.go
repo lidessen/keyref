@@ -84,6 +84,12 @@ func IsNewer(tag, current string) bool {
 // expected describes the running executable before the release lookup. If
 // another update replaced it, the caller must rerun the new executable.
 func Install(ctx context.Context, client *http.Client, tag, path string, expected os.FileInfo) error {
+	return InstallWithProgress(ctx, client, tag, path, expected, nil, nil)
+}
+
+// InstallWithProgress reports downloaded bytes and the total size, or -1 when
+// the size is unknown. beforeVerify runs after the download completes.
+func InstallWithProgress(ctx context.Context, client *http.Client, tag, path string, expected os.FileInfo, progress func(downloaded, total int64), beforeVerify func()) error {
 	if !stableTag.MatchString(tag) {
 		return errors.New("invalid stable release tag")
 	}
@@ -111,15 +117,23 @@ func Install(ctx context.Context, client *http.Client, tag, path string, expecte
 	defer os.Remove(f.Name())
 	defer f.Close()
 
-	body, err := get(ctx, client, base+name)
+	res, err := get(ctx, client, base+name)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", name, err)
 	}
-	defer body.Close()
+	defer res.Body.Close()
 	hash := sha256.New()
-	size, err := io.Copy(io.MultiWriter(f, hash), io.LimitReader(body, maxBinary+1))
+	total := res.ContentLength
+	if total <= 0 {
+		total = -1
+	}
+	w := &progressWriter{writer: io.MultiWriter(f, hash), total: total, report: progress}
+	size, err := io.Copy(w, io.LimitReader(res.Body, maxBinary+1))
 	if err != nil {
 		return fmt.Errorf("stage release binary: %w", err)
+	}
+	if beforeVerify != nil {
+		beforeVerify()
 	}
 	if size == 0 || size > maxBinary || !bytes.Equal(hash.Sum(nil), checksum) {
 		return errors.New("release binary size or SHA-256 checksum is invalid")
@@ -148,6 +162,21 @@ func Install(ctx context.Context, client *http.Client, tag, path string, expecte
 	})
 }
 
+type progressWriter struct {
+	writer         io.Writer
+	written, total int64
+	report         func(int64, int64)
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.written += int64(n)
+	if n > 0 && w.report != nil {
+		w.report(w.written, w.total)
+	}
+	return n, err
+}
+
 func assetChecksum(data []byte, name string) ([]byte, error) {
 	var checksum []byte
 	for line := range strings.SplitSeq(string(data), "\n") {
@@ -168,19 +197,19 @@ func assetChecksum(data []byte, name string) ([]byte, error) {
 }
 
 func getSmall(ctx context.Context, client *http.Client, url string, limit int64) ([]byte, error) {
-	body, err := get(ctx, client, url)
+	res, err := get(ctx, client, url)
 	if err != nil {
 		return nil, err
 	}
-	defer body.Close()
-	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	defer res.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
 	if err == nil && int64(len(data)) > limit {
 		err = errors.New("release response is too large")
 	}
 	return data, err
 }
 
-func get(ctx context.Context, client *http.Client, url string) (io.ReadCloser, error) {
+func get(ctx context.Context, client *http.Client, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -194,5 +223,5 @@ func get(ctx context.Context, client *http.Client, url string) (io.ReadCloser, e
 		res.Body.Close()
 		return nil, fmt.Errorf("GitHub returned HTTP %d", res.StatusCode)
 	}
-	return res.Body, nil
+	return res, nil
 }

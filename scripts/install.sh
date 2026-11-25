@@ -3,9 +3,17 @@ set -euo pipefail
 
 export KEYREF_BIN_DIR="${KEYREF_BIN_DIR:-$HOME/.local/bin}"
 fail() { echo "keyref installer: $*" >&2; exit 1; }
+log() { printf '==> %s\n' "$*" >&2; }
 download() {
-  curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  curl -q --fail --location --proto '=https' --proto-redir '=https' \
     --connect-timeout 15 --max-time 90 "$@"
+}
+download_asset() {
+  if [[ -t 2 ]]; then
+    download --progress-bar "$@"
+  else
+    download --silent --show-error "$@"
+  fi
 }
 
 # Keep source builds available for development refs.
@@ -16,9 +24,11 @@ if [[ -n "${KEYREF_REF:-}" ]]; then
   work_dir="$(mktemp -d)"
   trap 'rm -rf "$work_dir"' EXIT
   work_dir="$(cd "$work_dir" && pwd -P)"
-  download "https://codeload.github.com/lidessen/keyref/tar.gz/$KEYREF_REF" -o "$work_dir/source.tar.gz"
+  log "Downloading keyref source ($KEYREF_REF)"
+  download_asset "https://codeload.github.com/lidessen/keyref/tar.gz/$KEYREF_REF" -o "$work_dir/source.tar.gz"
   mkdir "$work_dir/source"
   tar -xzf "$work_dir/source.tar.gz" -C "$work_dir/source" --strip-components=1
+  log 'Building and installing keyref'
   KEYREF_BUILD_VERSION="$KEYREF_REF" GOWORK="$work_dir/source/go.work" \
     bash "$work_dir/source/scripts/install-cli.sh"
   exit
@@ -38,10 +48,12 @@ esac
 release_root=https://github.com/lidessen/keyref/releases
 if [[ -n "${KEYREF_VERSION:-}" ]]; then
   [[ "$KEYREF_VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail 'KEYREF_VERSION must be a stable vX.Y.Z tag'
+  tag="$KEYREF_VERSION"
   release_url="$release_root/download/$KEYREF_VERSION"
 else
   # Resolve latest once so both downloads refer to the same release.
-  latest="$(download --head --output /dev/null --write-out '%{url_effective}' "$release_root/latest")"
+  log 'Resolving latest keyref release'
+  latest="$(download --silent --show-error --head --output /dev/null --write-out '%{url_effective}' "$release_root/latest")"
   tag="${latest#"$release_root/tag/"}"
   [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail 'no stable Keyref release found'
   release_url="$release_root/download/$tag"
@@ -53,10 +65,12 @@ target="$bin_dir/keyref"
 work_dir="$(mktemp -d "$bin_dir/.keyref-install.XXXXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 asset="keyref-$os-$arch"
-download --max-filesize 65536 "$release_url/SHA256SUMS" -o "$work_dir/SHA256SUMS"
+download --silent --show-error --max-filesize 65536 "$release_url/SHA256SUMS" -o "$work_dir/SHA256SUMS"
 expected="$(awk -v asset="$asset" 'NF == 2 && $2 == asset { print $1 }' "$work_dir/SHA256SUMS")"
 [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || fail "missing or invalid SHA-256 for $asset"
-download --max-filesize 67108864 "$release_url/$asset" -o "$work_dir/keyref"
+log "Downloading $asset ($tag)"
+download_asset --max-filesize 67108864 "$release_url/$asset" -o "$work_dir/keyref"
+log 'Verifying SHA-256 checksum'
 if command -v sha256sum >/dev/null; then
   actual="$(sha256sum "$work_dir/keyref")"
 else
@@ -65,6 +79,7 @@ fi
 [[ -s "$work_dir/keyref" && "${actual%% *}" == "$expected" ]] || fail "SHA-256 verification failed for $asset"
 
 [[ ! -L "$target" && ( ! -e "$target" || -f "$target" ) ]] || fail "$target is not a regular executable path"
+log "Installing to $target"
 chmod 0755 "$work_dir/keyref"
 mv -f "$work_dir/keyref" "$target"
 printf 'Installed keyref to %s\n' "$target"
